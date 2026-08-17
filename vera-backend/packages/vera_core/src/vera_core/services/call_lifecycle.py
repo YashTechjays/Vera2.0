@@ -10,10 +10,22 @@ recorded — mirror of the old callback endpoint's contract.
 import logging
 from typing import Any
 
-from vera_core.models.enums import CallStatus, FormStatus
+from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
 logger = logging.getLogger(__name__)
+
+
+def no_retry_reason(call: Any) -> ReviewReason | None:
+    """Why *call*'s form must never be auto-redialed, or None when the ordinary retry gates
+    decide — the one encoding of that policy, shared by both post-call resolvers."""
+    # A supervisor's own end is checked first: the more specific human decision.
+    if call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None:
+        return ReviewReason.USER_ENDED
+    if call.terminated_by_flow_rule:
+        return ReviewReason.TERMINATED_BY_RULE
+    return None
+
 
 # A completed call parks the form in AI_PROCESSING — post-call resolution
 # (control_plane.post_call) then drives the EXCEPTION_REVIEW / auto-retry edge.
@@ -71,8 +83,13 @@ def apply_terminal_call_status(
     requeued = False
     try:
         if _FORM_EDGE[status] is FormStatus.CALL_FAILED:
+            # A rule-terminated call is never redialed, whatever closed it (e.g. the
+            # sweeper closing a crashed worker's room as FAILED): a redial would only
+            # re-reach the same terminal answer (VR2-188).
             requeued = fail_and_requeue(
-                form, tenant_max_retries=tenant_max_retries, auto_retry_enabled=auto_retry_enabled
+                form,
+                tenant_max_retries=tenant_max_retries,
+                auto_retry_enabled=auto_retry_enabled and not call.terminated_by_flow_rule,
             )
         else:
             FormStateMachine().transition(

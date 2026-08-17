@@ -40,6 +40,7 @@ from vera_core.events import (
     CallFailedEvent,
     CallFailureReason,
     CallHealthEvent,
+    CallRuleTerminatedEvent,
     IvrExitedEvent,
     PostCallJob,
     PostCallJobBus,
@@ -190,6 +191,7 @@ class WorkerEventConsumer:
             "call.answered": self._handle_call_answered,
             "ivr.exited": self._handle_ivr_exited,
             "call.ended": self._handle_call_ended,
+            "call.rule_terminated": self._handle_call_rule_terminated,
             "call.answer_recorded": self._handle_call_answer_recorded,
             "call.health": self._handle_call_health,
         }
@@ -453,11 +455,37 @@ class WorkerEventConsumer:
             if call.ivr_exited_at is None:
                 call.ivr_exited_at = func.now()
 
+    async def _handle_call_rule_terminated(self, event: WorkerEvent) -> None:
+        """Stamp the rule-terminated fact on the call row the moment the rule fires —
+        durable against a worker crash, ahead of any closeout's retry decision."""
+        if not isinstance(event, CallRuleTerminatedEvent):
+            return
+        ref = parse_room_name(event.room_name)
+        if ref is None:
+            return  # non-vera / console room
+        async with tenant_session(self._sessionmaker, ref.tenant_id) as session:
+            call = (
+                await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
+            ).scalar_one_or_none()
+            if call is None:
+                _retry_young_or_drop(event.room_name, event.ts)
+                return  # voice-lab room (or the Call row hasn't committed yet → retry)
+            call.terminated_by_flow_rule = True
+        logger.info(
+            "call %s terminated by flow rule '%s' — auto-retry suppressed",
+            ref.call_id,
+            event.rule_key,
+        )
+
     async def _handle_call_ended(self, event: WorkerEvent) -> None:
         if not isinstance(event, CallEndedEvent):
             return
         await self._close_and_refill(
-            event.room_name, CallStatus.COMPLETED, trigger="call.ended", ts=event.ts
+            event.room_name,
+            CallStatus.COMPLETED,
+            trigger="call.ended",
+            ts=event.ts,
+            terminated_by_flow_rule=event.terminated_by_flow_rule,
         )
 
     @staticmethod
@@ -756,7 +784,13 @@ class WorkerEventConsumer:
                 )
 
     async def _close_and_refill(
-        self, room_name: str, status: CallStatus, *, trigger: str, ts: int
+        self,
+        room_name: str,
+        status: CallStatus,
+        *,
+        trigger: str,
+        ts: int,
+        terminated_by_flow_rule: bool = False,
     ) -> None:
         """Terminal closeout via the shared path, then refill the freed slot
         (dispatch runs AFTER close_call's transaction committed)."""
@@ -774,7 +808,12 @@ class WorkerEventConsumer:
                 _retry_young_or_drop(room_name, ts)
                 return  # voice-lab room
         closed = await close_call(
-            self._sessionmaker, self._audit, room_name, status, trigger=trigger
+            self._sessionmaker,
+            self._audit,
+            room_name,
+            status,
+            trigger=trigger,
+            terminated_by_flow_rule=terminated_by_flow_rule,
         )
         if closed is not None:
             ref, applied = closed  # applied may be CANCELED (user-requested end wins)

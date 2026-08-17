@@ -1475,3 +1475,40 @@ async def test_below_threshold_still_retries(
     )
 
     assert outcome.status == FormStatus.IN_QUEUE
+
+
+async def test_rule_terminated_call_never_requeues(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A rule-terminated call (VR2-188) never re-queues — it parks for review with
+    TERMINATED_BY_RULE, like the user_ended gate."""
+    ctx = seeded_ai_processing_form
+    await ctx.session.execute(
+        update(Call).where(Call.id == ctx.call_id).values(terminated_by_flow_rule=True)
+    )
+    await ctx.session.flush()
+
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable),
+    # retries remain, and auto-retry is on — without the terminated_by_flow_rule
+    # guard this is exactly the shape that routes to IN_QUEUE.
+    turns = [TranscriptTurn(0, "user", "the plan is not active")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value
+    assert form.retry_count == 0  # the retry budget is untouched
+    assert form.enqueued_at is None  # the review path must not queue the form

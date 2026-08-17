@@ -197,6 +197,42 @@ class TestDocumentValidation:
         with pytest.raises(ValidationError, match="inapplicable_value"):
             FormSchemaDoc.model_validate(doc)
 
+    def _two_task_doc_with_skip(self, skip_to_task: str) -> dict[str, Any]:
+        doc = minimal_doc()
+        doc["sections"]["closing"] = {
+            "title": "Closing",
+            "fields": {
+                "ref": {
+                    "type": "text",
+                    "title": "Ref",
+                    "role": "ask",
+                    "prompt": {"ask": "Reference number?"},
+                }
+            },
+        }
+        doc["tasks"] = [
+            {"task_key": "main", "title": "Main", "sections": ["basics"]},
+            {"task_key": "wrap_up", "title": "Wrap Up", "sections": ["closing"]},
+        ]
+        doc["flow_rules"] = [
+            {
+                "rule_key": "stop",
+                "when": {"field": "sections.basics.plan_type", "op": "eq", "value": "None"},
+                "action": "terminate_call",
+                "skip_to_task": skip_to_task,
+            }
+        ]
+        return doc
+
+    def test_flow_rule_mid_plan_skip_target_rejected(self) -> None:
+        """A terminate_call rule may only route through the terminal task — a mid-plan
+        skip would let the call outlive its own rule-terminated stamp (VR2-188)."""
+        with pytest.raises(ValidationError, match="terminal task"):
+            FormSchemaDoc.model_validate(self._two_task_doc_with_skip("main"))
+
+    def test_flow_rule_terminal_skip_target_accepted(self) -> None:
+        FormSchemaDoc.model_validate(self._two_task_doc_with_skip("wrap_up"))
+
     def test_gated_system_field_without_default_rejected(self) -> None:
         # `required_intake_fields` demands it regardless of applicability, so a gated
         # target is unfillable whenever its gate is off — both create paths would 422.

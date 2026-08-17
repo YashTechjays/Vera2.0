@@ -282,8 +282,14 @@ class CallLifecycleEmitter:
     async def answered(self, *, now_ms: int) -> None:
         await self._emit(CallAnsweredEvent(room_name=self._room_name, ts=now_ms))
 
-    async def ended(self, *, now_ms: int) -> None:
-        await self._emit(CallEndedEvent(room_name=self._room_name, ts=now_ms))
+    async def ended(self, *, now_ms: int, terminated_by_flow_rule: bool = False) -> None:
+        await self._emit(
+            CallEndedEvent(
+                room_name=self._room_name,
+                terminated_by_flow_rule=terminated_by_flow_rule,
+                ts=now_ms,
+            )
+        )
 
     async def ivr_exited(self, *, now_ms: int) -> None:
         await self._emit(IvrExitedEvent(room_name=self._room_name, ts=now_ms))
@@ -725,7 +731,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 logger.warning("no usable plan for %s — emitting call.failed", room_name)
                 await _emit_call_failed(bus, room_name, CallFailureReason.FAILED, now_ms=now_ms)
             elif lifecycle is not None:
-                await lifecycle.ended(now_ms=now_ms)
+                ended_by_rule = controller is not None and controller.ended_by_flow_rule
+                await lifecycle.ended(now_ms=now_ms, terminated_by_flow_rule=ended_by_rule)
             if events_redis is not None:
                 try:
                     await events_redis.aclose()

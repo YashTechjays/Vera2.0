@@ -70,6 +70,19 @@ class CallEndedEvent(BaseModel):
 
     type: Literal["call.ended"] = "call.ended"
     room_name: str
+    # Defaulted so pre-flag payloads still parse; the closeout stamps it on the call row.
+    terminated_by_flow_rule: bool = False
+    ts: int  # epoch milliseconds
+
+
+class CallRuleTerminatedEvent(BaseModel):
+    """Emitted the moment a terminate_call flow rule's directive is accepted, so the
+    fact survives a worker crash — call.ended's flag is only the shutdown-path echo.
+    `rule_key` is a schema constant, never PHI."""
+
+    type: Literal["call.rule_terminated"] = "call.rule_terminated"
+    room_name: str
+    rule_key: str
     ts: int  # epoch milliseconds
 
 
@@ -109,6 +122,7 @@ type WorkerEvent = (
     | CallAnsweredEvent
     | IvrExitedEvent
     | CallEndedEvent
+    | CallRuleTerminatedEvent
     | CallAnswerRecordedEvent
     | CallHealthEvent
 )

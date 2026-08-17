@@ -731,6 +731,42 @@ class TestDirectiveIntervention:
         session.update_agent.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_applied_flow_rule_directives_mark_the_call_rule_ended(self) -> None:
+        """Both redirect kinds set the flag, so call.ended carries it to the retry
+        decision and the control plane never redials a rule-cut call (VR2-188)."""
+        for directive in (
+            Terminate(rule_key="not_covered"),
+            SkipToTask(rule_key="jump", task_key="last_task"),
+        ):
+            controller, _ = _controller()
+            controller.note_task_entered(0)
+            _attach_ordered_session(controller)
+            assert controller.ended_by_flow_rule is False
+            await controller.apply_directive_now(directive)
+            assert controller.ended_by_flow_rule is True
+
+    @pytest.mark.asyncio
+    async def test_reask_directives_never_mark_rule_ended(self) -> None:
+        controller, _ = _controller()
+        controller.note_task_entered(0)
+        _attach_ordered_session(controller)
+        await controller.apply_directive_now(ReAsk(rule_key="r", reason="x"))
+        assert controller.ended_by_flow_rule is False
+
+    @pytest.mark.asyncio
+    async def test_flow_rule_marks_even_when_the_redirect_is_dropped(self) -> None:
+        """The rule held on recorded answers, so the terminal outcome stands even when
+        the redirect no-ops — the live VR2-188 race: extraction settled after the call
+        had already entered wrap-up on its own."""
+        controller, _ = _controller()
+        controller.note_wrap_up_entered()  # active_task_index is None → redirect dropped
+        session, order = _attach_ordered_session(controller)
+        await controller.apply_directive_now(SkipToTask(rule_key="late", task_key="last_task"))
+        assert order == []  # no interrupt, no swap — the drop behavior is unchanged
+        session.update_agent.assert_not_called()
+        assert controller.ended_by_flow_rule is True
+
+    @pytest.mark.asyncio
     async def test_reask_interrupts_then_generates_reply(self) -> None:
         controller, _ = _controller()
         controller.note_task_entered(0)
@@ -784,6 +820,8 @@ class TestDirectiveIntervention:
         session.userdata.engaged = True  # supervisor is driving the call
         await controller.apply_directive_now(Terminate(rule_key="t"))
         assert order == []  # no interrupt, no swap
+        # The human owns the outcome — never attributed to a rule (no retry bar).
+        assert controller.ended_by_flow_rule is False
 
     @pytest.mark.asyncio
     async def test_terminate_tags_the_ambient_span_with_handoff_attrs(

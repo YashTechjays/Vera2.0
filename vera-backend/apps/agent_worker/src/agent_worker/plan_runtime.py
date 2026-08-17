@@ -824,6 +824,11 @@ class PlanRunController:
         # Tasks the call actually entered (main pass or gap pass).
         self._visited_tasks: set[int] = set()
         self._terminated = False
+        # Set when a terminate/skip directive is RECEIVED while the AI owns the call —
+        # even if the redirect itself is dropped (call already wrapping up). Emitted
+        # mid-call and echoed on call.ended so the control plane never redials a call
+        # whose course a flow rule cut short (VR2-188).
+        self._ended_by_flow_rule = False
         # How far the call has PROGRESSED, distinct from `active_task_index` (which is the
         # Observer's extraction cursor and moves backwards during the gap pass). Monotonic,
         # so the forward-only skip guard can never redirect into a completed task.
@@ -1071,6 +1076,12 @@ class PlanRunController:
         if self._observer_manager is not None:
             await self._observer_manager.drain_pending(timeout)
 
+    @property
+    def ended_by_flow_rule(self) -> bool:
+        """Whether a flow-rule directive was received while the AI owned the call —
+        receipt semantics, so it holds even when the redirect itself was dropped."""
+        return self._ended_by_flow_rule
+
     async def apply_directive_now(self, directive: Directive) -> None:
         """Apply a rule-engine redirect immediately, from the Observer's background task:
         interrupt the bot (it goes silent, cutting off any in-flight speech), then swap
@@ -1082,6 +1093,12 @@ class PlanRunController:
         over — the rule engine must not yank the agent around under a live takeover."""
         if self._session is None or takeover_engaged(self._session):
             return
+        if isinstance(directive, Terminate | SkipToTask):
+            # Flag at RECEIPT, not at apply: the rule held on recorded answers, so the
+            # terminal outcome stands even when the redirect below is dropped — e.g. the
+            # call already entered wrap-up on its own (the VR2-188 live race). Under a
+            # takeover (above) the human owns the outcome, so nothing is flagged.
+            self._ended_by_flow_rule = True
         try:
             async with self.lock:
                 if self.active_task_index is None:
