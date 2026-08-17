@@ -131,7 +131,7 @@ billing needs — the SDK's own docstrings say so:
 
 | | field | SDK docstring |
 |---|---|---|
-| `STTMetrics` | `audio_duration: float` | "The duration of the pushed audio in seconds." |
+| `STTMetrics` | `audio_duration: float` | "The duration of the pushed audio in seconds." Measured locally by the plugin, not reported by Deepgram; flushed per ~5s chunk (§5.3) |
 | `TTSMetrics` | `characters_count: int` | "Number of characters synthesized (for character-based billing)." |
 | both | `input_tokens` / `output_tokens: int` | "for token-based billing" — 0 for Deepgram + Cartesia |
 | both | `metadata: Metadata \| None` | `model_name` / `model_provider` |
@@ -149,9 +149,11 @@ existing behavior.
 ### 2.8 What Langfuse accepts (the enabling finding)
 
 - `langfuse.observation.usage_details` — a JSON-string attribute with **arbitrary keys**,
-  validated as `z.record(z.string(), z.number().nonnegative())`, so floats are accepted. Keys are
-  matched *exactly* against the matched model definition's per-usage-type prices and summed. Non-token
-  billing units are fully supported: *"Usage types can be arbitrary strings and differ by LLM provider."*
+  whose keys are matched *exactly* against the matched model definition's per-usage-type prices and
+  summed. Non-token billing units are fully supported: *"Usage types can be arbitrary strings and
+  differ by LLM provider."* **Values must be non-negative integers** — the storage column is
+  `Map(LowCardinality(String), UInt64)` and fractions are truncated or dropped depending on the
+  ingestion route (§5.3). The prior design asserted the opposite; that error is corrected there.
 - `langfuse.observation.type` — `"span" | "generation" | "event"`, default `"span"`. Cost is
   computed only for `generation` (and `embedding`) — see §2.1.
 - Attribute precedence is `langfuse.*` > `gen_ai.*` > framework-specific > generic.
@@ -168,7 +170,7 @@ langfuse.observation.type           = "generation"        # explicit — see bel
 langfuse.observation.model.name     = "flux-general-en"   # langfuse.* wins on precedence
 gen_ai.request.model                = "flux-general-en"   # OTel semantic convention
 gen_ai.provider.name                = "Deepgram"
-langfuse.observation.usage_details  = '{"stt_audio_seconds": 27.64}'
+langfuse.observation.usage_details  = '{"stt_audio_ms": 27640}'
 <call_trace_attributes(room_name)>                        # vera.room, vera.tenant_id,
                                                           # vera.call_id, langfuse.session.id
 ```
@@ -334,7 +336,7 @@ blob onto a span — §8 prohibition 1 stands.
 | D3 | Cost aggregation unit | **One trace per call**, joined cross-process (§3.2). Session id is still stamped, but not depended on for cost. |
 | D4 | Where usage lands | **One Vera-owned generation per billable event** — per-turn attribution; Langfuse sums to the trace total. |
 | D5 | Which speech hook | **Component-level `emitter.on("metrics_collected", ...)`**. `session.on("metrics_collected")` is deprecated and warns per registration; the component emitters are what the SDK itself uses. Rejected: `session_usage_updated`, whose usage is cumulative per `(provider, model)`, has discarded per-request identity, and cannot see the takeover STT. |
-| D6 | Billing units | **Float seconds / integer characters / integer tokens** (§5.3) — matching how each vendor actually bills. |
+| D6 | Billing units | **Integer milliseconds / integer characters / integer tokens** (§5.3). Langfuse stores usage as `UInt64`, so fractional seconds truncate — and because STT usage arrives per ~5s chunk, that error would recur on every event and always downward. Vera rounds to an integer at emit time so the value never depends on ingestion-route semantics. |
 | D7 | Price seeding | **Idempotent script** + `just` recipe + manual runbook + devops-todo row (§7). |
 | D8 | Definition of done | **Live end-to-end verification**, not unit tests alone (§10.3). |
 | D9 | Post-call eval seam | **Instrument in place.** Not routed through `ResilientLLM` (§1 non-goals, §9). |
@@ -362,12 +364,12 @@ vera.usage.audio_seconds            = 27.64      # operational only, NOT priced
 langfuse.observation.type           = "generation"
 langfuse.observation.model.name     = "flux-general-en"
 gen_ai.provider.name                = "Deepgram"
-langfuse.observation.usage_details  = '{"stt_audio_seconds": 27.64}'
+langfuse.observation.usage_details  = '{"stt_audio_ms": 27640}'
 vera.usage.streamed                 = true
 
 # vera.stt.usage — takeover per-track variant, which alone carries a source
 langfuse.observation.model.name     = "nova-3"
-langfuse.observation.usage_details  = '{"stt_audio_seconds": 12.10}'
+langfuse.observation.usage_details  = '{"stt_audio_ms": 12100}'
 vera.usage.source                   = "supervisor"
 
 # vera.eval.generate — one Vertex call (extract, or one judge chunk)
@@ -398,20 +400,57 @@ still billed, so the generation **is** emitted and the characters **are** counte
 `vera.usage.cancelled=true` so barge-in spend stays queryable. Suppressing them would
 under-report real money.
 
-### 5.3 Units: float seconds, not integer milliseconds
+### 5.3 STT units: integer milliseconds — Langfuse cannot store fractions
 
-Deepgram bills **per second** (published rates ~$0.0077/min Nova-3 streaming, ~$0.0065/min Flux
-English streaming; billing is per-second, not rounded to the minute), so per-second usage maps 1:1
-onto the invoice. Langfuse validates `usage_details` values as non-negative numbers, so floats are
-accepted.
+**Langfuse's usage values are integers, end to end.** Verified 2026-08-17 against the Langfuse
+source, not inferred from docs:
 
-The one soft spot: Langfuse's **public read** schema declares `usageDetails` as
-`map<string, integer>`. If a future version tightened ingestion to match, fractional seconds would
-silently truncate. Milliseconds would be immune but make the rate an awkward per-millisecond
-figure. Seconds is the better default; §10.3 step 6 is what confirms it survives ingestion.
+- ClickHouse stores `observations.usage_details` as **`Map(LowCardinality(String), UInt64)`** — an
+  unsigned integer map. A fractional value is **truncated** at insert.
+- The public API declares `usageDetails` as `map<string, integer>`, and
+  `IngestionService.normalizeProvidedUsageDetails` runs every value through `Number(value)`.
+- On the SDK/API ingestion route, `RawUsageDetails` keeps only values satisfying
+  `Number.isInteger(value) && value >= 0` — a float there is **dropped entirely**, not rounded.
+  The OTel attribute route (`langfuse.observation.usage_details`) bypasses that Zod validation and
+  JSON-parses the object as-is, so a float would survive to the `UInt64` insert and be truncated.
 
-Cartesia bills **per character** (1 credit per character; ~$5-37 per million, plan-dependent), so
-`tts_characters` is an integer count with no unit ambiguity.
+**The prior design's premise was wrong.** It asserted ingestion validated
+`z.record(z.string(), z.number().nonnegative())` and therefore "floats are accepted"; that
+validator does not govern this field. Seconds-with-decimals was never a safe unit.
+
+**Truncation would be severe here, not cosmetic — because of how the usage arrives.** Deepgram does
+not report usage at all; the LiveKit plugin measures it locally, summing
+`AudioFrame.duration` (`samples_per_channel / sample_rate`) into a
+`PeriodicCollector(duration=5.0)` that flushes **roughly every 5 seconds** of audio
+(`plugins/deepgram/stt_v2.py:310`, `stt.py:483`). So a call emits one usage event per ~5s chunk,
+each a float sum of frame durations.
+
+Truncation therefore lands on **every event**, and it always floors:
+
+| Unit | A ~5s chunk arrives as | Stored | Error |
+|---|---|---|---|
+| seconds | `4.999999999999998` | `4` | **−20% on that event** |
+| seconds | final flush remainder `0.4` | `0` | **lost entirely** |
+| milliseconds | `4999.999999999998` | `4999` | −0.02% |
+
+Floating-point summation makes `4.999…` at least as likely as `5.000…`, so the seconds error is
+not a rare edge — it is a systematic downward bias across most events of every call, and silent.
+
+**Decision: `stt_audio_ms`, integer milliseconds, rounded in Vera at emit time.** Rounding in Vera
+rather than relying on Langfuse's truncation makes the value an integer *by construction*, so the
+design never depends on which ingestion route it takes — it satisfies the strict
+`Number.isInteger()` path and the `UInt64` column equally.
+
+The cost is an awkward per-millisecond rate (~`$0.00000012833` for Nova-3 at $0.0077/min), which is
+comfortably representable: model prices are Postgres `Decimal`/NUMERIC (arbitrary precision) and
+costs are ClickHouse `Decimal64(12)`, whose floor is `1e-12` — one 5s event costs ~`6.4e-4`. The
+real hazard is operational, not numeric: **entering a per-second or per-minute rate into a
+per-millisecond field is a 1,000× or 60,000× error**, so §7.1 and the runbook name the unit in the
+env var itself and §10.3 step 6 checks the arithmetic by hand.
+
+Cartesia bills **per character** (1 credit per character; ~$5-37 per million, plan-dependent) and
+`characters_count` is already an `int`, so `tts_characters` needs no unit conversion. Token counts
+are likewise integers. **STT is the only surface whose unit changes.**
 
 ### 5.4 Vertex token mapping for the eval generations
 
@@ -487,11 +526,16 @@ Follows the `scripts/bootstrap_platform_admin.py` pattern: idempotent, env-drive
   precedent. The application never needs a price, so this keeps exactly one place prices live with
   no drifting second copy inside Vera. Reinforces D1.
 
-| `modelName` | `matchPattern` | usage key |
-|---|---|---|
-| `vera-deepgram-flux` | `(?i)^flux-.*$` | `stt_audio_seconds` |
-| `vera-deepgram-nova` | `(?i)^nova-.*$` | `stt_audio_seconds` |
-| `vera-cartesia-sonic` | `(?i)^sonic-.*$` | `tts_characters` |
+| `modelName` | `matchPattern` | usage key | rate env var |
+|---|---|---|---|
+| `vera-deepgram-flux` | `(?i)^flux-.*$` | `stt_audio_ms` | `LANGFUSE_PRICE_STT_FLUX_PER_MS` |
+| `vera-deepgram-nova` | `(?i)^nova-.*$` | `stt_audio_ms` | `LANGFUSE_PRICE_STT_NOVA_PER_MS` |
+| `vera-cartesia-sonic` | `(?i)^sonic-.*$` | `tts_characters` | `LANGFUSE_PRICE_TTS_SONIC_PER_CHARACTER` |
+
+The env var names carry the unit (`_PER_MS`) because the rate is a small, hard-to-eyeball number:
+a Deepgram per-millisecond rate is ~`$0.00000012833`, and entering the published per-minute figure
+(`$0.0077`) instead would overstate cost by 60,000× while still rendering a plausible dollar
+amount. The seeder logs each rate next to its unit for the same reason.
 
 Prices go in via `pricingTiers[0].prices`, **not** the deprecated flat
 `inputPrice`/`outputPrice`/`totalPrice`, which cannot express a custom usage key at all.
@@ -611,7 +655,11 @@ The pure/wiring split makes most assertions cheap — `usage_span_attributes` ta
 `STTMetrics`/`TTSMetrics`, no session, room, or event loop:
 
 - Attribute shape per metric type: `usage_details` parses back to exactly
-  `{"stt_audio_seconds": ...}` / `{"tts_characters": ...}`; tokens appear only when non-zero;
+  `{"stt_audio_ms": ...}` / `{"tts_characters": ...}`; tokens appear only when non-zero;
+- **Every `usage_details` value is an `int`** — asserted with `isinstance(v, int)` across a table
+  of awkward `audio_duration` floats (`4.999999999999998`, a sub-millisecond remainder, `0.0`).
+  A float here is truncated or dropped by Langfuse depending on route (§5.3), and both failures are
+  silent; `27.64 → 27` in seconds would have been a 20% under-count per event.
   the model attributes track `metadata.model_name`.
 - **`langfuse.observation.type == "generation"` on every cost-bearing span** — the §2.1 regression.
   Nothing else about the output looks wrong when this is missing; the cost column just goes blank.
@@ -669,10 +717,12 @@ what Vera emits.
 5. **The post-call eval and summary generations appear in the SAME trace as the call**, and that
    trace's total cost includes them. This is the whole point of §3.2 and the one thing no unit
    test covers — it also proves Langfuse accepts spans arriving after the trace's root span ended.
-6. **Check the arithmetic by hand** — `characters × rate ≈ displayed cost`, and the same for
-   audio seconds. This is the only step that catches a seconds-vs-minutes mismatch, which would
-   otherwise render a perfectly plausible number that is off by 60×, and it confirms the §5.3
-   float-seconds decision survives ingestion.
+6. **Check the arithmetic by hand** — `characters × rate ≈ displayed cost`, and
+   `audio_ms × rate ≈ displayed cost`. This is the only step that catches a unit mismatch between
+   the instrumentation and the seeded rate (per-ms vs per-second vs per-minute is 1,000× or
+   60,000×), which otherwise renders a perfectly plausible number. Also confirm a `vera.stt.usage`
+   observation's stored usage is a **whole number of milliseconds** matching what Vera emitted —
+   proving no truncation or drop occurred in ingestion (§5.3).
 7. **Confirm the LLM cache split landed** (§2.6): on a multi-turn call, `llm_request` generations
    late in the call show a **non-zero `cached`** in `usage_details`, `input + cached` equals the
    `gen_ai.usage.input_tokens` the SDK set, and the cost is visibly lower than pricing the whole
@@ -687,7 +737,8 @@ exact tree being committed.
 | Risk | Mitigation |
 |---|---|
 | Late-arriving spans may not join an already-exported trace in Langfuse | §10.3 step 5 verifies directly; if it fails, fall back to session correlation plus a Metrics-API query for the per-call total (still avoids the #15109 UI path) |
-| Float seconds truncated by a future ingestion tightening (§5.3) | §10.3 step 6 detects it; switching to milliseconds is a one-line change in one module plus the seeded rate |
+| A per-second or per-minute rate entered into the per-millisecond price field | A 1,000×/60,000× error that renders as a plausible number. The env var and runbook name the unit (`..._PER_MS`), and §10.3 step 6 checks the arithmetic by hand — the only step that catches it |
+| Usage values silently truncated or dropped for non-integers | Vera rounds to `int` at emit time (§5.3), so integrality never depends on the ingestion route; asserted in the unit tests (§10.1) |
 | Redis trace-link key expiring before a sweeper-retried post-call job | 24h TTL (§3.2); on miss the eval still traces, just as its own trace — degraded, not broken |
 | Uncovered model families render blank cost silently | Seeder coverage log (§7.2) + §10.3 step 4 checks every generation |
 | Langfuse changes the implicit span→generation promotion rule | Type set explicitly (§3.1), so the promotion rule is never depended on |
