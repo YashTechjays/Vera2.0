@@ -2,6 +2,8 @@ import json
 from typing import Any
 
 import pytest
+from livekit.agents.metrics import STTMetrics, TTSMetrics
+from livekit.agents.metrics.base import Metadata
 
 from agent_worker.cascade import (
     build_speech_components,
@@ -11,6 +13,7 @@ from agent_worker.cascade import (
     resolve_thinking_attrs,
     resolve_thinking_config,
 )
+from vera_core.observability.usage_spans import SPAN_STT_USAGE, SPAN_TTS_USAGE
 
 
 def test_cascade_uses_turn_handling_only() -> None:
@@ -183,6 +186,37 @@ def test_llm_trace_attributes_prefixes_vera_llm() -> None:
     assert attrs == {"vera.llm.model": "gemini-3.5-flash", "vera.llm.thinking_level": "low"}
 
 
+def _stt_metrics() -> STTMetrics:
+    return STTMetrics(
+        request_id="r",
+        timestamp=1.0,
+        duration=0.0,
+        label="deepgram.STTv2",
+        audio_duration=5.0,
+        streamed=True,
+        metadata=Metadata(model_name="flux-general-en", model_provider="Deepgram"),
+    )
+
+
+def _tts_metrics() -> TTSMetrics:
+    return TTSMetrics(
+        request_id="r",
+        timestamp=1.0,
+        label="cartesia.TTS",  # required by the pydantic model
+        ttfb=0.1,
+        duration=1.0,
+        audio_duration=2.0,
+        cancelled=False,
+        characters_count=42,
+        streamed=True,
+        metadata=Metadata(model_name="sonic-3.5-2026-05-04", model_provider="Cartesia"),
+    )
+
+
+def _span(otel_spans: Any, name: str) -> Any:
+    return next(s for s in otel_spans.get_finished_spans() if s.name == name)
+
+
 class TestUsageSpanWiring:
     """Without these listeners, Deepgram and Cartesia spend is invisible in Langfuse:
     LiveKit reports STT usage only to the OTel Metrics API (a no-op meter here) and
@@ -201,73 +235,23 @@ class TestUsageSpanWiring:
         monkeypatch.setenv("CARTESIA_API_KEY", "test-key")
 
     def test_cascade_tts_emits_a_usage_generation(self, otel_spans: Any) -> None:
-        from livekit.agents.metrics import TTSMetrics
-        from livekit.agents.metrics.base import Metadata
-
-        from vera_core.observability.usage_spans import SPAN_TTS_USAGE
-
         _stt, tts = build_speech_components()
-        tts.emit(
-            "metrics_collected",
-            TTSMetrics(
-                request_id="r",
-                timestamp=1.0,
-                label="cartesia.TTS",  # required by the pydantic model
-                ttfb=0.1,
-                duration=1.0,
-                audio_duration=2.0,
-                cancelled=False,
-                characters_count=42,
-                streamed=True,
-                metadata=Metadata(model_name="sonic-3.5-2026-05-04", model_provider="Cartesia"),
-            ),
-        )
-        span = next(s for s in otel_spans.get_finished_spans() if s.name == SPAN_TTS_USAGE)
+        tts.emit("metrics_collected", _tts_metrics())
+        span = _span(otel_spans, SPAN_TTS_USAGE)
         assert span.attributes["gen_ai.request.model"] == "sonic-3.5-2026-05-04"
 
     def test_cascade_stt_emits_a_usage_generation(self, otel_spans: Any) -> None:
-        from livekit.agents.metrics import STTMetrics
-        from livekit.agents.metrics.base import Metadata
-
-        from vera_core.observability.usage_spans import SPAN_STT_USAGE
-
         stt, _tts = build_speech_components()
-        stt.emit(
-            "metrics_collected",
-            STTMetrics(
-                request_id="r",
-                timestamp=1.0,
-                duration=0.0,
-                label="deepgram.STTv2",
-                audio_duration=5.0,
-                streamed=True,
-                metadata=Metadata(model_name="flux-general-en", model_provider="Deepgram"),
-            ),
-        )
-        span = next(s for s in otel_spans.get_finished_spans() if s.name == SPAN_STT_USAGE)
+        stt.emit("metrics_collected", _stt_metrics())
+        span = _span(otel_spans, SPAN_STT_USAGE)
         assert json.loads(span.attributes["langfuse.observation.usage_details"]) == {
             "stt_audio_ms": 5000
         }
 
     def test_the_room_name_reaches_both_generations(self, otel_spans: Any) -> None:
-        from livekit.agents.metrics import STTMetrics
-        from livekit.agents.metrics.base import Metadata
-
-        from vera_core.observability.usage_spans import SPAN_STT_USAGE
-
         room = "call--00000000-0000-0000-0000-0000000000aa--00000000-0000-0000-0000-0000000000bb"
-        stt, _tts = build_speech_components(room_name=room)
-        stt.emit(
-            "metrics_collected",
-            STTMetrics(
-                request_id="r",
-                timestamp=1.0,
-                duration=0.0,
-                label="deepgram.STTv2",
-                audio_duration=5.0,
-                streamed=True,
-                metadata=Metadata(model_name="flux-general-en", model_provider="Deepgram"),
-            ),
-        )
-        span = next(s for s in otel_spans.get_finished_spans() if s.name == SPAN_STT_USAGE)
-        assert span.attributes["langfuse.session.id"] == room
+        stt, tts = build_speech_components(room_name=room)
+        stt.emit("metrics_collected", _stt_metrics())
+        tts.emit("metrics_collected", _tts_metrics())
+        assert _span(otel_spans, SPAN_STT_USAGE).attributes["langfuse.session.id"] == room
+        assert _span(otel_spans, SPAN_TTS_USAGE).attributes["langfuse.session.id"] == room

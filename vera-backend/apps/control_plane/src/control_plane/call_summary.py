@@ -25,8 +25,7 @@ from sqlalchemy import select
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Transcript
-from vera_core.observability import TraceLinkStore, call_trace_attributes
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
 from vera_core.transcript import ROLE_COACHING, ROLE_DTMF, ROLE_WHISPER, TurnRole, source_for_role
 
 if TYPE_CHECKING:

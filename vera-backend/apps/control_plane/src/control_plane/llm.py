@@ -28,10 +28,8 @@ from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_MODEL_ATTR,
     OBSERVATION_TYPE_ATTR,
-    USAGE_CACHED,
     USAGE_DETAILS_ATTR,
-    USAGE_INPUT,
-    USAGE_OUTPUT,
+    llm_token_usage,
 )
 
 logger = logging.getLogger("control_plane.llm")
@@ -41,28 +39,24 @@ SPAN_EVAL_GENERATE = "vera.eval.generate"
 _tracer = trace.get_tracer("vera.control_plane.post_call_eval")
 
 
+def _token(usage: Any, field: str) -> int:
+    """One Vertex usage counter, absent or None reading as zero — the SDK omits fields
+    it has no value for, and `usage` itself is None on a blocked response."""
+    return int(getattr(usage, field, 0) or 0)
+
+
 def _eval_usage(usage: Any) -> dict[str, int]:
     """Vertex token counts mapped onto Langfuse usage keys (design §5.4).
 
-    `prompt_token_count` INCLUDES cached tokens, so `input` is reduced by them —
-    sending both whole would double-count. Thinking tokens bill as output, and
-    gemini-2.5-flash is a thinking model Vera configures thinking on. `input`/`output`
-    match the vocabulary the SDK's own LLM spans use, so one model price entry prices
-    both surfaces.
+    Thinking tokens bill as output, and gemini-2.5-flash is a thinking model Vera
+    configures thinking on. Shares `llm_token_usage` with the SDK's own LLM spans, so
+    one model price entry prices both surfaces.
     """
-    cached = getattr(usage, "cached_content_token_count", 0) or 0
-    prompt = getattr(usage, "prompt_token_count", 0) or 0
-    output = (getattr(usage, "candidates_token_count", 0) or 0) + (
-        getattr(usage, "thoughts_token_count", 0) or 0
+    return llm_token_usage(
+        prompt=_token(usage, "prompt_token_count"),
+        cached=_token(usage, "cached_content_token_count"),
+        output=_token(usage, "candidates_token_count") + _token(usage, "thoughts_token_count"),
     )
-    details: dict[str, int] = {}
-    if prompt - cached:
-        details[USAGE_INPUT] = prompt - cached
-    if cached:
-        details[USAGE_CACHED] = cached
-    if output:
-        details[USAGE_OUTPUT] = output
-    return details
 
 
 def _turns_block(turns: list[TranscriptTurn]) -> str:

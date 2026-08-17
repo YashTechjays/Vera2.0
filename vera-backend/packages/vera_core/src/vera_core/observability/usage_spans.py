@@ -57,14 +57,32 @@ STT_AUDIO_MS = "stt_audio_ms"
 TTS_CHARACTERS = "tts_characters"
 USAGE_INPUT = "input"
 USAGE_OUTPUT = "output"
-# Defined here with its siblings, not at each use site: the post-call eval (llm.py)
-# and the export-time LLM correction (llm_usage_export.py) both emit this key, and two
-# copies of a string the seeded prices must match exactly is a drift waiting to happen.
+# Emitted only through `llm_token_usage` below, which the post-call eval (llm.py) and
+# the export-time LLM correction (llm_usage_export.py) both go through — so the string
+# the seeded prices must match exactly exists in exactly one place.
 USAGE_CACHED = "cached"
 
 type UsageAttributes = dict[str, str | int | float | bool]
 
 _tracer = trace.get_tracer("vera.observability.usage")
+
+
+def llm_token_usage(*, prompt: int, cached: int, output: int) -> dict[str, int]:
+    """LLM token counts as usage keys, zeros omitted.
+
+    `input` is reduced by *cached* because every provider's prompt count INCLUDES the
+    cached tokens — sending both whole double-counts the hits — so `input + cached`
+    always reconstructs the original prompt count. Zeros are omitted because a
+    zero-valued key would demand a price entry for a unit nobody bills.
+    """
+    details: dict[str, int] = {}
+    if prompt - cached:
+        details[USAGE_INPUT] = prompt - cached
+    if cached:
+        details[USAGE_CACHED] = cached
+    if output:
+        details[USAGE_OUTPUT] = output
+    return details
 
 
 def _billable_tokens(metrics: STTMetrics | TTSMetrics) -> dict[str, int]:

@@ -4,6 +4,7 @@
 import asyncio
 import json
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from livekit import rtc
@@ -26,6 +27,7 @@ from vera_core.observability.usage_spans import (
     attach_usage_spans,
     usage_span_attributes,
 )
+from vera_core.stt import ResilientSTT, STTSpec
 
 
 def _stt(**over: Any) -> STTMetrics:
@@ -317,10 +319,6 @@ class TestResilientSTTChain:
         `registry` and a patched `FallbackAdapter`, so this fails without a full
         fake of livekit's STT protocol (`test_stt.py`'s own documented reason for
         not covering FallbackAdapter integration there)."""
-        from unittest.mock import patch
-
-        from vera_core.stt import ResilientSTT, STTSpec
-
         chain = _FakeEmitter()  # stands in for the FallbackAdapter _adapter() builds
 
         def _fake_provider(spec: Any, secrets: Any, http_session: Any) -> Any:

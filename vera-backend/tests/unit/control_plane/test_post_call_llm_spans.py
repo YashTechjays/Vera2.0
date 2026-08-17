@@ -1,6 +1,7 @@
 """The post-call eval's Vertex calls emit zero spans today (design §2.5) — the largest
 untraced LLM spend in the system. These assert the generation they now emit."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -27,7 +28,7 @@ class _FakeResponse:
 def _client(response: _FakeResponse) -> VertexLLMClient:
     client = VertexLLMClient.__new__(VertexLLMClient)
     client._model = "gemini-2.5-flash"
-    client._semaphore = __import__("asyncio").Semaphore(4)
+    client._semaphore = asyncio.Semaphore(4)
 
     class _Models:
         async def generate_content(self, **_: Any) -> _FakeResponse:
@@ -47,20 +48,28 @@ def _span(exporter: Any) -> Any:
     return next(s for s in exporter.get_finished_spans() if s.name == SPAN_EVAL_GENERATE)
 
 
+def _usage(exporter: Any) -> dict[str, int]:
+    # The literal attribute name, not the constant: this IS the Langfuse wire contract,
+    # so a rename of the constant must still fail here.
+    usage: dict[str, int] = json.loads(
+        _span(exporter).attributes["langfuse.observation.usage_details"]
+    )
+    return usage
+
+
 @pytest.mark.asyncio
 class TestEvalGeneration:
     async def test_a_generation_is_emitted_with_token_usage(self, otel_spans: Any) -> None:
         client = _client(_FakeResponse("[]", _FakeUsage(8412, 611, 0, 0)))
         await client._generate("prompt", {}, pass_name="extract")
-        usage = json.loads(_span(otel_spans).attributes["langfuse.observation.usage_details"])
-        assert usage == {"input": 8412, "output": 611}
+        assert _usage(otel_spans) == {"input": 8412, "output": 611}
 
     async def test_cached_tokens_are_split_out_of_input(self, otel_spans: Any) -> None:
         # prompt_token_count INCLUDES cached tokens; sending it whole alongside `cached`
         # would double-count them (design §5.4).
         client = _client(_FakeResponse("[]", _FakeUsage(10000, 500, 9000, 0)))
         await client._generate("prompt", {}, pass_name="extract")
-        usage = json.loads(_span(otel_spans).attributes["langfuse.observation.usage_details"])
+        usage = _usage(otel_spans)
         assert usage == {"input": 1000, "cached": 9000, "output": 500}
         assert usage["input"] + usage["cached"] == 10000
 
@@ -68,8 +77,7 @@ class TestEvalGeneration:
         # gemini-2.5-flash is a thinking model and Vera configures thinking on it.
         client = _client(_FakeResponse("[]", _FakeUsage(100, 20, 0, 80)))
         await client._generate("prompt", {}, pass_name="judge")
-        usage = json.loads(_span(otel_spans).attributes["langfuse.observation.usage_details"])
-        assert usage == {"input": 100, "output": 100}
+        assert _usage(otel_spans) == {"input": 100, "output": 100}
 
     async def test_the_span_is_typed_a_generation_and_names_its_model(
         self, otel_spans: Any

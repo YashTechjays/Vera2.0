@@ -191,12 +191,12 @@ class PostCallConsumer:
 
     async def _process_job(self, job: PostCallJob) -> None:
         room_name = room_name_for_call(job.tenant_id, job.call_id)
-        parent = None
-        if self._trace_links is not None:
-            # Joins the worker's trace for this call, so every eval generation below
-            # sums into that call's total cost. A missing/expired link yields None and
-            # this becomes its own trace root — degraded, not broken.
-            parent = await self._trace_links.resolve(room_name)
+        # Joins the worker's trace for this call, so every eval generation below sums
+        # into that call's total cost. A missing/expired link yields None and this
+        # becomes its own trace root — degraded, not broken.
+        parent = (
+            await self._trace_links.resolve(room_name) if self._trace_links is not None else None
+        )
         with _tracer.start_as_current_span(
             "vera.post_call.eval",
             context=parent,

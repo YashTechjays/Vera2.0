@@ -12,7 +12,6 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
 
 from google.genai.types import ThinkingConfig
 from livekit import rtc
@@ -620,7 +619,7 @@ async def entrypoint(ctx: JobContext) -> None:
         takeover_transcriber: TakeoverTranscriber | None = None
         if turn_sink is not None and speaker is not None:
 
-            def _takeover_stt(attribution: SpeakerAttribution) -> Any:
+            def _takeover_stt(attribution: SpeakerAttribution) -> deepgram.STT:
                 # One STT per subscribed track, so one listener per track. The parent
                 # context is the entrypoint's, NOT the ambient one: a supervisor who
                 # joins after takeover starts arrives via room.on("track_subscribed"),

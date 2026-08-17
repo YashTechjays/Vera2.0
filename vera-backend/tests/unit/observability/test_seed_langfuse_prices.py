@@ -21,6 +21,8 @@ _RATES = {
     "LANGFUSE_PRICE_LLM_GEMINI_CACHED_PER_TOKEN": "0.000000075",
 }
 
+_BY_NAME = {m.model_name: m for m in MODELS}
+
 
 class TestRates:
     def test_every_model_rate_resolves_from_env(self) -> None:
@@ -60,22 +62,19 @@ class TestPayload:
 
     def test_prices_use_the_usage_keys_the_instrumentation_sends(self) -> None:
         rates = resolve_rates(_RATES)
-        by_name = {m.model_name: m for m in MODELS}
-        flux = build_payload(by_name["vera-deepgram-flux"], None, rates=rates)
+        flux = build_payload(_BY_NAME["vera-deepgram-flux"], None, rates=rates)
         assert set(flux["pricingTiers"][0]["prices"]) == {"stt_audio_ms"}
-        gemini = build_payload(by_name["vera-gemini"], None, rates=rates)
+        gemini = build_payload(_BY_NAME["vera-gemini"], None, rates=rates)
         assert set(gemini["pricingTiers"][0]["prices"]) == {"input", "output", "cached"}
 
     def test_patterns_match_the_models_vera_actually_uses(self) -> None:
-        by_name = {m.model_name: m for m in MODELS}
-        assert re.match(by_name["vera-deepgram-flux"].match_pattern, "flux-general-en")
-        assert re.match(by_name["vera-deepgram-nova"].match_pattern, "nova-3")
-        assert re.match(by_name["vera-cartesia-sonic"].match_pattern, "sonic-3.5-2026-05-04")
-        assert re.match(by_name["vera-gemini"].match_pattern, "gemini-2.5-flash")
-        assert re.match(by_name["vera-gemini"].match_pattern, "gemini-3.1-flash-lite")
+        assert re.match(_BY_NAME["vera-deepgram-flux"].match_pattern, "flux-general-en")
+        assert re.match(_BY_NAME["vera-deepgram-nova"].match_pattern, "nova-3")
+        assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, "sonic-3.5-2026-05-04")
+        assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-2.5-flash")
+        assert re.match(_BY_NAME["vera-gemini"].match_pattern, "gemini-3.1-flash-lite")
 
     def test_patterns_survive_a_model_version_bump(self) -> None:
         # Family patterns, not exact versions: an exact pattern would silently zero cost
         # on the next bump, and a missing match looks identical to "no data".
-        by_name = {m.model_name: m for m in MODELS}
-        assert re.match(by_name["vera-cartesia-sonic"].match_pattern, "sonic-4")
+        assert re.match(_BY_NAME["vera-cartesia-sonic"].match_pattern, "sonic-4")

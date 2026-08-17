@@ -32,10 +32,8 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_TYPE_ATTR,
-    USAGE_CACHED,
     USAGE_DETAILS_ATTR,
-    USAGE_INPUT,
-    USAGE_OUTPUT,
+    llm_token_usage,
 )
 
 logger = logging.getLogger("vera.observability")
@@ -45,29 +43,21 @@ LLM_METRICS_ATTR = "lk.llm_metrics"
 
 
 def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
-    """Usage keys for one `lk.llm_metrics` blob, or None when it is unusable.
-
-    `input` is reduced by the cached count because `prompt_tokens` includes it —
-    sending both whole would double-count the hits. `input + cached` therefore always
-    reconstructs the SDK's original `prompt_tokens`.
-    """
+    """Usage keys for one `lk.llm_metrics` blob, or None when it is unusable."""
     try:
         metrics = json.loads(raw_metrics)
     except (TypeError, ValueError):
         return None
     if not isinstance(metrics, dict):
         return None
-    prompt = int(metrics.get("prompt_tokens", 0) or 0)
-    cached = int(metrics.get("prompt_cached_tokens", 0) or 0)
-    completion = int(metrics.get("completion_tokens", 0) or 0)
-    details: dict[str, int] = {}
-    if prompt - cached:
-        details[USAGE_INPUT] = prompt - cached
-    if cached:
-        details[USAGE_CACHED] = cached
-    if completion:
-        details[USAGE_OUTPUT] = completion
-    return details or None
+    return (
+        llm_token_usage(
+            prompt=int(metrics.get("prompt_tokens", 0) or 0),
+            cached=int(metrics.get("prompt_cached_tokens", 0) or 0),
+            output=int(metrics.get("completion_tokens", 0) or 0),
+        )
+        or None
+    )
 
 
 def _enrich(span: ReadableSpan) -> ReadableSpan:
