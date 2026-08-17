@@ -631,17 +631,12 @@ export function IbvProvider({
     [disputes, flags, setFlags, setValue],
   )
 
+  // Marks disputes applied WITHOUT touching values — like the per-field ✓ — so a
+  // manual correction made before resolving is saved, never reverted to the
+  // captured value (a disputed field already holds that value unless edited).
   const resolveOpenDisputes = useCallback(
     (paths: string[]) => {
       setFlagsState((prev) => applyFlagsForPaths(disputes, prev, paths))
-      setValues((prev) => {
-        const next = { ...prev }
-        for (const path of paths) {
-          const d = disputes[path]
-          if (d) next[path] = d.currentValue
-        }
-        return next
-      })
       setDirty(true)
       setSaveState("idle")
     },

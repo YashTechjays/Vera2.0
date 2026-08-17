@@ -73,11 +73,10 @@ describe("applyFlagsForPaths", () => {
     "c.d": { previousValue: "3", currentValue: "4" },
   }
 
-  it("marks every dispute path applied (and not swapped)", () => {
+  it("marks every dispute path applied, preserving an existing swap", () => {
     const next = applyFlagsForPaths(disputes, flags, Object.keys(disputes))
-    expect(next["a.b"].applied).toBe(true)
-    expect(next["a.b"].swapped).toBe(false)
-    expect(next["c.d"].applied).toBe(true)
+    expect(next["a.b"]).toEqual({ applied: true, swapped: true })
+    expect(next["c.d"]).toEqual({ applied: true, swapped: false })
   })
 
   it("touches only the given paths, ignoring ones with no dispute", () => {
