@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from vera_core.forms.authoring import (
+    COVERAGE_CONFIRMATION_RULE,
     DATE_VALIDATION,
     YES_NO,
     YES_NO_NA,
@@ -1217,7 +1218,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 title="Infertility Coverage",
                 prompt=(
                     "Work through infertility treatment one service at a time, and move "
-                    "between services with a short transition naming the next one."
+                    "between services with a short transition naming the next one. "
+                    + COVERAGE_CONFIRMATION_RULE
                 ),
                 intro="Now I'd like to verify some infertility coverage details.",
                 outro=(
@@ -1230,7 +1232,8 @@ def build_ibv_standard() -> FormSchemaDoc:
                 title="Diagnostic Coverage",
                 prompt=(
                     "Read the codes as a natural group rather than one at a time, unless the "
-                    "representative asks you to slow down and take them individually."
+                    "representative asks you to slow down and take them individually. "
+                    + COVERAGE_CONFIRMATION_RULE
                 ),
                 intro="Now I'd like to verify some diagnostic coverage details.",
                 outro="Thank you. One moment while I organize these details.",
@@ -1239,7 +1242,10 @@ def build_ibv_standard() -> FormSchemaDoc:
             Task(
                 task_key="general_office_coverage",
                 title="General Office Coverage",
-                prompt="Work through general office visit coverage one service at a time.",
+                prompt=(
+                    "Work through general office visit coverage one service at a time. "
+                    + COVERAGE_CONFIRMATION_RULE
+                ),
                 intro="Now I'd like to verify some general office visits coverage.",
                 outro="Thanks. One moment while I organize these details.",
                 sections=["general_coverage"],
@@ -1266,7 +1272,7 @@ def build_ibv_standard() -> FormSchemaDoc:
                 title="Male Partner Coverage",
                 prompt=(
                     "Establish whether male partner fertility services are covered before "
-                    "asking any per-service question."
+                    "asking any per-service question. " + COVERAGE_CONFIRMATION_RULE
                 ),
                 intro="Now I'd like to ask about male partner fertility coverage.",
                 outro="Thanks, that covers the male partner benefits. Just a moment.",

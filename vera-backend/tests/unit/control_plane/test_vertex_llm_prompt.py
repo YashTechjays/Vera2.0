@@ -118,6 +118,16 @@ def test_extract_prompt_names_the_literals_a_requested_path_declares() -> None:
     assert "- sections.cov.coinsurance (" not in prompt  # a path declaring none is not annotated
 
 
+def test_extract_prompt_says_valid_is_not_a_coverage_answer() -> None:
+    """The top-up reads the same transcript as the Observer and writes the same column, so the
+    rule that keeps "that code is valid" out of a coverage field has to hold on both sides."""
+    marker = "has described the CODE"
+    assert marker in build_extract_prompt(["sections.dx.cpt_58340.covered"], [])
+    assert marker in build_extract_prompt(["sections.dx.diagnostic_testing_covered"], [])
+    # "coverage" is not "covered": this leaf records a network rule, not a benefit status.
+    assert marker not in build_extract_prompt(["sections.cov.out_of_network_coverage"], [])
+
+
 def test_extract_prompt_is_unchanged_when_no_requested_path_declares_a_literal() -> None:
     """The rule explains a clause, so a form with no such clause must not pay for it."""
     paths = ["sections.cov.network_status"]

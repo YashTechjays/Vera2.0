@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from vera_core.forms.authoring import COVERAGE_CONFIRMATION_RULE
 from vera_core.forms.call_plan import (
     CONFIRM_SLOT_RE,
     CallPlan,
@@ -198,6 +199,27 @@ class TestTaskText:
             for t in rendered.tasks:
                 assert "vary how you" not in t.prompt.lower()
                 assert "That is wording only" not in t.prompt
+
+    def test_coverage_tasks_reject_valid_as_a_coverage_confirmation(self) -> None:
+        """A live call took "that code is valid" for a Yes and advanced. "Valid"/"billable"
+        describe the code, not the plan's benefit, so every task collecting a covered/not-covered
+        answer says so — in both catalog schemas."""
+        for key in (
+            "infertility_coverage",
+            "diagnostic_coverage",
+            "general_office_coverage",
+            "male_partner",
+        ):
+            assert COVERAGE_CONFIRMATION_RULE in task(key).prompt, key
+
+        disease = next(t for t in disease_only_prompts().tasks if t.task_key == "disease_coverage")
+        assert COVERAGE_CONFIRMATION_RULE in disease.prompt
+
+    def test_the_coverage_rule_stays_off_the_active_coverage_question(self) -> None:
+        """`policy_basics` asks whether coverage is "active" — the one place that word IS the
+        answer, so the rule listing it as a non-answer must not land there and contradict it."""
+        basics = next(t for t in disease_only_prompts().tasks if t.task_key == "policy_basics")
+        assert COVERAGE_CONFIRMATION_RULE not in basics.prompt
 
     def test_cpt_questions_carry_no_answer_instruction(self) -> None:
         # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.

@@ -44,7 +44,9 @@ from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
 from vera_core.forms.extraction_prompt import (
     ANSWER_UNIT_FORMAT_RULE,
+    COVERAGE_STATUS_RULE,
     EXACT_VALUE_RULE,
+    is_coverage_status_path,
     special_values_hint,
 )
 from vera_core.forms.review import is_blank_answer
@@ -163,13 +165,17 @@ def _extraction_instructions(task: PlanTask) -> str:
         # over three services with three different cycle limits it changed neither attribution
         # nor formatting, and cost ~1.3k chars on the CPT panel, re-sent every pass.
         lines.append(f"- {f.path}: {f.title}{vocabulary}{note}")
+    # Same conditioning as the exact-value rule above: 250 chars on a prompt re-sent every pass.
+    collects_coverage = any(is_coverage_status_path(f.path) for f in task.fields)
+    exact_rule = f" {EXACT_VALUE_RULE}" if names_exact else ""
+    coverage_rule = f" {COVERAGE_STATUS_RULE}" if collects_coverage else ""
     preamble = (
         "You extract answers from a phone call between an insurance-verification agent and "
         "a payer representative. Return ONLY the fields below that the representative has "
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
         "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE + ' ' if names_exact else ''}"
+        f"{ANSWER_UNIT_FORMAT_RULE}{exact_rule}{coverage_rule} "
         "Use only these field_path values:"
     )
     return "\n".join([preamble, *lines])
