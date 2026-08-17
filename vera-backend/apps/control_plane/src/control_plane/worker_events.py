@@ -807,7 +807,9 @@ class WorkerEventConsumer:
             )
 
     async def _enqueue_post_call_eval(self, ref: "RoomRef") -> None:
-        """Write the pre-eval CallFormSnapshot and enqueue the eval job.
+        """Enqueue the eval job, backfilling the CallFormSnapshot if dispatch
+        predates snapshot-at-dispatch (a closeout-time before_state already
+        contains the call's own live answers, so its diff undercounts).
 
         Redelivery-safe: a second closeout of the same call finds the form no
         longer in AI_PROCESSING inside evaluate_call, which skips it."""
@@ -824,7 +826,7 @@ class WorkerEventConsumer:
                     select(CallFormSnapshot.id).where(CallFormSnapshot.call_id == ref.call_id)
                 )
             ).scalar_one_or_none()
-            if existing is None:  # redelivered closeout → snapshot already taken
+            if existing is None:  # normally taken at dispatch — legacy in-flight calls only
                 session.add(
                     CallFormSnapshot(
                         tenant_id=ref.tenant_id,

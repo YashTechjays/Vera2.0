@@ -16,3 +16,9 @@ def test_absent_key_differs_from_present_none() -> None:
     # A key whose value is None is still "present" — only true absence/difference counts.
     assert snapshot_changed_paths({"a": None}, {"a": None}) == []
     assert snapshot_changed_paths({}, {"a": None}) == ["a"]
+
+
+def test_unfinalized_after_state_yields_no_diff() -> None:
+    # after_state stays {} until the post-call eval fills it — a live or
+    # never-evaluated call must not report every pre-existing field as changed.
+    assert snapshot_changed_paths({"a": "1", "b": "2"}, {}) == []
