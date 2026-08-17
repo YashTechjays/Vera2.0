@@ -121,3 +121,55 @@ class TestExporter:
         exporter.force_flush(1234)
         assert inner.flushed
         assert inner.flush_timeout == 1234
+
+
+class TestCacheVisibility:
+    """usage_details already carries the cached count, but reading it requires
+    comparing against `input` by hand. These attributes make cache behaviour
+    sortable/filterable, so a prompt change that breaks the cacheable prefix is
+    visible rather than just quietly more expensive."""
+
+    def test_cache_attributes_report_the_hit_ratio(self) -> None:
+        inner = _RecordingExporter()
+        # 9360 of 12480 prompt tokens were hits -> 0.75
+        UsageEnrichingExporter(inner).export(
+            [_span({"lk.llm_metrics": _metrics(12480, 9360, 210)})]
+        )
+        attrs = inner.exported[0].attributes
+        assert attrs["vera.llm.cached_tokens"] == 9360
+        assert attrs["vera.llm.cache_hit_ratio"] == 0.75
+
+    def test_a_measured_zero_is_reported_not_omitted(self) -> None:
+        # 0.0 must be distinguishable from "unknown": this request genuinely had no
+        # cache hits, which is a fact worth seeing, not an absence of data.
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export([_span({"lk.llm_metrics": _metrics(500, 0, 20)})])
+        attrs = inner.exported[0].attributes
+        assert attrs["vera.llm.cached_tokens"] == 0
+        assert attrs["vera.llm.cache_hit_ratio"] == 0.0
+
+    def test_an_unusable_blob_reports_neither_attribute(self) -> None:
+        # The other half of that contract: absent means "unknown", so a malformed blob
+        # must not masquerade as a measured zero.
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export([_span({"lk.llm_metrics": "not json"})])
+        attrs = inner.exported[0].attributes
+        assert "vera.llm.cached_tokens" not in attrs
+        assert "vera.llm.cache_hit_ratio" not in attrs
+
+    def test_a_promptless_request_reports_neither_attribute(self) -> None:
+        # No prompt tokens means nothing to say about caching — better absent than 0/0.
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export([_span({"lk.llm_metrics": _metrics(0, 0, 12)})])
+        attrs = inner.exported[0].attributes
+        assert "vera.llm.cache_hit_ratio" not in attrs
+
+    def test_the_cache_attributes_are_not_priced(self) -> None:
+        # They must stay OUT of usage_details, or Langfuse would try to price them
+        # against a model entry that has no such key.
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export(
+            [_span({"lk.llm_metrics": _metrics(12480, 9360, 210)})]
+        )
+        usage = json.loads(inner.exported[0].attributes["langfuse.observation.usage_details"])
+        assert set(usage) == {"input", "cached", "output"}

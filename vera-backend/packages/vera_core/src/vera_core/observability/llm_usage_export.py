@@ -32,7 +32,9 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_TYPE_ATTR,
+    USAGE_CACHED,
     USAGE_DETAILS_ATTR,
+    USAGE_INPUT,
     llm_token_usage,
 )
 
@@ -40,6 +42,18 @@ logger = logging.getLogger("vera.observability")
 
 # The SDK's own metrics blob (livekit.agents.telemetry.trace_types.ATTR_LLM_METRICS).
 LLM_METRICS_ATTR = "lk.llm_metrics"
+
+# Cache visibility, alongside the priced split. `usage_details` already carries the
+# cached count, but only as a number you must compare against `input` by hand to see
+# how much of the prompt was a hit. These make it sortable and filterable: a prompt
+# change that breaks the cacheable prefix collapses the ratio toward 0 and quietly
+# raises LLM cost, with nothing else about the trace looking wrong.
+#
+# Deliberately OUTSIDE usage_details, so they are diagnostics and never priced.
+# Absent means "unknown" (the metrics blob was missing or unparseable); 0.0 means
+# "measured, no hits" — the two must stay distinguishable.
+CACHED_TOKENS_ATTR = "vera.llm.cached_tokens"
+CACHE_HIT_RATIO_ATTR = "vera.llm.cache_hit_ratio"
 
 
 def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
@@ -72,6 +86,12 @@ def _enrich(span: ReadableSpan) -> ReadableSpan:
     merged = dict(attributes)
     merged[USAGE_DETAILS_ATTR] = json.dumps(usage)
     merged[OBSERVATION_TYPE_ATTR] = GENERATION
+    cached = usage.get(USAGE_CACHED, 0)
+    # Only meaningful against a non-empty prompt; a request with no prompt tokens has
+    # nothing to say about caching, so it gets neither attribute rather than a 0/0.
+    if prompt_total := usage.get(USAGE_INPUT, 0) + cached:
+        merged[CACHED_TOKENS_ATTR] = cached
+        merged[CACHE_HIT_RATIO_ATTR] = round(cached / prompt_total, 4)
     return ReadableSpan(
         name=span.name,
         context=span.context,
