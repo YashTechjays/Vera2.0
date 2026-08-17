@@ -18,12 +18,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
+from opentelemetry import trace
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Transcript
+from vera_core.observability import TraceLinkStore, call_trace_attributes
 from vera_core.observability.correlation import room_name_for_call
 from vera_core.transcript import ROLE_COACHING, ROLE_DTMF, ROLE_WHISPER, TurnRole, source_for_role
 
@@ -32,6 +34,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
+
+_tracer = trace.get_tracer("vera.control_plane.summary")
 
 # Fewer real speech turns than this and there is nothing to brief — the endpoint
 # reports "pending" without spending an LLM call.
@@ -235,6 +239,7 @@ async def summarize_call(
     tenant_id: UUID,
     call_id: UUID,
     ttl_seconds: int,
+    trace_links: TraceLinkStore | None = None,
 ) -> CallSummaryResponse:
     """Cache-through summary of the call's transcript so far. Raises
     LLMUnavailableError (from the llm) when every provider fails."""
@@ -258,7 +263,18 @@ async def summarize_call(
             status="pending", summary=None, generated_at=generated_at, turn_count=len(turns)
         )
 
-    reply = await llm.complete(system=SUMMARY_SYSTEM_PROMPT, user=format_diarized(turns))
+    # The SDK auto-instruments the LLM request, but as a root trace with no link to the
+    # call — real spend that no per-call cost query can find. This parents it into the
+    # call's own trace; a missing/expired link degrades to a root span.
+    parent = await trace_links.resolve(room_name) if trace_links is not None else None
+    with _tracer.start_as_current_span(
+        "vera.call_summary",
+        context=parent,
+        attributes=call_trace_attributes(room_name),
+        record_exception=False,
+        set_status_on_exception=False,
+    ):
+        reply = await llm.complete(system=SUMMARY_SYSTEM_PROMPT, user=format_diarized(turns))
     sections = parse_sections(reply)
     response = CallSummaryResponse(
         status="ready",
