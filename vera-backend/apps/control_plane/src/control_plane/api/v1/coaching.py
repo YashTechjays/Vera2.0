@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response, UploadFile
+from opentelemetry import trace
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -25,7 +26,12 @@ from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
 from control_plane.call_authz import authorize_or_403, call_hidden_from
 from control_plane.call_closeout import TERMINAL_VALUES
-from control_plane.deps import get_call_rate_limiter, get_call_stream_service, get_whisper_stt
+from control_plane.deps import (
+    get_call_rate_limiter,
+    get_call_stream_service,
+    get_trace_link_store,
+    get_whisper_stt,
+)
 from control_plane.exceptions import (
     ConflictError,
     CustomAPIException,
@@ -38,13 +44,14 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.call_stream import CallStreamService
 from vera_core.models import Call, InterventionEvent
 from vera_core.models.enums import InterventionType
-from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
 from vera_core.stt import ResilientSTT, STTUnavailableError
 from vera_core.transcript import ROLE_COACHING, ROLE_WHISPER, SOURCE_SUPERVISOR
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["calls"])
+_tracer = trace.get_tracer("vera.control_plane.coaching")
 
 # Content is PHI — kept bounded so an unbounded body can't be smuggled through
 # a text field. 2000 chars comfortably covers even a rambling whisper transcript.
@@ -165,6 +172,7 @@ async def on_demand_transcribe(
     resolver: Annotated[PermissionResolver, Depends(get_resolver)],
     rate_limiter: Annotated[CallRateLimiter, Depends(get_call_rate_limiter)],
     whisper_stt: Annotated[ResilientSTT, Depends(get_whisper_stt)],
+    trace_links: Annotated[TraceLinkStore, Depends(get_trace_link_store)],
     audio: UploadFile,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[WhisperTranscribeResponse]:
@@ -186,10 +194,26 @@ async def on_demand_transcribe(
         raise CustomAPIException(
             DefaultExceptionCode.BAD_REQUEST, message="audio exceeds the size limit"
         )
+    room_name = room_name_for_call(tenant_id, call.id)
     try:
-        text = await whisper_stt.transcribe(
-            audio_bytes, mime_type=audio.content_type or "audio/webm"
-        )
+        # Joins the agent worker's trace for this call (published at the job entrypoint),
+        # so whisper spend sums into the call's total. If the link is missing or expired
+        # this is None and the span becomes its own trace root — degraded, not broken.
+        # The nested vera.stt.usage generation inherits whichever we get.
+        #
+        # record_exception/set_status_on_exception are OFF: an STT provider error can
+        # embed the request payload (the supervisor's audio), and both would copy its
+        # message onto the span.
+        with _tracer.start_as_current_span(
+            "vera.coaching.whisper",
+            context=await trace_links.resolve(room_name),
+            attributes=call_trace_attributes(room_name),
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            text = await whisper_stt.transcribe(
+                audio_bytes, mime_type=audio.content_type or "audio/webm"
+            )
     except STTUnavailableError as exc:
         raise CustomAPIException(
             DefaultExceptionCode.SERVICE_UNAVAILABLE,

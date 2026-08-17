@@ -302,3 +302,39 @@ class TestTraceParenting:
         span = _only(otel_spans, SPAN_STT_USAGE)
         assert span.parent is not None
         assert span.parent.span_id == expected.span_id
+
+
+class TestResilientSTTChain:
+    @pytest.mark.asyncio
+    async def test_the_fallback_chain_emits_usage_generations(self, otel_spans: Any) -> None:
+        """Whisper STT is real Deepgram spend. Attaching to the FallbackAdapter (not
+        each inner STT) is deliberate: it re-emits the inner STTMetrics verbatim
+        (stt/fallback_adapter.py:294), so the model name stays the true provider's
+        rather than the literal 'FallbackAdapter'.
+
+        Drives the real `_adapter()` lazy-build path (rather than hand-assigning
+        `_chain`, which would skip straight past the code under test) with a stub
+        `registry` and a patched `FallbackAdapter`, so this fails without a full
+        fake of livekit's STT protocol (`test_stt.py`'s own documented reason for
+        not covering FallbackAdapter integration there)."""
+        from unittest.mock import patch
+
+        from vera_core.stt import ResilientSTT, STTSpec
+
+        chain = _FakeEmitter()  # stands in for the FallbackAdapter _adapter() builds
+
+        def _fake_provider(spec: Any, secrets: Any, http_session: Any) -> Any:
+            return object()  # never touched: FallbackAdapter itself is patched below
+
+        stt = ResilientSTT(
+            STTSpec("deepgram", "flux-general-en"), registry={"deepgram": _fake_provider}
+        )
+        with patch("livekit.agents.stt.FallbackAdapter", return_value=chain):
+            built = stt._adapter()
+        assert built is chain
+
+        chain.emit("metrics_collected", _stt())
+        assert (
+            _only(otel_spans, SPAN_STT_USAGE).attributes[OBSERVATION_MODEL_ATTR]
+            == "flux-general-en"
+        )
