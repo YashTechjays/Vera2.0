@@ -72,7 +72,7 @@ Turns one STT/TTS metrics event into the exact generation attributes Langfuse pr
 - Consumes: `livekit.agents.metrics.STTMetrics` / `TTSMetrics`; `livekit.agents.metrics.base.Metadata`.
 - Produces:
   - `usage_span_attributes(metrics: Any) -> dict[str, str | int | float | bool] | None`
-  - Constants `SPAN_STT_USAGE = "vera.stt.usage"`, `SPAN_TTS_USAGE = "vera.tts.usage"`, `OBSERVATION_TYPE_ATTR`, `OBSERVATION_MODEL_ATTR`, `USAGE_DETAILS_ATTR`, `GENERATION`, `STT_AUDIO_MS = "stt_audio_ms"`, `TTS_CHARACTERS = "tts_characters"`, `USAGE_INPUT = "input"`, `USAGE_OUTPUT = "output"`
+  - Constants `SPAN_STT_USAGE = "vera.stt.usage"`, `SPAN_TTS_USAGE = "vera.tts.usage"`, `OBSERVATION_TYPE_ATTR`, `OBSERVATION_MODEL_ATTR`, `USAGE_DETAILS_ATTR`, `GENERATION`, `STT_AUDIO_MS = "stt_audio_ms"`, `TTS_CHARACTERS = "tts_characters"`, `USAGE_INPUT = "input"`, `USAGE_OUTPUT = "output"`, `USAGE_CACHED = "cached"` (the last is unused in this task — Tasks 7 and 9 both import it, and it lives here so the vocabulary has one home)
   - Type alias `type UsageAttributes = dict[str, str | int | float | bool]`
 
 - [ ] **Step 1: Write the failing tests**
@@ -308,6 +308,10 @@ STT_AUDIO_MS = "stt_audio_ms"
 TTS_CHARACTERS = "tts_characters"
 USAGE_INPUT = "input"
 USAGE_OUTPUT = "output"
+# Defined here with its siblings, not at each use site: the post-call eval (llm.py)
+# and the export-time LLM correction (llm_usage_export.py) both emit this key, and two
+# copies of a string the seeded prices must match exactly is a drift waiting to happen.
+USAGE_CACHED = "cached"
 
 type UsageAttributes = dict[str, str | int | float | bool]
 
@@ -990,7 +994,19 @@ Append to `apps/agent_worker/tests/unit/test_cascade.py`:
 class TestUsageSpanWiring:
     """Without these listeners, Deepgram and Cartesia spend is invisible in Langfuse:
     LiveKit reports STT usage only to the OTel Metrics API (a no-op meter here) and
-    TTS usage only in a custom attribute bag Langfuse's cost engine does not read."""
+    TTS usage only in a custom attribute bag Langfuse's cost engine does not read.
+
+    These drive `build_speech_components`, not `build_session`: the full session also
+    builds google.LLM(vertexai=True), Silero VAD and the EnglishModel turn detector,
+    which need ADC and downloaded model files. The billed pair is the part under test,
+    and it constructs offline once the two plugin API keys are present."""
+
+    @pytest.fixture(autouse=True)
+    def _plugin_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Both constructors raise ValueError without a key; neither opens a connection
+        # until stream()/synthesize(), so dummy values keep construction offline.
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        monkeypatch.setenv("CARTESIA_API_KEY", "test-key")
 
     def test_cascade_tts_emits_a_usage_generation(self, otel_spans: Any) -> None:
         from livekit.agents.metrics import TTSMetrics
@@ -998,8 +1014,8 @@ class TestUsageSpanWiring:
 
         from vera_core.observability.usage_spans import SPAN_TTS_USAGE
 
-        session = build_session(vad=object(), default_model="gemini-2.5-flash")
-        session.tts.emit(
+        _stt, tts = build_speech_components()
+        tts.emit(
             "metrics_collected",
             TTSMetrics(
                 request_id="r",
@@ -1022,8 +1038,8 @@ class TestUsageSpanWiring:
 
         from vera_core.observability.usage_spans import SPAN_STT_USAGE
 
-        session = build_session(vad=object(), default_model="gemini-2.5-flash")
-        session.stt.emit(
+        stt, _tts = build_speech_components()
+        stt.emit(
             "metrics_collected",
             STTMetrics(
                 request_id="r",
@@ -1039,9 +1055,32 @@ class TestUsageSpanWiring:
         assert json.loads(span.attributes["langfuse.observation.usage_details"]) == {
             "stt_audio_ms": 5000
         }
+
+    def test_the_room_name_reaches_both_generations(self, otel_spans: Any) -> None:
+        from livekit.agents.metrics import STTMetrics
+        from livekit.agents.metrics.base import Metadata
+
+        from vera_core.observability.usage_spans import SPAN_STT_USAGE
+
+        room = "call--00000000-0000-0000-0000-0000000000aa--00000000-0000-0000-0000-0000000000bb"
+        stt, _tts = build_speech_components(room_name=room)
+        stt.emit(
+            "metrics_collected",
+            STTMetrics(
+                request_id="r",
+                timestamp=1.0,
+                duration=0.0,
+                label="deepgram.STTv2",
+                audio_duration=5.0,
+                streamed=True,
+                metadata=Metadata(model_name="flux-general-en", model_provider="Deepgram"),
+            ),
+        )
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == SPAN_STT_USAGE)
+        assert span.attributes["langfuse.session.id"] == room
 ```
 
-Add `import json` and `from typing import Any` to the file's imports if not already present.
+Add `import json`, `import pytest`, `from typing import Any` to the file's imports if not already present, and add `build_speech_components` to its `from agent_worker.cascade import (...)` block.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1058,9 +1097,35 @@ from opentelemetry.context import Context
 from vera_core.observability import attach_usage_spans
 ```
 
-Replace `build_session` (`cascade.py:127-153`) with:
+Replace `build_session` (`cascade.py:127-153`) with a construction helper plus a thinner `build_session`:
 
 ```python
+def build_speech_components(
+    *,
+    key_terms: list[str] | None = None,
+    room_name: str | None = None,
+    parent_context: Context | None = None,
+) -> tuple[deepgram.STTv2, cartesia.TTS]:
+    """The two billed speech components, with usage listeners already attached.
+
+    Split out of build_session so the money-spending pair can be constructed — and
+    its instrumentation asserted — without also building the Vertex LLM, Silero VAD
+    and the turn detector, which need ADC and downloaded model files.
+
+    LiveKit reports STT usage only to the OTel Metrics API (a no-op meter here) and
+    TTS usage only in a custom attribute bag Langfuse cannot price, so without these
+    listeners both providers' spend is invisible. The LLM needs none — the SDK already
+    sets the gen_ai.usage.* attributes Langfuse prices.
+    """
+    stt = deepgram.STTv2(
+        model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
+    )
+    tts = cartesia.TTS(model=_CARTESIA_TTS_MODEL, emotion=["confident"])
+    attach_usage_spans(stt, parent_context=parent_context, room_name=room_name)
+    attach_usage_spans(tts, parent_context=parent_context, room_name=room_name)
+    return stt, tts
+
+
 def build_session(
     vad: Any | None = None,
     *,
@@ -1072,16 +1137,9 @@ def build_session(
     parent_context: Context | None = None,
 ) -> AgentSession[TakeoverState]:
     model = resolve_llm_model(llm_model, default_model)
-    # STT/TTS are bound to locals (rather than passed inline) so usage-span listeners
-    # can be attached: LiveKit reports their usage through channels Langfuse never
-    # sees, so without this their spend is invisible. The LLM needs no listener — the
-    # SDK already sets the gen_ai.usage.* attributes Langfuse prices.
-    stt = deepgram.STTv2(
-        model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
+    stt, tts = build_speech_components(
+        key_terms=key_terms, room_name=room_name, parent_context=parent_context
     )
-    tts = cartesia.TTS(model=_CARTESIA_TTS_MODEL, emotion=["confident"])
-    attach_usage_spans(stt, parent_context=parent_context, room_name=room_name)
-    attach_usage_spans(tts, parent_context=parent_context, room_name=room_name)
     # The latch must exist from construction: agents read it before speaking or hanging up.
     return AgentSession(
         userdata=TakeoverState(),
@@ -1602,6 +1660,7 @@ from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_MODEL_ATTR,
     OBSERVATION_TYPE_ATTR,
+    USAGE_CACHED,
     USAGE_DETAILS_ATTR,
     USAGE_INPUT,
     USAGE_OUTPUT,
@@ -1612,7 +1671,6 @@ Add near the module's other constants:
 
 ```python
 SPAN_EVAL_GENERATE = "vera.eval.generate"
-USAGE_CACHED = "cached"
 
 _tracer = trace.get_tracer("vera.control_plane.post_call_eval")
 
@@ -1923,6 +1981,8 @@ figure is overstated in proportion to hit rate."""
 import json
 from typing import Any
 
+from opentelemetry.sdk.trace import ReadableSpan
+
 from vera_core.observability.llm_usage_export import (
     UsageEnrichingExporter,
     corrected_usage_details,
@@ -1985,19 +2045,17 @@ class _RecordingExporter:
         return True
 
 
-class _FakeSpan:
-    def __init__(self, attributes: dict[str, Any]) -> None:
-        self._attributes = attributes
-
-    @property
-    def attributes(self) -> dict[str, Any]:
-        return self._attributes
+def _span(attributes: dict[str, Any]) -> ReadableSpan:
+    """A REAL ReadableSpan — the enrichment path re-projects one, reading .parent,
+    .resource, .events, .status and friends, so a duck-typed fake with only
+    .attributes would fall into the exception fallback and silently pass through."""
+    return ReadableSpan(name="llm_request", attributes=attributes)
 
 
 class TestExporter:
     def test_an_llm_span_gains_corrected_usage_details(self) -> None:
         inner = _RecordingExporter()
-        span = _FakeSpan({"lk.llm_metrics": _metrics(12480, 9360, 210)})
+        span = _span({"lk.llm_metrics": _metrics(12480, 9360, 210)})
         UsageEnrichingExporter(inner).export([span])
         attrs = inner.exported[0].attributes
         assert json.loads(attrs["langfuse.observation.usage_details"]) == {
@@ -2009,7 +2067,7 @@ class TestExporter:
 
     def test_a_span_without_llm_metrics_passes_through_untouched(self) -> None:
         inner = _RecordingExporter()
-        span = _FakeSpan({"vera.room": "call--a--b"})
+        span = _span({"vera.room": "call--a--b"})
         UsageEnrichingExporter(inner).export([span])
         assert inner.exported == [span]
 
@@ -2017,7 +2075,7 @@ class TestExporter:
         # An SDK upgrade renaming or reshaping lk.llm_metrics must degrade to today's
         # behavior. Losing a span is worse than exporting an uncorrected one.
         inner = _RecordingExporter()
-        span = _FakeSpan({"lk.llm_metrics": "not json"})
+        span = _span({"lk.llm_metrics": "not json"})
         UsageEnrichingExporter(inner).export([span])
         assert inner.exported == [span]
 
@@ -2074,6 +2132,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_TYPE_ATTR,
+    USAGE_CACHED,
     USAGE_DETAILS_ATTR,
     USAGE_INPUT,
     USAGE_OUTPUT,
@@ -2083,7 +2142,6 @@ logger = logging.getLogger("vera.observability")
 
 # The SDK's own metrics blob (livekit.agents.telemetry.trace_types.ATTR_LLM_METRICS).
 LLM_METRICS_ATTR = "lk.llm_metrics"
-USAGE_CACHED = "cached"
 
 
 def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
