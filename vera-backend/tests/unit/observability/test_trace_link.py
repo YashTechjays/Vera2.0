@@ -3,16 +3,15 @@ opened in the control plane lands in the SAME TRACE as the worker's call span �
 Langfuse rolls cost up reliably per trace, and its session rollup renders $0.00 for
 model-calculated cost (langfuse#15109), so this is what makes a per-call total real."""
 
-import asyncio
 from typing import Any
 
 import pytest
 from opentelemetry import trace
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from tests.unit.conftest import FakeTraceLinkRedis
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.trace_link import (
-    TRACE_LINK_TIMEOUT_SECONDS,
     TraceLinkStore,
     call_scoped_span,
     current_traceparent,
@@ -26,15 +25,15 @@ _ROOM = "call--00000000-0000-0000-0000-0000000000aa--00000000-0000-0000-0000-000
 _TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
 
 
-class _HangingRedis:
-    """Reachable but wedged: every command hangs instead of raising."""
+class _TimingOutRedis:
+    """What a slow Redis actually looks like to a caller: redis-py's own
+    `socket_timeout` fires, the connection is dropped, and this is raised."""
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        await asyncio.sleep(10)
+        raise RedisTimeoutError("Timeout reading from localhost:6379")
 
     async def get(self, key: str) -> bytes | None:
-        await asyncio.sleep(10)
-        return None
+        raise RedisTimeoutError("Timeout reading from localhost:6379")
 
 
 class _NonUtf8Redis:
@@ -126,25 +125,20 @@ class TestStore:
         assert await TraceLinkStore(_NonUtf8Redis()).resolve(_ROOM) is None
 
 
-class TestAWedgedRedisCannotStallTheCaller:
-    """`create_redis()` sets no socket timeout, so an outage that HANGS rather than
-    raising is the dangerous shape: it would hold up a greeting, an HTTP request, or
-    the post-call consumer. Both directions must be time-boxed."""
+class TestATimingOutRedisDegradesGracefully:
+    """A slow Redis surfaces as `redis.TimeoutError` — redis-py bounds the read itself
+    (`socket_timeout`, 5s by default) and disconnects the connection before raising.
+    Both directions must swallow it, because tracing must never affect a call or a
+    request. NOTE: deliberately no `asyncio.timeout` in the store; cancelling a
+    redis-py command mid-flight desyncs the pooled connection."""
 
     @pytest.mark.asyncio
-    async def test_a_hanging_publish_returns_and_does_not_raise(self) -> None:
-        store = TraceLinkStore(_HangingRedis(), timeout_s=0.05)
-        await asyncio.wait_for(store.publish(_ROOM, _TRACEPARENT), timeout=1.0)
+    async def test_a_timing_out_publish_does_not_raise(self) -> None:
+        await TraceLinkStore(_TimingOutRedis()).publish(_ROOM, _TRACEPARENT)
 
     @pytest.mark.asyncio
-    async def test_a_hanging_resolve_degrades_to_no_parent(self) -> None:
-        store = TraceLinkStore(_HangingRedis(), timeout_s=0.05)
-        assert await asyncio.wait_for(store.resolve(_ROOM), timeout=1.0) is None
-
-    def test_the_default_budget_is_short(self) -> None:
-        # A short fixed budget — not the general Redis timeout, which is unset — is
-        # what keeps best-effort tracing off every caller's critical path.
-        assert TRACE_LINK_TIMEOUT_SECONDS == 2.0
+    async def test_a_timing_out_resolve_degrades_to_no_parent(self) -> None:
+        assert await TraceLinkStore(_TimingOutRedis()).resolve(_ROOM) is None
 
 
 class TestCallScopedSpan:

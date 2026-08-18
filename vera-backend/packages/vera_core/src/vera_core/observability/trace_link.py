@@ -20,7 +20,6 @@ an HTTP request.
 PHI: a traceparent is random hex identifiers only.
 """
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -40,12 +39,6 @@ logger = logging.getLogger("vera.observability")
 # seconds after call.ended, but the pipeline sweeper can re-drive a stranded job much
 # later. One small key per call is negligible.
 TRACE_LINK_TTL_SECONDS = 24 * 60 * 60
-
-# `create_redis()` sets no socket timeout, so an unbounded await lets a wedged-but-
-# reachable Redis stall whatever it is called from — a call's greeting, an HTTP request,
-# the post-call consumer. Bounded HERE rather than at each call site so every caller
-# inherits it; best-effort tracing must never be able to hold anything up.
-TRACE_LINK_TIMEOUT_SECONDS = 2.0
 
 _PROPAGATOR = TraceContextTextMapPropagator()
 _TRACEPARENT = "traceparent"
@@ -83,33 +76,35 @@ def remote_parent(traceparent: str | None) -> Context | None:
 class TraceLinkStore:
     """Publishes and resolves a call's traceparent over Redis.
 
-    Both methods are time-boxed and swallow Redis failures: an observability outage —
-    including a hang — must never affect a call or an API request.
+    Both methods swallow every Redis failure — including a timeout — so an
+    observability outage can never affect a call or an API request.
+
+    Bounding the wait is left to the CLIENT, which already does it: redis-py defaults
+    `socket_timeout` to 5s (`redis/_defaults.py`), and on expiry it disconnects the
+    connection itself before raising `redis.TimeoutError`. Never wrap these calls in
+    `asyncio.timeout` to tighten that: cancelling mid-command leaves the sent command's
+    reply unread in the socket, and `Redis.execute_command` returns the connection to
+    the pool anyway (its `except Exception` does not catch `CancelledError`, and
+    `pool.release` only disconnects when `should_reconnect()` — a flag nothing on this
+    path sets). The next caller to take that connection then reads the previous
+    command's reply. A tighter bound belongs in `create_redis(socket_timeout=...)`,
+    where redis-py can clean up after itself.
     """
 
-    def __init__(self, redis: Any, *, timeout_s: float = TRACE_LINK_TIMEOUT_SECONDS) -> None:
+    def __init__(self, redis: Any) -> None:
         self._redis = redis
-        self._timeout_s = timeout_s
 
     async def publish(self, room_name: str, traceparent: str) -> None:
         try:
-            async with asyncio.timeout(self._timeout_s):
-                await self._redis.set(
-                    trace_link_key(room_name), traceparent, ex=TRACE_LINK_TTL_SECONDS
-                )
-        except TimeoutError:
-            logger.warning("trace link publish timed out after %.1fs", self._timeout_s)
+            await self._redis.set(trace_link_key(room_name), traceparent, ex=TRACE_LINK_TTL_SECONDS)
         except Exception as exc:
             logger.warning("trace link publish failed: %s", type(exc).__name__)
 
     async def resolve(self, room_name: str) -> Context | None:
         try:
-            async with asyncio.timeout(self._timeout_s):
-                raw = await self._redis.get(trace_link_key(room_name))
+            raw = await self._redis.get(trace_link_key(room_name))
             if raw is not None:
                 return remote_parent(raw.decode() if isinstance(raw, bytes) else str(raw))
-        except TimeoutError:
-            logger.warning("trace link resolve timed out after %.1fs", self._timeout_s)
         except Exception as exc:
             logger.warning("trace link resolve failed: %s", type(exc).__name__)
         return None

@@ -124,8 +124,13 @@ a blank `$` rather than an error, and **no test fails**, so treat these as hard 
 - Cross-process spans join the call's trace via `TraceLinkStore` (a traceparent in Redis under
   the room name). Langfuse's per-**session** cost rollup is unreliable for model-calculated
   cost, so per-**trace** is the unit that must hold. Open them with
-  `observability.call_scoped_span`. `TraceLinkStore` time-boxes both directions itself
-  (`create_redis()` sets no socket timeout), so no caller needs its own guard.
+  `observability.call_scoped_span`.
+- **Never wrap a redis-py call in `asyncio.timeout`.** Reads are already bounded —
+  redis-py defaults `socket_timeout` to 5s and disconnects the connection itself before
+  raising. Cancelling mid-command instead leaves the reply unread in the socket while
+  `execute_command` returns the connection to the pool (`except Exception` misses
+  `CancelledError`), so the next caller reads the previous command's reply. Tighten it
+  with `create_redis(socket_timeout=...)`, never a cancellation.
 - **A model Vera routes to but deliberately does not price goes in the seeder's
   `KNOWN_UNPRICED`**, with the reason. `just langfuse-verify` reports those without failing;
   anything else unpriced fails it. Never silence the gate by widening a match pattern.

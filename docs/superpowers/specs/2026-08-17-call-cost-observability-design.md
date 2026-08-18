@@ -327,6 +327,32 @@ than dropping it: losing a span is worse than exporting an uncorrected one.
 **PHI note:** the wrapper *reads* `lk.llm_metrics` and writes three integers. It never copies the
 blob onto a span — §8 prohibition 1 stands.
 
+### 3.7 Known gap: a re-dispatched call splits into two traces
+
+The link is a plain `SET`, so it is last-write-wins. That is correct for the normal
+case — LiveKit dispatches a room to exactly one worker, so there is a single writer per
+call — but it leaves one gap.
+
+If a worker dies mid-call and LiveKit re-dispatches the same room, the new job mints a
+**new** `job_entrypoint` span, and its publish overwrites the traceparent. Every
+control-plane span afterwards (post-call eval, summary, whisper) joins the second
+trace. The first attempt's STT, TTS and LLM spend stays in the first trace, which
+nothing now points at, so **the call under-reports its cost by whatever the first
+attempt spent**.
+
+Accepted rather than fixed, because the alternatives are worse than the gap:
+
+- `SETNX` would pin the call to the *dead* worker's trace, so every later span would
+  join a trace whose root never completed — a worse reading than a short one.
+- Appending both traceparents would need a per-call cost query that unions traces,
+  which is exactly the per-trace rollup this design exists to rely on.
+
+The gap is bounded (it needs a mid-call worker death) and self-announcing: the first
+trace has a `job_entrypoint` with no control-plane spans beneath it, and the second has
+a suspiciously short STT duration for the call's wall-clock length. `just
+langfuse-verify` does not detect it. If re-dispatch ever becomes common, revisit by
+having the control plane sum over `vera.room` rather than over the trace id.
+
 ## 4. Decisions
 
 | # | Decision | Choice |
