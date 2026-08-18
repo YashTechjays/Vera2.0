@@ -446,6 +446,32 @@ There is no interruption signal available from `TTSMetrics`. If barge-in spend n
 queryable, it has to come from the session's interruption events, not from here. Re-check
 `tts.py` after any `livekit-agents` bump in case the field is rescoped.
 
+### 5.2a Thinking-token accounting — verified against Vertex, 2026-08-18
+
+The residual (`total_tokens - prompt_tokens - completion_tokens`) is only a valid stand-in for
+thoughts if the provider's total actually includes them. Probed directly rather than inferred:
+
+```
+gemini-2.5-flash, default thinking      prompt=18 candidates=103 thoughts=1324 total=1445
+gemini-2.5-flash, thinking_budget=1024  prompt=18 candidates=90  thoughts=925  total=1033
+```
+
+`total - prompt - candidates` equals `thoughts_token_count` **exactly** in both cases, so the
+residual is the thoughts count and the mechanism is sound.
+
+The practical consequence is the useful half: because the total includes thoughts, a residual of
+**zero is positive evidence that no thoughts were produced** — not evidence that we failed to
+observe them. On the first live validation call (trace `8b7d88ec…`) the summed residual was 0
+across all 375 `llm_request` spans, and that call is therefore fully accounted for, not
+under-reported. The cascade ran at `thinking_level='minimal'` (a tenant override; the code default
+for a Gemini 3 model is `low`), and the `ResilientLLM` surfaces produced none either.
+
+**Cost warning for whoever tunes this.** Thinking bills at the OUTPUT rate, and the ratio is not
+small: the default-thinking probe above spent 1324 thought tokens against 103 candidate tokens —
+92% of billed output. Raising `thinking_level` on the cascade can move LLM output cost by roughly
+an order of magnitude with nothing else about the trace looking different. `vera.llm.thinking_tokens`
+on the corrected span is where that shows up; watch it, not the token total.
+
 ### 5.3 STT units: integer milliseconds — Langfuse cannot store fractions
 
 **Langfuse's usage values are integers, end to end.** Verified 2026-08-17 against the Langfuse
