@@ -92,10 +92,8 @@ type IbvContextValue = {
   flagsFor: (path: string) => DisputeFlags
   applyDispute: (path: string) => void
   swapDispute: (path: string) => void
-  resolveAll: () => void
   /** Resolve only the disputes on the given paths — a section header passes its own leaves. */
   resolveOpenDisputes: (paths: string[]) => void
-  pendingDisputeCount: number
   dirty: boolean
   saveState: SaveState
   save: () => Promise<void>
@@ -648,16 +646,6 @@ export function IbvProvider({
     [disputes],
   )
 
-  const resolveAll = useCallback(
-    () => resolveOpenDisputes(Object.keys(disputes)),
-    [disputes, resolveOpenDisputes],
-  )
-
-  const pendingDisputeCount = useMemo(
-    () => Object.keys(disputes).filter((p) => !(flags[p]?.applied ?? false)).length,
-    [disputes, flags],
-  )
-
   const changeStatus = useCallback(
     async (next: PatientFormStatus) => {
       setStatusError(null)
@@ -783,9 +771,7 @@ export function IbvProvider({
     flagsFor,
     applyDispute,
     swapDispute,
-    resolveAll,
     resolveOpenDisputes,
-    pendingDisputeCount,
     dirty,
     saveState,
     save,
