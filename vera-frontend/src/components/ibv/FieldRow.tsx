@@ -35,12 +35,14 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     applyDispute,
     swapDispute,
     confidenceFor,
+    provenanceFor,
     isPathRequired,
   } = useIbv()
 
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
   const confidence = confidenceFor(path)
+  const provenance = provenanceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const required = applicable && isPathRequired(path, field)
@@ -97,6 +99,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <CompactDisputeControls
               dispute={dispute!}
               confidence={confidence}
+              provenance={provenance}
               flags={flags}
               className="top-1/2 right-1 -translate-y-1/2"
               canSwap={applicable}
@@ -107,6 +110,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <InlineDisputeControls
               dispute={dispute!}
               confidence={confidence}
+              provenance={provenance}
               flags={flags}
               className="top-1/2 right-1.5 -translate-y-1/2"
               canSwap={applicable}

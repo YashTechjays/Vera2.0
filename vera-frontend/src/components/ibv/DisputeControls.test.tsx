@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react"
 
 import { DisputeTooltipBody, InlineDisputeControls } from "./DisputeControls"
 import { defaultFlags, resolveConfidence, type Dispute } from "@/lib/ibv/disputes"
+import { modeBadgeClass } from "@/lib/patient-forms/display"
 
 // DisputeTooltipBody is rendered directly rather than through a hover: Radix
 // portals its content through floating-ui, which does not settle under jsdom.
@@ -23,6 +24,7 @@ describe("DisputeTooltipBody", () => {
       <DisputeTooltipBody
         dispute={dispute()}
         confidence={resolveConfidence(90, null)}
+        provenance={null}
       />
     )
     expect(screen.getByText(/captured 90% · medium/)).toBeInTheDocument()
@@ -33,13 +35,15 @@ describe("DisputeTooltipBody", () => {
     )
   })
 
-  it("renders no attempt/judge provenance line", () => {
-    // A reviewer resolving a dispute acts on the values and the quote; which attempt
-    // produced them is noise here. The judge only reaches the chip, via resolveConfidence.
+  it("names no attempt, and no separate judge line, without provenance", () => {
+    // The judge reaches the chip and nowhere else (via resolveConfidence) — the duplicate
+    // verdict line is what made this tooltip unreadable. Attempt appears only when the
+    // field HAS provenance; see the attempt-attribution block below.
     render(
       <DisputeTooltipBody
         dispute={dispute()}
         confidence={resolveConfidence(90, { confidence: 88, supported: true })}
+        provenance={null}
       />
     )
     expect(screen.queryByText(/Attempt/)).not.toBeInTheDocument()
@@ -54,6 +58,7 @@ describe("DisputeTooltipBody", () => {
       <DisputeTooltipBody
         dispute={dispute()}
         confidence={resolveConfidence(95, { confidence: 95, supported: false })}
+        provenance={null}
       />
     )
     expect(screen.getByText("judge · unsupported")).toBeInTheDocument()
@@ -118,6 +123,7 @@ describe.each([
       <DisputeTooltipBody
         dispute={d}
         confidence={resolveConfidence(60, { confidence: score, supported: true })}
+        provenance={null}
       />
     )
     const chip = screen.getByText(label)
@@ -132,6 +138,7 @@ describe.each([
       <DisputeTooltipBody
         dispute={d}
         confidence={resolveConfidence(60, { confidence: 91, supported: false })}
+        provenance={null}
       />
     )
     const chip = screen.getByText("judge · unsupported")
@@ -141,13 +148,21 @@ describe.each([
   })
 
   it("falls back to the extractor's score when the judge never ran", () => {
-    render(<DisputeTooltipBody dispute={d} confidence={resolveConfidence(92, null)} />)
+    render(
+      <DisputeTooltipBody dispute={d} confidence={resolveConfidence(92, null)} provenance={null} />
+    )
     const chip = screen.getByText("captured 92% · medium")
     expect(chip.className).toContain(BAND_BG.medium)
   })
 
   it("reads unknown when neither pass produced a score", () => {
-    render(<DisputeTooltipBody dispute={d} confidence={resolveConfidence(undefined, null)} />)
+    render(
+      <DisputeTooltipBody
+        dispute={d}
+        confidence={resolveConfidence(undefined, null)}
+        provenance={null}
+      />
+    )
     expect(screen.getByText("captured —% · unknown")).toBeInTheDocument()
   })
 
@@ -156,6 +171,7 @@ describe.each([
       <DisputeTooltipBody
         dispute={d}
         confidence={resolveConfidence(60, { confidence: 88, supported: true })}
+        provenance={null}
       />
     )
     expect(screen.getByText("Prior:").parentElement).toHaveTextContent(d.previousValue)
@@ -164,15 +180,35 @@ describe.each([
   })
 })
 
+describe("attempt attribution in the tooltip", () => {
+  // The label-cell (i) also told the reviewer WHICH call attempt captured the value.
+  // Removing it took that with it; Call History only answers the inverse (attempt →
+  // fields), so the per-field direction lives here now.
+  it("names the attempt and mode that captured the value", () => {
+    render(
+      <DisputeTooltipBody
+        dispute={dispute()}
+        confidence={resolveConfidence(90, null)}
+        provenance={{ attempt: 2, mode: "retry", judge: null }}
+      />
+    )
+    expect(screen.getByText("Attempt 2")).toBeInTheDocument()
+    // The same mode presentation Call History uses, so "retry" reads the same in both.
+    expect(screen.getByText("retry").className).toContain(modeBadgeClass("retry"))
+  })
+})
+
 describe("InlineDisputeControls", () => {
-  it("exposes the dispute chip as a focusable button", () => {
-    // Regression guard: the chip is the only keyboard path to the tooltip in the
-    // wide layout now that the label-cell (i) button is gone. A <span> trigger
-    // would silently make the evidence mouse-only again.
+  it("exposes the chip as a button whose name carries the value", () => {
+    // Two guards on one element. The chip must be a <button>: it is the only keyboard
+    // path to the tooltip now that the label-cell (i) is gone, and a <span> trigger
+    // would silently make the evidence mouse-only. And its aria-label REPLACES that
+    // text, so the value has to be in the label or a screen reader never hears it.
     render(
       <InlineDisputeControls
         dispute={dispute()}
         confidence={resolveConfidence(90, null)}
+        provenance={null}
         flags={defaultFlags()}
         className=""
         canSwap
@@ -181,5 +217,6 @@ describe("InlineDisputeControls", () => {
       />
     )
     expect(screen.getByRole("button", { name: /dispute details/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /Prior: BCBS TX/ })).toBeInTheDocument()
   })
 })

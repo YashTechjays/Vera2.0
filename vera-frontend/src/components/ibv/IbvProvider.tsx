@@ -557,16 +557,34 @@ export function IbvProvider({
     }
   }, [schema, createSelection, values])
 
-  const setValue = useCallback((path: string, value: string) => {
-    editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
-    setValues((prev) => ({ ...prev, [path]: value }))
-    setDirty(true)
-    setSaveState("idle")
-    // The server's verdict on this path is stale the moment the user retypes it,
-    // and a fresh payload deserves a fresh idempotency key.
-    setCreateServerErrors((prev) => omitPath(prev, path))
-    createIdempotencyKeyRef.current = null
+  /** Forget the judge's verdict for a path whose value has just been replaced.
+   *
+   *  The judge only runs post-call, so its verdict describes the value it graded — once
+   *  anything overwrites that value the score is about text no longer on screen, and
+   *  `confidenceFor` prefers the judge whenever one exists. `attempt`/`mode` survive:
+   *  they describe which call produced the answer, which a new value does not falsify.
+   *  A no-op (same object back, no re-render) when there is no verdict to drop. */
+  const invalidateJudge = useCallback((path: string) => {
+    setProvenance((prev) => {
+      const p = prev[path]
+      return p?.judge ? { ...prev, [path]: { ...p, judge: null } } : prev
+    })
   }, [])
+
+  const setValue = useCallback(
+    (path: string, value: string) => {
+      editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
+      setValues((prev) => ({ ...prev, [path]: value }))
+      setDirty(true)
+      setSaveState("idle")
+      // The server's verdict on this path is stale the moment the user retypes it,
+      // and a fresh payload deserves a fresh idempotency key.
+      setCreateServerErrors((prev) => omitPath(prev, path))
+      invalidateJudge(path)
+      createIdempotencyKeyRef.current = null
+    },
+    [invalidateJudge],
+  )
 
   const applyLiveAnswer = useCallback(
     (
@@ -586,6 +604,8 @@ export function IbvProvider({
       const display = toDisplayValue(raw, format)
       // Not a supervisor edit: update the value only, never touch dirty/saveState.
       setValues((prev) => (prev[path] === display ? prev : { ...prev, [path]: display }))
+
+      invalidateJudge(path)
 
       if (dispute === undefined) return // frame carried no dispute info — leave disputes as-is
       if (dispute === null) {
@@ -607,7 +627,7 @@ export function IbvProvider({
         },
       }))
     },
-    [formId, dateFormats],
+    [formId, dateFormats, invalidateJudge],
   )
 
   const flagsFor = useCallback(

@@ -96,6 +96,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     errors,
     disputeFor,
     confidenceFor,
+    provenanceFor,
     flagsFor,
     applyDispute,
     swapDispute,
@@ -110,6 +111,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
   const confidence = confidenceFor(path)
+  const provenance = provenanceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const disabledReason =
@@ -151,6 +153,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           <InlineDisputeControls
             dispute={dispute!}
             confidence={confidence}
+            provenance={provenance}
             flags={flags}
             className={isTextarea ? "top-1 right-1" : "top-1/2 right-1 -translate-y-1/2"}
             bareBadge={usesBareBadge(field)}

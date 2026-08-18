@@ -15,6 +15,8 @@ import {
   type DisputeFlags,
   type FieldConfidence,
 } from "@/lib/ibv/disputes"
+import { modeBadgeClass } from "@/lib/patient-forms/display"
+import type { FieldProvenance } from "@/lib/patient-forms/types"
 
 /** ✓ apply (teal) → ↶ unapply (green) for a disputed field. */
 export function ApplyButton({
@@ -70,13 +72,19 @@ export function DisputeBadge({
   value,
   dispute,
   confidence,
-  label = "Prior",
+  provenance,
+  label,
+  hideLabel,
 }: {
   value: string
   dispute: Dispute
   confidence: FieldConfidence
-  /** "" renders a bare-value chip — the blue styling alone still reads as "prior" */
-  label?: string
+  provenance: FieldProvenance | null
+  /** which side of the dispute `value` is — always announced, even when not drawn */
+  label: string
+  /** draw a bare-value chip — the blue styling alone still reads as "prior" — for the
+   *  tightest columns. The label still reaches the accessible name. */
+  hideLabel?: boolean
 }) {
   const shown =
     value.length > BADGE_VALUE_MAX_CHARS
@@ -89,15 +97,22 @@ export function DisputeBadge({
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label="Dispute details"
+          // An aria-label REPLACES the button's text, so naming only the widget would drop
+          // the value — the one thing on it a reviewer needs read out. Untruncated, since
+          // the visible chip clips at BADGE_VALUE_MAX_CHARS.
+          aria-label={`${label}: ${value || "empty"}. Dispute details`}
           className="inline-flex max-w-[120px] items-center gap-1 truncate rounded border border-[#93C5FD] bg-[#EFF6FF] px-1.5 py-0.5 text-[10px] text-black"
         >
-          {label && <span className="font-medium">{label}:</span>}
+          {!hideLabel && <span className="font-medium">{label}:</span>}
           <span className="truncate">{shown || "—"}</span>
         </button>
       </TooltipTrigger>
       <TooltipContent>
-        <DisputeTooltipBody dispute={dispute} confidence={confidence} />
+        <DisputeTooltipBody
+          dispute={dispute}
+          confidence={confidence}
+          provenance={provenance}
+        />
       </TooltipContent>
     </Tooltip>
   )
@@ -107,6 +122,7 @@ type DisputeControlsProps = {
   dispute: Dispute
   /** the one score shown for this field — judge verdict, else capture score */
   confidence: FieldConfidence
+  provenance: FieldProvenance | null
   flags: DisputeFlags
   /** absolute placement of the cluster inside the input box, vertical alignment included */
   className: string
@@ -123,6 +139,7 @@ type DisputeControlsProps = {
 export function CompactDisputeControls({
   dispute,
   confidence,
+  provenance,
   flags,
   className,
   onSwap,
@@ -138,7 +155,11 @@ export function CompactDisputeControls({
         </div>
       </TooltipTrigger>
       <TooltipContent>
-        <DisputeTooltipBody dispute={dispute} confidence={confidence} />
+        <DisputeTooltipBody
+          dispute={dispute}
+          confidence={confidence}
+          provenance={provenance}
+        />
       </TooltipContent>
     </Tooltip>
   )
@@ -148,6 +169,7 @@ export function CompactDisputeControls({
 export function InlineDisputeControls({
   dispute,
   confidence,
+  provenance,
   flags,
   className,
   onSwap,
@@ -167,19 +189,24 @@ export function InlineDisputeControls({
         value={badgeValue(dispute, flags)}
         dispute={dispute}
         confidence={confidence}
-        label={bareBadge ? "" : label}
+        provenance={provenance}
+        label={label}
+        hideLabel={bareBadge}
       />
     </div>
   )
 }
 
-/** Tooltip body: confidence chip + evidence + reasoning. */
+/** Tooltip body: confidence chip + which attempt captured it + evidence + reasoning. */
 export function DisputeTooltipBody({
   dispute,
   confidence,
+  provenance,
 }: {
   dispute: Dispute
   confidence: FieldConfidence
+  /** The per-field home for attempt attribution; Call History answers the inverse. */
+  provenance: FieldProvenance | null
 }) {
   return (
     <div className="space-y-1">
@@ -192,6 +219,14 @@ export function DisputeTooltipBody({
         >
           {confidenceLabel(confidence)}
         </span>
+        {provenance && (
+          <span className="text-[10px] text-muted-foreground">
+            Attempt {provenance.attempt}{" "}
+            <span className={cn("rounded px-1 py-0.5", modeBadgeClass(provenance.mode))}>
+              {provenance.mode}
+            </span>
+          </span>
+        )}
       </div>
       <div>
         <span className="font-medium">Prior:</span> {dispute.previousValue}

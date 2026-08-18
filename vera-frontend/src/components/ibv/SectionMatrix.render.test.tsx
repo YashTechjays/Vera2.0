@@ -24,6 +24,7 @@ vi.mock("./IbvProvider", async () => {
       disputes: { [CELL]: dispute },
       disputeFor: (p: string) => (p === CELL ? dispute : undefined),
       confidenceFor: () => resolveConfidence(dispute.confidence, null),
+      provenanceFor: () => null,
       flagsFor: () => defaultFlags(),
       applyDispute: vi.fn(),
       swapDispute: vi.fn(),
