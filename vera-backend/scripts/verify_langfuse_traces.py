@@ -45,10 +45,8 @@ from scripts.seed_langfuse_prices import (
 from vera_core.config import get_settings
 from vera_core.observability.llm_usage_export import THINKING_TOKENS_ATTR
 from vera_core.observability.usage_spans import (
-    CANCELLED_ATTR,
     SPAN_STT_USAGE,
     SPAN_TTS_USAGE,
-    TTS_CHARACTERS,
     USAGE_CACHED,
     USAGE_INPUT,
 )
@@ -93,26 +91,6 @@ def reconciles(observation: dict[str, Any]) -> bool | None:
     if reported is None or USAGE_INPUT not in (observation.get("usageDetails") or {}):
         return None
     return _usage(observation, USAGE_INPUT) + _usage(observation, USAGE_CACHED) == int(reported)
-
-
-def _report_cancelled_tts(obs: list[dict[str, Any]]) -> None:
-    """How many synthesized characters were charged on a CANCELLED request.
-
-    `TTSMetrics.characters_count` is `len(input_text)` — the text handed to the
-    synthesizer, not what was rendered — so a barge-in still bills the whole utterance.
-    Whether that matches what Cartesia actually charges depends on how much of the text
-    reached them before the cancel, which no test can settle. Print the exposure so it
-    can be reconciled against one invoice instead of assumed either way.
-    """
-    tts = [o for o in obs if o.get("name") == SPAN_TTS_USAGE]
-    cancelled = [o for o in tts if _attrs(o).get(CANCELLED_ATTR)]
-    if not cancelled:
-        return
-    chars = sum(_usage(o, TTS_CHARACTERS) for o in cancelled)
-    total = sum(_usage(o, TTS_CHARACTERS) for o in tts)
-    share = f"{chars / total:.0%}" if total else "n/a"
-    print(f"\n  {len(cancelled)} cancelled TTS request(s): {chars} of {total} characters ({share})")
-    print("  billed in full — reconcile against a Cartesia invoice before trusting the TTS line")
 
 
 def _thinking(observation: dict[str, Any]) -> int:
@@ -164,7 +142,12 @@ async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> tuple
 
     if by_langfuse:
         print(f"\n  priced by a Langfuse built-in entry, not by us: {by_langfuse}")
-    if known := [m for m in configured_models(settings) if m in KNOWN_UNPRICED]:
+    # Disjoint from by_langfuse on purpose: a tier we chose not to price but Langfuse
+    # prices anyway is covered, not uncovered, and listing it under both reads as a
+    # contradiction. What lands here is the residue nothing prices at all.
+    if known := [
+        m for m in configured_models(settings) if m in KNOWN_UNPRICED and m not in by_langfuse
+    ]:
         # Not a failure: deliberately unpriced fallback tiers (adr/devops-todo.md #23).
         # A gate that is red on a healthy system is one everyone learns to ignore.
         print(f"\n  knowingly unpriced, nothing prices these (not a failure): {known}")
@@ -221,8 +204,6 @@ def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
         for o in mismatched[:5]:
             print(f"    {o.get('name')} {o.get('usageDetails')}")
         print("    input + cached must equal the provider's own prompt-token count")
-
-    _report_cancelled_tts(obs)
 
     names = {str(o.get("name")) for o in obs}
     joined = sorted(n for n in CONTROL_PLANE_SPANS if n in names)

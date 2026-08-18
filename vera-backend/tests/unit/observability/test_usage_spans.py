@@ -143,11 +143,13 @@ class TestZeroAndCancelled:
         assert usage_span_attributes(_tts(characters_count=0)) is None
 
     def test_cancelled_tts_still_counts_its_characters(self) -> None:
-        # Barge-in: those characters already went to Cartesia and are billed (design §5.2).
+        # Characters handed to the synthesizer are billed whether or not the request was
+        # torn down, so they must still be reported. The cancelled FLAG itself is not
+        # surfaced — see usage_span_attributes for why it carries no signal.
         attrs = usage_span_attributes(_tts(cancelled=True))
         assert attrs is not None
-        assert _usage(attrs) == {TTS_CHARACTERS: 465}
-        assert attrs["vera.usage.cancelled"] is True
+        assert _usage(attrs)[TTS_CHARACTERS] == 465
+        assert "vera.usage.cancelled" not in attrs
 
     def test_tts_audio_seconds_is_operational_not_billed(self) -> None:
         attrs = usage_span_attributes(_tts())

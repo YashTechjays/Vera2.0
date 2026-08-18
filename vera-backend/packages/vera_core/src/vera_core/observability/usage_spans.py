@@ -61,7 +61,6 @@ USAGE_CACHED = "cached"
 # Diagnostics, deliberately OUTSIDE usage_details so they are never priced. Named
 # because `verify_langfuse_traces` reads them back: a consumer hardcoding the string
 # would silently report nothing after a rename.
-CANCELLED_ATTR = "vera.usage.cancelled"
 STREAMED_ATTR = "vera.usage.streamed"
 SOURCE_ATTR = "vera.usage.source"
 
@@ -117,9 +116,14 @@ def usage_span_attributes(metrics: Any) -> UsageAttributes | None:
             usage[TTS_CHARACTERS] = metrics.characters_count
         if not usage:
             return None
+        # NOT reporting metrics.cancelled: it is stream-scoped, read at a segment-scoped
+        # emit point, and SynthesizeStream.aclose() cancels the stream's main task
+        # (tts.py:821) BEFORE draining the metrics monitor (tts.py:826) — so nearly every
+        # segment reports cancelled=True regardless of barge-in. Measured on a real call:
+        # 69/69 true against 1-2 actual interruptions. A field that is always true reads
+        # as signal and is worse than no field. Re-check tts.py if livekit rescopes it.
         attrs = {
             STREAMED_ATTR: metrics.streamed,
-            CANCELLED_ATTR: metrics.cancelled,
             # Operational only — Cartesia bills characters, not output duration.
             "vera.usage.audio_seconds": metrics.audio_duration,
         }

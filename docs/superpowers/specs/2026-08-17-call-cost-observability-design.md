@@ -382,7 +382,6 @@ gen_ai.request.model                = "sonic-3.5-2026-05-04"
 gen_ai.provider.name                = "Cartesia"
 langfuse.observation.usage_details  = '{"tts_characters": 465}'
 vera.usage.streamed                 = true
-vera.usage.cancelled                = false
 vera.usage.audio_seconds            = 27.64      # operational only, NOT priced
 <call_trace_attributes(room_name)>
 
@@ -419,12 +418,33 @@ Rule: `usage_span_attributes` returns `None` when every billable quantity is zer
 `audio_duration == 0 and input_tokens == 0 and output_tokens == 0`, TTS when `characters_count == 0`
 and both token counts are zero.
 
-### 5.2 Cancelled TTS still counts
+### 5.2 Cancelled TTS still counts — but the `cancelled` flag is NOT reported
 
-On barge-in, `TTSMetrics.cancelled=True`. Those characters were already sent to Cartesia and are
-still billed, so the generation **is** emitted and the characters **are** counted, tagged
-`vera.usage.cancelled=true` so barge-in spend stays queryable. Suppressing them would
-under-report real money.
+Characters handed to the synthesizer are billed whether or not the request was torn down, so the
+generation **is** emitted and the characters **are** counted. Suppressing them would under-report
+real money. That part stands.
+
+**Corrected 2026-08-18 — `TTSMetrics.cancelled` does not mean "barge-in", and is deliberately not
+put on the span.** The original text here assumed it flagged interruptions and tagged spans
+`vera.usage.cancelled=true` so barge-in spend stayed queryable. It does not, for a structural
+reason:
+
+- `cancelled=self._task.cancelled()` (`tts.py:744`) reads the **stream's** main task, created once
+  per `SynthesizeStream` (`tts.py:581`);
+- but `_emit_metrics()` fires **per segment**, on each `ev.is_final` (`tts.py:771`);
+- and `aclose()` calls `cancel_and_wait(self._task)` (`tts.py:821`) *before* awaiting
+  `self._metrics_task` (`tts.py:826`), so any segment flushed during teardown sees an
+  already-cancelled task.
+
+A stream-scoped flag read at a segment-scoped emit point, with teardown ordered to guarantee it is
+set. **Measured on a real 17-minute call: 69 of 69 TTS requests reported `cancelled=true`, against
+1–2 actual interruptions.** A field that is always true reads as signal, and it did mislead — it
+produced a "100% of TTS characters billed on cancelled requests" finding that looked like an
+over-billing bug and was an artifact. Worse than absent, so it is now absent.
+
+There is no interruption signal available from `TTSMetrics`. If barge-in spend needs to be
+queryable, it has to come from the session's interruption events, not from here. Re-check
+`tts.py` after any `livekit-agents` bump in case the field is rescoped.
 
 ### 5.3 STT units: integer milliseconds — Langfuse cannot store fractions
 
@@ -640,7 +660,7 @@ Neither `STTMetrics` nor `TTSMetrics` carries any text field; `characters_count`
 `len(input_text)`, a length. Every attribute in §5 is one of:
 
 - a count or duration (`characters_count`, `audio_duration`, token counts)
-- a boolean (`streamed`, `cancelled`)
+- a boolean (`streamed`)
 - a closed enum (`vera.usage.source` → `TurnSource`; `vera.eval.pass`; `gen_ai.provider.name`)
 - a fixed model name Vera itself passed in
 - the existing `call_trace_attributes` set (room name + tenant/call UUIDs)
@@ -689,7 +709,8 @@ The pure/wiring split makes most assertions cheap — `usage_span_attributes` ta
   the model attributes track `metadata.model_name`.
 - **`langfuse.observation.type == "generation"` on every cost-bearing span** — the §2.1 regression.
   Nothing else about the output looks wrong when this is missing; the cost column just goes blank.
-- Zero-usage events produce no span (§5.1); cancelled TTS produces one *and* counts (§5.2).
+- Zero-usage events produce no span (§5.1); a torn-down TTS request produces one *and* counts
+  its characters, without reporting the meaningless `cancelled` flag (§5.2).
 - `vera.usage.source` present on takeover spans, absent on cascade ones.
 - PHI denylist via the existing `assert_no_phi_values(span, ...)` helper — extended to the eval
   span with a transcript-shaped string, since that is the one span whose inputs are PHI-dense.
