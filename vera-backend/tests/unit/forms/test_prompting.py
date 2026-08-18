@@ -14,6 +14,7 @@ from vera_core.forms.call_plan import (
     compile_call_plan,
     fuse_prefill,
 )
+from vera_core.forms.catalog import SCHEMAS
 from vera_core.forms.dsl import Codes, FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
@@ -145,6 +146,23 @@ class TestTaskText:
         assert "TERMINATION RULE — no_out_of_network_coverage" in task("insurance_basics").prompt
         firing = {t.task_key for t in RENDERED.tasks if "TERMINATION RULE" in t.prompt}
         assert firing == {"introduction", "insurance_basics"}
+
+    @pytest.mark.parametrize("insurance_type", sorted(SCHEMAS))
+    def test_closing_details_are_asked_only_by_the_task_that_owns_them(
+        self, insurance_type: str
+    ) -> None:
+        """A flow-rule note and a contradiction reason render into the task owning the LAST
+        field of their condition, so closing-detail language in one makes an early task ask
+        for the representative's name mid-verification."""
+        filename, _build = SCHEMAS[insurance_type]
+        doc = load_document((FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8"))
+        owner = doc.section_to_task()[doc.rep_call_reference_number_field.split(".")[1]]
+        phrases = ("representative name", "representative's name", "reference number", "rep name")
+        for rendered in render_task_prompts(doc).tasks:
+            if rendered.task_key == owner:
+                continue
+            lowered = rendered.prompt.lower()
+            assert not any(p in lowered for p in phrases), (insurance_type, rendered.task_key)
 
     def test_contradictions_attach_to_last_field_task(self) -> None:
         assert (

@@ -422,6 +422,9 @@ class Task(_Model):
 
 
 class FlowRule(_Model):
+    """`note` states only WHY the rule fires; the renderer supplies the flow action and
+    renders the note into the task owning the LAST field in `when`."""
+
     rule_key: str
     when: Condition
     action: Literal["terminate_call"]

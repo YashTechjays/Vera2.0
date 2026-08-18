@@ -1317,11 +1317,9 @@ def build_ibv_standard() -> FormSchemaDoc:
                 action="terminate_call",
                 skip_to_task="wrap_up",
                 note=(
-                    "The representative confirmed the patient's insurance is not "
-                    "active even after the member ID, insurance provider and "
-                    "verification details were provided. Skip all remaining "
-                    "tasks, collect the representative name and call reference "
-                    "number, then end the call."
+                    "The representative confirmed the patient's insurance is not active even "
+                    "after the member ID, insurance provider and verification details were "
+                    "provided."
                 ),
             ),
             FlowRule(
@@ -1337,8 +1335,7 @@ def build_ibv_standard() -> FormSchemaDoc:
                 skip_to_task="wrap_up",
                 note=(
                     "Both the doctor and facility are out of network and the plan has no "
-                    "out-of-network coverage. Skip all remaining tasks, collect the "
-                    "representative name and call reference number, then end the call."
+                    "out-of-network coverage."
                 ),
             ),
         ],

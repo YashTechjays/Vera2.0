@@ -5218,7 +5218,7 @@
       },
       "action": "terminate_call",
       "skip_to_task": "wrap_up",
-      "note": "The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
+      "note": "The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided."
     },
     {
       "rule_key": "no_out_of_network_coverage",
@@ -5243,7 +5243,7 @@
       },
       "action": "terminate_call",
       "skip_to_task": "wrap_up",
-      "note": "Both the doctor and facility are out of network and the plan has no out-of-network coverage. Skip all remaining tasks, collect the representative name and call reference number, then end the call."
+      "note": "Both the doctor and facility are out of network and the plan has no out-of-network coverage."
     }
   ],
   "contradictions": [
