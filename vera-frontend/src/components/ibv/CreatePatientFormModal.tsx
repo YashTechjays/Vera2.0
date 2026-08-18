@@ -198,7 +198,7 @@ export function CreatePatientFormModal() {
           <DialogDescription>
             {picking
               ? "Choose the form type to create."
-              : "Fill in the patient details. Fields marked * are required to create the form; the rest are collected on the call."}
+              : "Fill in the patient details. Fields marked * are required to create the form. The rest are collected on the call."}
           </DialogDescription>
         </DialogHeader>
 
