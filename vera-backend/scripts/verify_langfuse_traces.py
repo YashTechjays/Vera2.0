@@ -6,7 +6,8 @@ that, and this is the check for it — the design makes that pass the definition
 done, so it should be a command rather than a click-through.
 
     just langfuse-verify              # newest call trace
-    just langfuse-verify <trace-id>   # a specific one
+    just langfuse-verify <call-id>    # by CALL id (what a human has to hand)
+    just langfuse-verify <trace-id>   # by Langfuse trace id
 
 Exits non-zero when something is wrong, so it works as a gate. What it checks:
 
@@ -43,6 +44,7 @@ from scripts.seed_langfuse_prices import (
     matching_entry,
 )
 from vera_core.config import get_settings
+from vera_core.observability.correlation import parse_room_name
 from vera_core.observability.llm_usage_export import THINKING_TOKENS_ATTR
 from vera_core.observability.usage_spans import (
     SPAN_STT_USAGE,
@@ -55,7 +57,8 @@ from vera_core.observability.usage_spans import (
 # point of the cross-process trace link; in a separate trace they are orphans.
 CONTROL_PLANE_SPANS = ("vera.post_call.eval", "vera.call_summary", "vera.coaching.whisper")
 
-# The worker's root span for a call — used to find the newest call trace.
+# The worker's root span for a call. Used to CONFIRM which of ONE call's traces the
+# worker rooted — never to find a call trace in the first place (see _call_traces).
 CALL_ROOT_SPAN = "job_entrypoint"
 
 
@@ -116,14 +119,72 @@ def _thinking(observation: dict[str, Any]) -> int:
     return int(_attrs(observation).get(THINKING_TOKENS_ATTR, 0) or 0)
 
 
-async def _newest_call_trace(client: httpx.AsyncClient) -> str | None:
-    response = await client.get("/api/public/traces", params={"limit": 50})
+async def _call_traces(client: httpx.AsyncClient, limit: int = 100) -> list[dict[str, Any]]:
+    """Recent call traces, newest first, identified by SESSION rather than by name.
+
+    Not by trace name. Langfuse takes a trace's name from whichever observation it
+    ingests first, and on a long call the root `job_entrypoint` span does not end until
+    hangup while its children flush continuously through the BatchSpanProcessor — so the
+    trace often lands with an EMPTY name and is never backfilled. Selecting on the name
+    then skips the newest call and validates an OLDER one while printing PASS, which is
+    the worst failure a gate can have. Observed: a call whose trace was named "" was
+    passed over in favour of the previous call's trace.
+
+    `sessionId` is the room name (`room_name_for_call`), stamped on every span by
+    `call_trace_attributes`, so it is set whichever span arrives first.
+    """
+    response = await client.get("/api/public/traces", params={"limit": limit})
     response.raise_for_status()
-    for trace in response.json().get("data", []):
-        if trace.get("name") == CALL_ROOT_SPAN:
-            trace_id: str = trace["id"]
-            return trace_id
-    return None
+    rows: list[dict[str, Any]] = response.json().get("data", [])
+    return [t for t in rows if parse_room_name(str(t.get("sessionId") or "")) is not None]
+
+
+def _looks_like_call_id(value: str) -> bool:
+    """A UUID is a call id; a 32-hex OTel trace id carries no dashes."""
+    return "-" in value
+
+
+def _worker_rooted(same_call: list[dict[str, Any]]) -> dict[str, Any]:
+    """Of ONE call's traces, the one the worker rooted; the newest otherwise.
+
+    Name matching is safe here and only here: every candidate belongs to the same call,
+    so a missing name costs nothing. Applying it ACROSS calls is the bug in _call_traces.
+    """
+    named = [t for t in same_call if t.get("name") == CALL_ROOT_SPAN]
+    return named[0] if named else same_call[0]
+
+
+async def _resolve_target(client: httpx.AsyncClient, wanted: str | None) -> str | None:
+    """The trace to check: an explicit trace id, an explicit CALL id, or the newest call.
+
+    Accepting a call id matters because that is what a human has to hand — it is in the
+    URL, the DB and the logs, while a trace id exists only inside Langfuse.
+    """
+    if wanted and not _looks_like_call_id(wanted):
+        return wanted
+
+    traces = await _call_traces(client)
+    if not traces:
+        return None
+    if wanted:
+        session = next(
+            (str(t.get("sessionId")) for t in traces if wanted in str(t.get("sessionId") or "")),
+            None,
+        )
+        if session is None:
+            print(f"\nno call trace found for call id {wanted}")
+            return None
+    else:
+        session = str(traces[0].get("sessionId"))
+
+    same_call = [t for t in traces if str(t.get("sessionId")) == session]
+    chosen = _worker_rooted(same_call)
+    print(f"\nchecking {session}\n  -> trace {chosen['id']}")
+    if others := [t["id"] for t in same_call if t["id"] != chosen["id"]]:
+        # e.g. the control plane's pre-dispatch `vera.dispatch.stage_call`, which cannot
+        # join a trace whose worker does not exist yet. It carries no cost.
+        print(f"  (same call, not checked: {others})")
+    return str(chosen["id"])
 
 
 async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> tuple[bool, bool]:
@@ -277,9 +338,9 @@ async def main() -> int:
     ) as client:
         entries_present, all_covered = await _price_entry_report(client, settings)
 
-        trace_id = wanted or await _newest_call_trace(client)
+        trace_id = await _resolve_target(client, wanted)
         if trace_id is None:
-            print(f"\nno `{CALL_ROOT_SPAN}` trace found — place a call first.")
+            print("\nno call trace found — place a call first.")
             return 1
         response = await client.get(f"/api/public/traces/{trace_id}")
         response.raise_for_status()
