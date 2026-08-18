@@ -155,11 +155,13 @@ _BORDER_VALUE = Border(*(Side(style="thin", color=_TEAL),) * 4)
 _BORDER_GREEN = Border(*(Side(style="thin", color="1F9D57"),) * 4)
 _BOLD = Font(bold=True)
 _LABEL_FONT = Font(bold=True, color=_NAVY)
-# Wrapping is on everywhere: a header or value too long for its column must fold,
-# never truncate. Vertical centering is what makes a rowspan band label sit beside
-# its rows instead of floating at the top of the merge.
+# Wrapping is on everywhere: a header or value too long for its column must fold, never
+# truncate. Values anchor top — centered, a note past _MAX_LINES overflows its capped row
+# at BOTH ends and the opening words are what the reader loses. _LEFT_MIDDLE is only for a
+# rowspan band's static columns, which would otherwise float at the top of the merge.
 _CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-_LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+_LEFT = Alignment(horizontal="left", vertical="top", wrap_text=True)
+_LEFT_MIDDLE = Alignment(horizontal="left", vertical="center", wrap_text=True)
 _FILL_CONTEXT = PatternFill("solid", start_color="22C55E")  # Section.tsx bg-[#22c55e]
 _FILL_PLAIN = PatternFill("solid", start_color="EFEFEF")  # --color-ibv-label-bg
 _FILL_GRID_HEADER = PatternFill("solid", start_color="EFEFEF")  # SectionMatrix TH bg-ibv-label-bg
@@ -224,7 +226,7 @@ def _style(
     *,
     fill: PatternFill | None = None,
     bold: bool = False,
-    center: bool = False,
+    alignment: Alignment = _LEFT,
     border: Border = _BORDER_VALUE,
     font: Font | None = None,
 ) -> None:
@@ -236,7 +238,7 @@ def _style(
         c.font = font
     elif bold:
         c.font = _BOLD
-    c.alignment = _CENTER if center else _LEFT
+    c.alignment = alignment
 
 
 def _vmerge(ws: Worksheet, top: int, col: int, n: int) -> None:
@@ -270,7 +272,7 @@ def _title_bar(ws: Worksheet, row: int, col: int, span: int, text: str, *, conte
     fill = _FILL_CONTEXT if context else _FILL_PLAIN
     border = _BORDER_GREEN if context else _BORDER_VALUE
     for i in range(span):
-        _style(ws, row, col + i, fill=fill, bold=True, center=True, border=border)
+        _style(ws, row, col + i, fill=fill, bold=True, alignment=_CENTER, border=border)
 
 
 def _leaf_row(ws: Worksheet, row: int, col: int, path: str, leaf: Leaf, ctx: _Ctx) -> None:
@@ -336,7 +338,7 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
     headers = static + [t for _, t in table.columns] + [t for _, t in table.extra_columns]
     for i, h in enumerate(headers):
         ws.cell(row=r, column=1 + i, value=h)
-        _style(ws, r, 1 + i, fill=_FILL_GRID_HEADER, bold=True, center=True)
+        _style(ws, r, 1 + i, fill=_FILL_GRID_HEADER, bold=True, alignment=_CENTER)
     r += 1
 
     icd_col = 2 if table.has_icd else None
@@ -370,7 +372,7 @@ def _grid_block(ws: Worksheet, row: int, section_key: str, section: Section, ctx
         # fill included — in the extras loop above; don't clobber them here).
         for rr in range(top, top + n):
             for col in band_cols:
-                _style(ws, rr, col, font=_LABEL_FONT if col == 1 else None)
+                _style(ws, rr, col, font=_LABEL_FONT if col == 1 else None, alignment=_LEFT_MIDDLE)
     return r - row
 
 
