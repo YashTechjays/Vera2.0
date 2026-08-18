@@ -93,6 +93,23 @@ def reconciles(observation: dict[str, Any]) -> bool | None:
     return _usage(observation, USAGE_INPUT) + _usage(observation, USAGE_CACHED) == int(reported)
 
 
+def _usage_values(observation: dict[str, Any]) -> list[int]:
+    """The non-zero usage counts on this observation. Empty when it reports none, or
+    reports only zeros — both mean there is nothing here to bill."""
+    usage = observation.get("usageDetails") or {}
+    return [int(v) for v in usage.values() if int(v or 0)]
+
+
+def _cost(observation: dict[str, Any]) -> float | None:
+    """The cost Langfuse computed, or None when it computed none. Distinguishing the
+    two is the whole point: 0.0 is an answer, None is a missing price entry."""
+    for key in ("calculatedTotalCost", "totalCost"):
+        value = observation.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
 def _thinking(observation: dict[str, Any]) -> int:
     """The thinking tokens the export-time correction derived for this span, 0 when it
     derived none (or the span is not one it touched)."""
@@ -165,12 +182,16 @@ def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
     print(f"  totalCost={full.get('totalCost')}  observations={len(obs)}")
 
     generations = [o for o in obs if str(o.get("type")).upper() == "GENERATION"]
-    # Only a generation that REPORTS usage can be priced. The SDK also emits
-    # usage-less spans carrying a model attribute — `user_turn`, `tts_node`,
-    # `llm_fallback_adapter` — which Langfuse types as generations. Those are blank
-    # by nature, not by fault, and counting them would keep this gate permanently red.
-    billable = [o for o in generations if o.get("usageDetails")]
-    blank = [o for o in billable if not (o.get("calculatedTotalCost") or o.get("totalCost"))]
+    # Only a generation that reports NON-ZERO usage can be priced. Two shapes are blank
+    # by nature rather than by fault, and counting either would keep this gate
+    # permanently red: the SDK's usage-less spans that carry a model attribute
+    # (`user_turn`, `tts_node`, `llm_fallback_adapter`), and a request that genuinely
+    # consumed nothing — an interrupted or aborted LLM turn reports
+    # `{"input": 0, "output": 0, "total": 0}`, a truthy dict of zeros.
+    billable = [o for o in generations if any(_usage_values(o))]
+    # `cost is None` means never priced. Cost == 0 means priced, and the answer was
+    # zero. Treating a real 0 as blank reports correct instrumentation as broken.
+    blank = [o for o in billable if _cost(o) is None]
 
     by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for o in billable:
@@ -181,8 +202,8 @@ def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
         f"({len(generations) - len(billable)} usage-less SDK spans ignored) ---"
     )
     for model, group in sorted(by_model.items()):
-        priced = sum(1 for o in group if (o.get("calculatedTotalCost") or o.get("totalCost")))
-        cost = sum(float(o.get("calculatedTotalCost") or o.get("totalCost") or 0) for o in group)
+        priced = sum(1 for o in group if _cost(o) is not None)
+        cost = sum(_cost(o) or 0.0 for o in group)
         cached = sum(_usage(o, USAGE_CACHED) for o in group)
         prompt = cached + sum(_usage(o, USAGE_INPUT) for o in group)
         ratio = f"{cached / prompt:.0%}" if prompt else "n/a"
@@ -218,13 +239,26 @@ def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
     if blank and not prices_ok:
         print(f"\n  {len(blank)} generation(s) with BLANK cost — seed the missing model entries")
     elif blank:
-        # Every entry exists, so the gap is chronological rather than configuration:
-        # Langfuse computes cost at INGESTION and stores it. Seeding afterwards never
-        # backfills. Saying "seed the missing entries" here would send someone to
-        # re-run a seeder that is already correct.
-        print(f"\n  {len(blank)} generation(s) with BLANK cost, but every price entry EXISTS.")
-        print("  This trace was ingested BEFORE those entries were seeded — Langfuse")
-        print("  prices at ingestion time and does not backfill. Place a new call.")
+        print(f"\n  {len(blank)} generation(s) with BLANK cost, but every price entry EXISTS:")
+        for o in blank[:5]:
+            print(f"    {o.get('name')} model={o.get('model')!r} usage={o.get('usageDetails')}")
+        # Only a WHOLESALE blank points at seeding order — Langfuse prices at ingestion
+        # and never backfills, so a trace older than its price entries has EVERY span
+        # for that model blank. A few blanks among many priced ones is a different bug,
+        # and sending someone to re-run an already-correct seeder wastes the trip.
+        affected = {str(o.get("model")) for o in blank}
+        wholesale = all(
+            all(_cost(o) is None for o in by_model[model])
+            for model in affected
+            if model in by_model
+        )
+        if wholesale:
+            print("  Every generation for these models is blank, which is the signature of a")
+            print("  trace ingested BEFORE its price entries. Langfuse prices at ingestion")
+            print("  and does not backfill — seed, then place a new call.")
+        else:
+            print("  Other generations for the same model DID price, so this is not seeding")
+            print("  order. Check the model name and usage keys on the spans listed above.")
     return not blank and not mismatched
 
 
