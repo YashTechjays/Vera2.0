@@ -6,6 +6,7 @@ import {
   isSatisfied,
   titleOf,
 } from "./schema"
+import { dialedPhonePath, E164_RE } from "./phone"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -164,6 +165,11 @@ function validateLeaf(
 
   if (f.validation?.pattern && !new RegExp(f.validation.pattern).test(value)) {
     return `${f.title} is invalid`
+  }
+
+  // The dialed phone must be E.164 — the backend 422s on it at intake and dispute-resolve.
+  if (leaf.path === dialedPhonePath(schema) && !E164_RE.test(value)) {
+    return `${f.title} must be an international number like +12125551234`
   }
 
   const dateFormat = f.validation?.date_format

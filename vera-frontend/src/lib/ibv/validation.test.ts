@@ -224,6 +224,55 @@ describe("missingCreateLeaves", () => {
   })
 })
 
+const DIALED_PHONE = "sections.insurance_reference_information.insurance_phone_number"
+const CONTEXT_PHONE = "sections.verification_information.callback_number"
+
+// Dialed-phone E.164 checks: keyed on the promoted handle, not the leaf type,
+// so the context-only phone leaves stay free-text (backend parity).
+const phoneSchema = {
+  dsl_version: "2.1",
+  name: "Test Form",
+  sections: {
+    insurance_reference_information: {
+      title: "Insurance Reference Information",
+      fields: {
+        insurance_phone_number: { type: "phone", title: "Insurance Provider Phone" },
+      },
+    },
+    verification_information: {
+      title: "Verification Information",
+      fields: {
+        callback_number: { type: "phone", title: "Callback Number" },
+      },
+    },
+  },
+  system_fields: { insurance_provider_phone_number: DIALED_PHONE },
+} as unknown as FormSchema
+
+describe("validateAll — dialed phone E.164", () => {
+  it("flags a non-E.164 dialed phone value", () => {
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "555-010-0100" })[DIALED_PHONE]).toMatch(
+      /international/i,
+    )
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "+1 555 0100" })[DIALED_PHONE]).toMatch(
+      /international/i,
+    )
+  })
+
+  it("accepts a valid E.164 dialed phone value", () => {
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "+12125551234" })[DIALED_PHONE]).toBeUndefined()
+  })
+
+  it("leaves context-only phone leaves free-text", () => {
+    expect(validateAll(phoneSchema, { [CONTEXT_PHONE]: "555-010-0100" })[CONTEXT_PHONE]).toBeUndefined()
+  })
+
+  it("applies the same check in create mode", () => {
+    const errors = validateCreate(phoneSchema, { [DIALED_PHONE]: "5550100" }, { includeRequired: false })
+    expect(errors[DIALED_PHONE]).toMatch(/international/i)
+  })
+})
+
 describe("validateAll — numeric consistency (lifetime maximum triplet)", () => {
   const TOTAL = "sections.lifetime_maximum.total"
   const MET = "sections.lifetime_maximum.met_amount"

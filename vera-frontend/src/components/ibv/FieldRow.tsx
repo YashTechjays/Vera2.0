@@ -6,6 +6,7 @@ import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
 import { confidenceHighlightClass } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
+import { dialedPhonePath } from "@/lib/ibv/phone"
 import { USAGE_META } from "./usageMeta"
 import {
   Tooltip,
@@ -50,7 +51,7 @@ type Props = {
   depth: number
   /** applicable_when chain from the section down to this leaf */
   gates: Condition[]
-  /** narrow layout (the 340px rail): controls + badge overflow the ~120px input,
+  /** narrow layout (the 420px rail): controls + badge overflow the narrow input,
    *  so the badge folds into the tooltip */
   compact?: boolean
 }
@@ -116,7 +117,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
         {prov && <ProvenanceTooltip prov={prov} />}
       </div>
 
-      <div className="relative flex flex-1 items-stretch">
+      <div className="relative flex min-w-0 flex-1 items-stretch">
         <FieldRenderer
           field={field}
           path={path}
@@ -129,6 +130,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? disputeGutter : undefined}
           noRightBorder
+          countrySelect={schema !== null && path === dialedPhonePath(schema)}
         />
         {showDispute &&
           (compact ? (
