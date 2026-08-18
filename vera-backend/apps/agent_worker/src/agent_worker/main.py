@@ -87,10 +87,6 @@ logger = logging.getLogger("agent_worker")
 # Bound the wait so a never-answered outbound call doesn't pin a worker forever.
 _SPEAKER_TIMEOUT_S = 60.0
 
-# create_redis() sets no socket timeout, so an unbounded await here could stall the
-# greeting on a wedged-but-reachable Redis; best-effort tracing must never do that.
-_TRACE_LINK_PUBLISH_TIMEOUT_S = 2.0
-
 # A SIP participant joins the room while it is still *ringing* (JOINING state) and
 # only sets sip.callStatus="active" once the callee answers. Greeting on mere
 # presence would talk into a ringing phone, so the SIP callee counts as ready only
@@ -277,22 +273,6 @@ async def _emit_call_failed(
     await bus.emit(CallFailedEvent(room_name=room_name, reason=reason, ts=now_ms))
 
 
-async def _publish_trace_link(
-    redis: Redis,
-    room_name: str,
-    traceparent: str,
-    *,
-    timeout_s: float = _TRACE_LINK_PUBLISH_TIMEOUT_S,
-) -> None:
-    """Best-effort trace-link publish, time-boxed so a wedged Redis degrades this call
-    to session-only correlation instead of delaying the greeting."""
-    try:
-        async with asyncio.timeout(timeout_s):
-            await TraceLinkStore(redis).publish(room_name, traceparent)
-    except TimeoutError as exc:
-        logger.warning("trace link publish timed out: %s", type(exc).__name__)
-
-
 class CallLifecycleEmitter:
     """Best-effort lifecycle signals to the control plane. A bus failure must never
     break a live call — log and continue (mirrors the transcript publisher's posture)."""
@@ -419,7 +399,9 @@ async def entrypoint(ctx: JobContext) -> None:
         # eval, summary, coaching whisper) join THIS trace rather than forming their
         # own. Langfuse's per-trace cost rollup is what makes a per-call total real.
         if events_redis is not None and (traceparent := current_traceparent()):
-            await _publish_trace_link(events_redis, room_name, traceparent)
+            # TraceLinkStore is time-boxed internally, so a wedged Redis degrades this
+            # call to session-only correlation rather than delaying the greeting.
+            await TraceLinkStore(events_redis).publish(room_name, traceparent)
 
         # Dispatch metadata gates greeting timing. The /calls path passes none, so it
         # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so

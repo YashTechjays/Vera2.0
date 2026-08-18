@@ -11,13 +11,9 @@ Both are fixed the same way: one short Vera-owned observation per
 usage keys and matches each against a model price entry, so non-token billing units
 price exactly like tokens. Vera holds no rates — see `scripts/seed_langfuse_prices.py`.
 
-Two contracts this module must not break:
-
-- **Only `generation` and `embedding` observations carry cost.** A plain span ingests
-  cleanly and renders BLANK cost, which looks identical to broken instrumentation.
-- **Usage values must be integers.** Langfuse stores them as `Map(String, UInt64)`;
-  a float is truncated on the OTel route and dropped outright on the SDK route. Audio
-  is therefore reported in whole milliseconds, rounded here rather than in ingestion.
+The cost contracts this module must not break (observation type, integer usage values,
+the usage-key strings) are stated once in `vera_core/CLAUDE.md` -> "Cost tracking"; that
+section is canonical, and the notes below cover only what is specific to this module.
 
 PHI: neither STTMetrics nor TTSMetrics carries any text field (`characters_count` is
 `len(input_text)`, a length). Every attribute below is a count, duration, boolean,
@@ -62,6 +58,13 @@ USAGE_OUTPUT = "output"
 # the seeded prices must match exactly exists in exactly one place.
 USAGE_CACHED = "cached"
 
+# Diagnostics, deliberately OUTSIDE usage_details so they are never priced. Named
+# because `verify_langfuse_traces` reads them back: a consumer hardcoding the string
+# would silently report nothing after a rename.
+CANCELLED_ATTR = "vera.usage.cancelled"
+STREAMED_ATTR = "vera.usage.streamed"
+SOURCE_ATTR = "vera.usage.source"
+
 type UsageAttributes = dict[str, str | int | float | bool]
 
 _tracer = trace.get_tracer("vera.observability.usage")
@@ -76,8 +79,10 @@ def llm_token_usage(*, prompt: int, cached: int, output: int) -> dict[str, int]:
     zero-valued key would demand a price entry for a unit nobody bills.
     """
     details: dict[str, int] = {}
-    if prompt - cached:
-        details[USAGE_INPUT] = prompt - cached
+    # Floored at 0: a provider whose prompt count EXCLUDES cached tokens would otherwise
+    # write a negative value into a Map(String, UInt64), wrapping to ~1.8e19.
+    if uncached := max(0, prompt - cached):
+        details[USAGE_INPUT] = uncached
     if cached:
         details[USAGE_CACHED] = cached
     if output:
@@ -113,8 +118,8 @@ def usage_span_attributes(metrics: Any) -> UsageAttributes | None:
         if not usage:
             return None
         attrs = {
-            "vera.usage.streamed": metrics.streamed,
-            "vera.usage.cancelled": metrics.cancelled,
+            STREAMED_ATTR: metrics.streamed,
+            CANCELLED_ATTR: metrics.cancelled,
             # Operational only — Cartesia bills characters, not output duration.
             "vera.usage.audio_seconds": metrics.audio_duration,
         }
@@ -124,19 +129,38 @@ def usage_span_attributes(metrics: Any) -> UsageAttributes | None:
             usage[STT_AUDIO_MS] = audio_ms
         if not usage:
             return None
-        attrs = {"vera.usage.streamed": metrics.streamed}
+        attrs = {STREAMED_ATTR: metrics.streamed}
     else:
         return None
 
     attrs[OBSERVATION_TYPE_ATTR] = GENERATION
     attrs[USAGE_DETAILS_ATTR] = json.dumps(usage)
-    if (meta := metrics.metadata) is not None:
-        if meta.model_name:
-            attrs[OBSERVATION_MODEL_ATTR] = meta.model_name
-            attrs["gen_ai.request.model"] = meta.model_name
-        if meta.model_provider:
-            attrs["gen_ai.provider.name"] = meta.model_provider
+    meta = metrics.metadata
+    model_name = meta.model_name if meta is not None else None
+    if model_name:
+        attrs[OBSERVATION_MODEL_ATTR] = model_name
+        attrs["gen_ai.request.model"] = model_name
+    if meta is not None and meta.model_provider:
+        attrs["gen_ai.provider.name"] = meta.model_provider
     return attrs
+
+
+# Whether a plugin reports a model name is a property of that plugin, not of the
+# request, so the warning below would otherwise repeat once per utterance for a whole
+# call — on the voice loop. Warn once per emitter label instead.
+_warned_nameless: set[str] = set()
+
+
+def _warn_if_nameless(metrics: Any, attrs: UsageAttributes) -> None:
+    """Langfuse matches a price entry by model name, so a nameless generation renders
+    blank cost — indistinguishable in the UI from broken instrumentation."""
+    if OBSERVATION_MODEL_ATTR in attrs:
+        return
+    label = str(getattr(metrics, "label", "") or type(metrics).__name__)
+    if label in _warned_nameless:
+        return
+    _warned_nameless.add(label)
+    logger.warning("usage generations from %s carry no model name; cost renders blank", label)
 
 
 def _emit_usage_span(
@@ -149,10 +173,11 @@ def _emit_usage_span(
     attrs = usage_span_attributes(metrics)
     if attrs is None:
         return
+    _warn_if_nameless(metrics, attrs)
     if room_name is not None:
         attrs.update(call_trace_attributes(room_name))
     if source is not None:
-        attrs["vera.usage.source"] = source
+        attrs[SOURCE_ATTR] = source
     name = SPAN_TTS_USAGE if isinstance(metrics, TTSMetrics) else SPAN_STT_USAGE
     # A point-in-time observation: every attribute is known up front, so open and close
     # immediately. `context=None` means "use the ambient context", which is what the

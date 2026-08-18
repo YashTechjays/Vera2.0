@@ -25,7 +25,7 @@ from sqlalchemy import select
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Transcript
-from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
+from vera_core.observability import TraceLinkStore, call_scoped_span, room_name_for_call
 from vera_core.transcript import ROLE_COACHING, ROLE_DTMF, ROLE_WHISPER, TurnRole, source_for_role
 
 if TYPE_CHECKING:
@@ -263,15 +263,9 @@ async def summarize_call(
         )
 
     # The SDK auto-instruments the LLM request, but as a root trace with no link to the
-    # call — real spend that no per-call cost query can find. This parents it into the
-    # call's own trace; a missing/expired link degrades to a root span.
-    parent = await trace_links.resolve(room_name) if trace_links is not None else None
-    with _tracer.start_as_current_span(
-        "vera.call_summary",
-        context=parent,
-        attributes=call_trace_attributes(room_name),
-        record_exception=False,
-        set_status_on_exception=False,
+    # call — real spend that no per-call cost query can find.
+    async with call_scoped_span(
+        _tracer, "vera.call_summary", room_name=room_name, trace_links=trace_links
     ):
         reply = await llm.complete(system=SUMMARY_SYSTEM_PROMPT, user=format_diarized(turns))
     sections = parse_sections(reply)

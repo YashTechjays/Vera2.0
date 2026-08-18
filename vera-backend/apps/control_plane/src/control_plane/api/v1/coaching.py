@@ -44,7 +44,7 @@ from control_plane.responses import ResponseModel, ok
 from vera_core.call_stream import CallStreamService
 from vera_core.models import Call, InterventionEvent
 from vera_core.models.enums import InterventionType
-from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
+from vera_core.observability import TraceLinkStore, call_scoped_span, room_name_for_call
 from vera_core.stt import ResilientSTT, STTUnavailableError
 from vera_core.transcript import ROLE_COACHING, ROLE_WHISPER, SOURCE_SUPERVISOR
 
@@ -197,19 +197,10 @@ async def on_demand_transcribe(
     room_name = room_name_for_call(tenant_id, call.id)
     try:
         # Joins the agent worker's trace for this call (published at the job entrypoint),
-        # so whisper spend sums into the call's total. If the link is missing or expired
-        # this is None and the span becomes its own trace root — degraded, not broken.
-        # The nested vera.stt.usage generation inherits whichever we get.
-        #
-        # record_exception/set_status_on_exception are OFF: an STT provider error can
-        # embed the request payload (the supervisor's audio), and both would copy its
-        # message onto the span.
-        with _tracer.start_as_current_span(
-            "vera.coaching.whisper",
-            context=await trace_links.resolve(room_name),
-            attributes=call_trace_attributes(room_name),
-            record_exception=False,
-            set_status_on_exception=False,
+        # so whisper spend sums into the call's total. The nested vera.stt.usage
+        # generation inherits whichever parent we get.
+        async with call_scoped_span(
+            _tracer, "vera.coaching.whisper", room_name=room_name, trace_links=trace_links
         ):
             text = await whisper_stt.transcribe(
                 audio_bytes, mime_type=audio.content_type or "audio/webm"

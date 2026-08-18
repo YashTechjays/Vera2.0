@@ -4,10 +4,9 @@ The script's value is that it FAILS on a real problem, so the parts that decide
 pass/fail are worth testing: what counts as billable, and what counts as reconciled.
 """
 
-from types import SimpleNamespace
 from typing import Any
 
-from scripts.verify_langfuse_traces import configured_models, reconciles
+from scripts.verify_langfuse_traces import reconciles
 
 
 def _obs(usage: dict[str, int] | None, reported_input: int | None) -> dict[str, Any]:
@@ -37,31 +36,3 @@ class TestReconciles:
 
     def test_a_span_with_no_usage_is_unverifiable(self) -> None:
         assert reconciles(_obs(None, 4893)) is None
-
-
-class TestConfiguredModels:
-    def test_the_provider_prefix_is_stripped(self) -> None:
-        # Settings hold `google:gemini-3.1-flash-lite`, but LLMSpec.parse splits the
-        # prefix off before the plugin sees it, so the SPAN carries the bare name.
-        # Comparing selectors verbatim against a price pattern would never match.
-        settings = SimpleNamespace(
-            voice_llm_default_model="gemini-2.5-flash",
-            gemini_flash_model="gemini-2.5-flash",
-            summary_primary_model="google:gemini-3.1-flash-lite",
-            observer_extract_primary_model="google:gemini-3.5-flash",
-            health_primary_model="google:gemini-3.1-flash-lite",
-            whisper_stt_primary_model="deepgram:flux-general-en",
-            summary_fallback_models=["openai:gpt-5.4-mini"],
-            observer_extract_fallback_models=[],
-            health_fallback_models=[],
-            whisper_stt_fallback_models=["assemblyai:best"],
-        )
-
-        assert configured_models(settings) == [
-            "best",
-            "flux-general-en",
-            "gemini-2.5-flash",
-            "gemini-3.1-flash-lite",
-            "gemini-3.5-flash",
-            "gpt-5.4-mini",
-        ]

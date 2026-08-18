@@ -20,12 +20,19 @@ an HTTP request.
 PHI: a traceparent is random hex identifiers only.
 """
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.context import Context
+from opentelemetry.trace import Span, Tracer
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.util.types import Attributes
+
+from vera_core.observability.correlation import call_trace_attributes
 
 logger = logging.getLogger("vera.observability")
 
@@ -33,6 +40,12 @@ logger = logging.getLogger("vera.observability")
 # seconds after call.ended, but the pipeline sweeper can re-drive a stranded job much
 # later. One small key per call is negligible.
 TRACE_LINK_TTL_SECONDS = 24 * 60 * 60
+
+# `create_redis()` sets no socket timeout, so an unbounded await lets a wedged-but-
+# reachable Redis stall whatever it is called from — a call's greeting, an HTTP request,
+# the post-call consumer. Bounded HERE rather than at each call site so every caller
+# inherits it; best-effort tracing must never be able to hold anything up.
+TRACE_LINK_TIMEOUT_SECONDS = 2.0
 
 _PROPAGATOR = TraceContextTextMapPropagator()
 _TRACEPARENT = "traceparent"
@@ -70,25 +83,83 @@ def remote_parent(traceparent: str | None) -> Context | None:
 class TraceLinkStore:
     """Publishes and resolves a call's traceparent over Redis.
 
-    Both methods swallow Redis failures: an observability outage must never affect a
-    call or an API request.
+    Both methods are time-boxed and swallow Redis failures: an observability outage —
+    including a hang — must never affect a call or an API request.
     """
 
-    def __init__(self, redis: Any) -> None:
+    def __init__(self, redis: Any, *, timeout_s: float = TRACE_LINK_TIMEOUT_SECONDS) -> None:
         self._redis = redis
+        self._timeout_s = timeout_s
 
     async def publish(self, room_name: str, traceparent: str) -> None:
         try:
-            await self._redis.set(trace_link_key(room_name), traceparent, ex=TRACE_LINK_TTL_SECONDS)
+            async with asyncio.timeout(self._timeout_s):
+                await self._redis.set(
+                    trace_link_key(room_name), traceparent, ex=TRACE_LINK_TTL_SECONDS
+                )
+        except TimeoutError:
+            logger.warning("trace link publish timed out after %.1fs", self._timeout_s)
         except Exception as exc:
             logger.warning("trace link publish failed: %s", type(exc).__name__)
 
     async def resolve(self, room_name: str) -> Context | None:
         try:
-            raw = await self._redis.get(trace_link_key(room_name))
-            if raw is None:
-                return None
-            return remote_parent(raw.decode() if isinstance(raw, bytes) else str(raw))
+            async with asyncio.timeout(self._timeout_s):
+                raw = await self._redis.get(trace_link_key(room_name))
+            if raw is not None:
+                return remote_parent(raw.decode() if isinstance(raw, bytes) else str(raw))
+        except TimeoutError:
+            logger.warning("trace link resolve timed out after %.1fs", self._timeout_s)
         except Exception as exc:
             logger.warning("trace link resolve failed: %s", type(exc).__name__)
-            return None
+        return None
+
+
+@contextmanager
+def phi_safe_span(
+    tracer: Tracer,
+    name: str,
+    *,
+    attributes: Attributes = None,
+    context: Context | None = None,
+) -> Iterator[Span]:
+    """`start_as_current_span` with exception recording held OFF.
+
+    Use this for ANY span that wraps a provider call, whether or not it belongs to a
+    call. A provider error can embed the request payload — a transcript, a supervisor's
+    audio, an extracted answer — and `record_exception` copies that message into a span
+    event while `set_status_on_exception` copies it into the status description. Both
+    then leave the trust boundary on export. Attach no prompt, response or error text
+    to the yielded span either; the exporter ships every attribute.
+
+    The default is the wrong way round for Vera, so the safe posture lives in one place
+    rather than as two keywords each call site has to remember.
+    """
+    with tracer.start_as_current_span(
+        name,
+        context=context,
+        attributes=attributes,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        yield span
+
+
+@asynccontextmanager
+async def call_scoped_span(
+    tracer: Tracer,
+    name: str,
+    *,
+    room_name: str,
+    trace_links: TraceLinkStore | None,
+) -> AsyncIterator[None]:
+    """A `phi_safe_span` parented into the call's OWN trace, degrading to a root span
+    when the link is missing or expired.
+
+    The parent comes from the worker's published traceparent because Langfuse's
+    per-SESSION cost rollup renders $0.00 for model-calculated cost (langfuse#15109),
+    so per-TRACE is the only unit that makes a per-call total real.
+    """
+    parent = await trace_links.resolve(room_name) if trace_links is not None else None
+    with phi_safe_span(tracer, name, attributes=call_trace_attributes(room_name), context=parent):
+        yield

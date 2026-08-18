@@ -10,8 +10,15 @@ from opentelemetry.sdk.trace import ReadableSpan
 
 from vera_core.observability.llm_usage_export import (
     UsageEnrichingExporter,
-    corrected_usage_details,
+    corrected_usage,
 )
+
+
+def _details(raw: str) -> dict[str, int] | None:
+    """Just the usage half of what the exporter derives — `corrected_usage` is the
+    function `_enrich` calls, so these tests exercise the production path."""
+    corrected = corrected_usage(raw)
+    return corrected[0] if corrected is not None else None
 
 
 def _metrics(prompt: int, cached: int, completion: int, total: int | None = None) -> str:
@@ -29,7 +36,7 @@ def _metrics(prompt: int, cached: int, completion: int, total: int | None = None
 
 class TestCorrectedUsage:
     def test_cached_tokens_are_split_out_of_input(self) -> None:
-        assert corrected_usage_details(_metrics(12480, 9360, 210)) == {
+        assert _details(_metrics(12480, 9360, 210)) == {
             "input": 3120,
             "cached": 9360,
             "output": 210,
@@ -38,19 +45,19 @@ class TestCorrectedUsage:
     def test_input_plus_cached_reconstructs_the_original_prompt_count(self) -> None:
         # THE invariant. Drop the subtraction and cached is double-counted; drop the
         # cached key while still subtracting and the hits vanish. Both are silent.
-        usage = corrected_usage_details(_metrics(12480, 9360, 210))
+        usage = _details(_metrics(12480, 9360, 210))
         assert usage is not None
         assert usage["input"] + usage["cached"] == 12480
 
     def test_no_cache_hits_omits_the_cached_key(self) -> None:
-        assert corrected_usage_details(_metrics(500, 0, 20)) == {"input": 500, "output": 20}
+        assert _details(_metrics(500, 0, 20)) == {"input": 500, "output": 20}
 
     def test_a_malformed_blob_yields_none(self) -> None:
-        assert corrected_usage_details("not json") is None
-        assert corrected_usage_details("[]") is None
+        assert _details("not json") is None
+        assert _details("[]") is None
 
     def test_every_value_is_an_int(self) -> None:
-        usage = corrected_usage_details(_metrics(12480, 9360, 210))
+        usage = _details(_metrics(12480, 9360, 210))
         assert usage is not None
         assert all(isinstance(v, int) for v in usage.values())
 
@@ -187,32 +194,75 @@ class TestThinkingTokens:
 
     def test_thinking_tokens_are_folded_into_output(self) -> None:
         # prompt 1000 (300 cached) + completion 40 + 260 thoughts -> total 1300
-        usage = corrected_usage_details(_metrics(1000, 300, 40, total=1300))
+        usage = _details(_metrics(1000, 300, 40, total=1300))
         assert usage == {"input": 700, "cached": 300, "output": 300}
 
     def test_usage_reconciles_against_the_providers_own_total(self) -> None:
         # The strongest invariant available: nothing billed is invented or dropped.
         total = 1300
-        usage = corrected_usage_details(_metrics(1000, 300, 40, total=total))
+        usage = _details(_metrics(1000, 300, 40, total=total))
         assert usage is not None
         assert usage["input"] + usage["cached"] + usage["output"] == total
 
     def test_no_thinking_leaves_output_untouched(self) -> None:
         # total == prompt + completion, so the residual is zero.
-        usage = corrected_usage_details(_metrics(1000, 300, 40, total=1040))
+        usage = _details(_metrics(1000, 300, 40, total=1040))
         assert usage == {"input": 700, "cached": 300, "output": 40}
 
     def test_an_sdk_that_starts_including_thoughts_does_not_double_count(self) -> None:
         # Self-correcting: if completion_tokens ever grows to include thoughts, the
         # residual collapses to 0 rather than adding them a second time.
-        usage = corrected_usage_details(_metrics(1000, 300, 300, total=1300))
+        usage = _details(_metrics(1000, 300, 300, total=1300))
         assert usage == {"input": 700, "cached": 300, "output": 300}
 
     def test_a_missing_total_cannot_subtract_usage(self) -> None:
         # A provider reporting no total yields a negative residual; clamping keeps
         # output at the reported completion instead of eroding it.
-        assert corrected_usage_details(_metrics(1000, 300, 40)) == {
+        assert _details(_metrics(1000, 300, 40)) == {
             "input": 700,
             "cached": 300,
             "output": 40,
         }
+
+
+class TestThinkingIsAuditableAndBounded:
+    """The residual bills at the OUTPUT rate — ~8x input at Gemini prices — and
+    nothing reconciles output the way `input + cached` reconciles against the
+    provider's own prompt count. So it must be visible, and it must refuse the one
+    input shape where it cannot tell thinking from the prompt itself."""
+
+    def test_the_derived_count_is_published_as_a_diagnostic(self) -> None:
+        inner = _RecordingExporter()
+        # total 1300 - prompt 1000 - completion 40 = 260 thinking
+        UsageEnrichingExporter(inner).export(
+            [_span({"lk.llm_metrics": _metrics(1000, 300, 40, total=1300)})]
+        )
+        assert inner.exported[0].attributes["vera.llm.thinking_tokens"] == 260
+
+    def test_the_diagnostic_is_absent_when_nothing_was_derived(self) -> None:
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export([_span({"lk.llm_metrics": _metrics(500, 0, 20)})])
+        assert "vera.llm.thinking_tokens" not in inner.exported[0].attributes
+
+    def test_the_diagnostic_is_not_priced(self) -> None:
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export(
+            [_span({"lk.llm_metrics": _metrics(1000, 300, 40, total=1300)})]
+        )
+        usage = json.loads(inner.exported[0].attributes["langfuse.observation.usage_details"])
+        assert "vera.llm.thinking_tokens" not in usage
+        assert "thinking" not in usage
+
+    def test_a_missing_prompt_count_derives_nothing(self) -> None:
+        # The plugin builds every counter with `or 0`, so a response carrying a total
+        # but no prompt_token_count would otherwise make the WHOLE prompt the residual
+        # and bill it as output. Understating is the safe direction here.
+        usage = _details(_metrics(0, 0, 40, total=30_000))
+        assert usage == {"output": 40}
+
+    def test_a_missing_prompt_count_does_not_publish_a_thinking_count(self) -> None:
+        inner = _RecordingExporter()
+        UsageEnrichingExporter(inner).export(
+            [_span({"lk.llm_metrics": _metrics(0, 0, 40, total=30_000)})]
+        )
+        assert "vera.llm.thinking_tokens" not in inner.exported[0].attributes

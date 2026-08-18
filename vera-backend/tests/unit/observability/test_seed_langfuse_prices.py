@@ -2,6 +2,7 @@
 entry without a cached rate."""
 
 import re
+from typing import Any
 
 import pytest
 
@@ -9,12 +10,16 @@ from agent_worker.cascade import _CARTESIA_TTS_MODEL
 from scripts.seed_langfuse_prices import (
     GEMINI_MODELS,
     MODELS,
+    PINNED_SPEECH_MODELS,
     MissingRateError,
     build_payload,
+    configured_models,
     matching_entry,
     resolve_rates,
     seed,
+    unpriced_models,
 )
+from vera_core.config.settings import Settings
 
 _RATES = {
     "LANGFUSE_PRICE_STT_FLUX_PER_MS": "0.00000010833",
@@ -111,10 +116,10 @@ class TestPayload:
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(self, payload: dict[str, object], *, status_code: int = 200) -> None:
         self._payload = payload
-        self.is_error = False
-        self.status_code = 200
+        self.status_code = status_code
+        self.is_error = status_code >= 400
         self.text = ""
 
     def raise_for_status(self) -> None:
@@ -128,8 +133,9 @@ class _FakeClient:
     """Stands in for httpx.AsyncClient. `existing` is the full model listing the
     server would return, served 100-per-page like the real API."""
 
-    def __init__(self, existing: list[dict[str, str]]) -> None:
+    def __init__(self, existing: list[dict[str, Any]], *, post_status: int = 200) -> None:
         self._existing = existing
+        self._post_status = post_status
         self.posted: list[dict[str, object]] = []
         self.deleted: list[str] = []
 
@@ -140,16 +146,29 @@ class _FakeClient:
 
     async def post(self, _url: str, json: dict[str, object]) -> _FakeResponse:
         self.posted.append(json)
-        return _FakeResponse({})
+        return _FakeResponse({}, status_code=self._post_status)
 
     async def delete(self, url: str) -> _FakeResponse:
         self.deleted.append(url.rsplit("/", 1)[-1])
         return _FakeResponse({})
 
 
-def _filler(count: int) -> list[dict[str, str]]:
+def _filler(count: int) -> list[dict[str, Any]]:
     """Langfuse ships ~160 built-in model entries; they share the listing with ours."""
     return [{"modelName": f"built-in-{i}", "id": f"b{i}"} for i in range(count)]
+
+
+def _live_listing() -> list[dict[str, Any]]:
+    """The listing a project already seeded with exactly these rates would return."""
+    rates = resolve_rates(_RATES)
+    return [
+        {
+            "modelName": m.model_name,
+            "id": f"id-{m.model_name}",
+            **build_payload(m, rates=rates),
+        }
+        for m in MODELS
+    ]
 
 
 class TestIdempotentUpsert:
@@ -160,31 +179,68 @@ class TestIdempotentUpsert:
     @pytest.mark.asyncio
     async def test_a_first_run_posts_every_model_without_an_id(self) -> None:
         client = _FakeClient([])
-        written = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
-        assert written == [m.model_name for m in MODELS]
+        outcomes = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert outcomes == {m.model_name: "created" for m in MODELS}
         assert client.deleted == []  # nothing to replace on a fresh project
 
     @pytest.mark.asyncio
-    async def test_a_second_run_threads_each_existing_id_back_in(self) -> None:
-        # Without the id, Langfuse rejects a duplicate modelName on its
-        # (projectId, modelName) uniqueness check and the re-run fails outright.
-        listing = [{"modelName": m.model_name, "id": f"id-{m.model_name}"} for m in MODELS]
+    async def test_an_unchanged_entry_is_left_alone_rather_than_replaced(self) -> None:
+        # Replacing means DELETE then POST, and between them the model has NO price at
+        # all. A re-run that changes nothing must never open that window.
+        client = _FakeClient(_live_listing())
+        outcomes = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert outcomes == {m.model_name: "unchanged" for m in MODELS}
+        assert client.deleted == []
+        assert client.posted == []
+
+    @pytest.mark.asyncio
+    async def test_a_changed_rate_replaces_the_entry(self) -> None:
+        listing = _live_listing()
+        tier = listing[0]["pricingTiers"][0]
+        tier["prices"] = {key: value * 2 for key, value in tier["prices"].items()}
         client = _FakeClient(listing)
         await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
-        assert client.deleted == [f"id-{m.model_name}" for m in MODELS]
-        assert len(client.posted) == len(MODELS)
+        assert client.deleted == [f"id-{MODELS[0].model_name}"]
+        assert len(client.posted) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_shape_is_replaced_rather_than_skipped(self) -> None:
+        listing = _live_listing()
+        del listing[0]["pricingTiers"]
+        client = _FakeClient(listing)
+        await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert client.deleted == [f"id-{MODELS[0].model_name}"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_replace_reports_the_model_as_unpriced(self) -> None:
+        # The destructive window actually opened: the entry was deleted and the
+        # replacement POST failed, so this model now has no price at all.
+        listing = _live_listing()
+        listing[0]["pricingTiers"][0]["prices"] = {"bogus": 1.0}
+        client = _FakeClient(listing, post_status=400)
+        outcomes = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert outcomes[MODELS[0].model_name] == "UNPRICED"
+
+    @pytest.mark.asyncio
+    async def test_one_bad_payload_does_not_abandon_the_remaining_models(self) -> None:
+        # Aborting mid-tuple would turn one bad model into a project-wide blackout.
+        listing = _live_listing()
+        listing[0]["pricingTiers"][0]["prices"] = {"bogus": 1.0}
+        client = _FakeClient(listing, post_status=400)
+        outcomes = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert len(client.posted) == 1  # only the one that needed replacing
+        # every model still accounted for, none silently dropped by an early return
+        assert set(outcomes) == {m.model_name for m in MODELS}
 
     @pytest.mark.asyncio
     async def test_existing_entries_are_found_beyond_the_first_page(self) -> None:
         # The regression this exists for: a real instance carries ~160 built-ins, so
-        # our entries land on page 2. Reading only page 1 loses every id, and the
+        # our entries land on page 2. Reading only page 1 loses every entry, and the
         # "idempotent" re-run then fails on its first POST.
-        listing = _filler(160) + [
-            {"modelName": m.model_name, "id": f"id-{m.model_name}"} for m in MODELS
-        ]
-        client = _FakeClient(listing)
-        await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
-        assert client.deleted == [f"id-{m.model_name}" for m in MODELS]
+        client = _FakeClient(_filler(160) + _live_listing())
+        outcomes = await seed(client, resolve_rates(_RATES))  # type: ignore[arg-type]
+        assert outcomes == {m.model_name: "unchanged" for m in MODELS}
+        assert client.posted == []  # all found, all unchanged
 
 
 class TestPerModelCoverage:
@@ -260,3 +316,37 @@ class TestPayloadShape:
             assert isinstance(tier["priority"], int)
             assert tier["conditions"] == []
             assert tier["prices"]
+
+
+class TestConfiguredModelCoverage:
+    """`configured_models` is the safety net for the per-model pricing decision: a
+    model Vera routes to that matches no entry renders blank cost, which reads as
+    "this surface is free". Built from the REAL Settings, not a hand-copied stand-in —
+    a stale copy stays green through exactly the drift the net exists to catch."""
+
+    def test_the_provider_prefix_is_stripped(self) -> None:
+        # Settings hold `google:gemini-3.1-flash-lite`, but LLMSpec.parse splits the
+        # prefix off before the plugin sees it, so the SPAN carries the bare name.
+        models = configured_models(Settings(_env_file=None))
+        assert "gemini-3.1-flash-lite" in models
+        assert not any(":" in m for m in models)
+
+    def test_the_cascades_pinned_speech_models_are_covered(self) -> None:
+        # They live in cascade.py, not Settings, so a Settings-only sweep would miss
+        # the very STT/TTS surfaces this feature exists to price.
+        models = configured_models(Settings(_env_file=None))
+        assert set(PINNED_SPEECH_MODELS) <= set(models)
+
+    def test_every_pinned_speech_model_has_a_price_entry(self) -> None:
+        assert [m for m in PINNED_SPEECH_MODELS if matching_entry(m) is None] == []
+
+    def test_the_shipped_defaults_leave_nothing_undecided(self) -> None:
+        # Either priced, or named in KNOWN_UNPRICED with a reason. `just langfuse-verify`
+        # exits non-zero otherwise, and a gate that is red on a healthy system is one
+        # everybody learns to ignore.
+        assert unpriced_models(Settings(_env_file=None)) == []
+
+    def test_a_model_nobody_decided_about_is_still_reported(self) -> None:
+        settings = Settings(_env_file=None)
+        settings.observer_extract_primary_model = "google:gemini-9.9-flash"
+        assert unpriced_models(settings) == ["gemini-9.9-flash"]

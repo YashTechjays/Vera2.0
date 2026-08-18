@@ -55,9 +55,17 @@ LLM_METRICS_ATTR = "lk.llm_metrics"
 CACHED_TOKENS_ATTR = "vera.llm.cached_tokens"
 CACHE_HIT_RATIO_ATTR = "vera.llm.cache_hit_ratio"
 
+# The derived thinking count, published as a diagnostic so the residual below is
+# auditable rather than silently folded into the output charge. Outside usage_details,
+# so it is never priced a second time.
+THINKING_TOKENS_ATTR = "vera.llm.thinking_tokens"
 
-def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
-    """Usage keys for one `lk.llm_metrics` blob, or None when it is unusable."""
+_warned_no_prompt = False
+
+
+def corrected_usage(raw_metrics: str) -> tuple[dict[str, int], int] | None:
+    """(usage keys, derived thinking tokens) for one `lk.llm_metrics` blob, or None
+    when it is unusable or bills nothing."""
     try:
         metrics = json.loads(raw_metrics)
     except (TypeError, ValueError):
@@ -66,15 +74,13 @@ def corrected_usage_details(raw_metrics: str) -> dict[str, int] | None:
         return None
     prompt = int(metrics.get("prompt_tokens", 0) or 0)
     completion = int(metrics.get("completion_tokens", 0) or 0)
-    return (
-        llm_token_usage(
-            prompt=prompt,
-            cached=int(metrics.get("prompt_cached_tokens", 0) or 0),
-            output=completion
-            + _thinking_tokens(int(metrics.get("total_tokens", 0) or 0), prompt, completion),
-        )
-        or None
+    thinking = _thinking_tokens(int(metrics.get("total_tokens", 0) or 0), prompt, completion)
+    usage = llm_token_usage(
+        prompt=prompt,
+        cached=int(metrics.get("prompt_cached_tokens", 0) or 0),
+        output=completion + thinking,
     )
+    return (usage, thinking) if usage else None
 
 
 def _thinking_tokens(total: int, prompt: int, completion: int) -> int:
@@ -89,9 +95,23 @@ def _thinking_tokens(total: int, prompt: int, completion: int) -> int:
 
     A residual rather than a field because `LLMMetrics` carries no thoughts count.
     It is self-correcting: if a future SDK folds thoughts into `completion_tokens`,
-    the residual becomes 0 and nothing double-counts. Clamped at 0 so a provider
-    that reports no total (or an inclusive prompt count) cannot subtract usage.
+    the residual becomes 0 and nothing double-counts.
+
+    Refused outright when the prompt count is absent, because the residual is then
+    indistinguishable from the prompt itself: the plugin builds every counter with
+    `or 0` (plugins/google/llm.py), so a response carrying a total but no
+    `prompt_token_count` would price the WHOLE prompt as output — ~8x the input rate
+    at Gemini prices. Understating output is the safe direction; overstating it is
+    real money, and `THINKING_TOKENS_ATTR` makes whatever we do derive auditable.
     """
+    if prompt <= 0:
+        # Whether the provider reports a prompt count is a property of its response
+        # shape, so this would otherwise log once per LLM turn forever. Once is enough.
+        global _warned_no_prompt
+        if total > completion and not _warned_no_prompt:
+            _warned_no_prompt = True
+            logger.warning("llm metrics carry a total but no prompt count; thinking not derived")
+        return 0
     return max(0, total - prompt - completion)
 
 
@@ -100,13 +120,16 @@ def _enrich(span: ReadableSpan) -> ReadableSpan:
     raw = attributes.get(LLM_METRICS_ATTR)
     if not isinstance(raw, str):
         return span
-    usage = corrected_usage_details(raw)
-    if usage is None:
+    corrected = corrected_usage(raw)
+    if corrected is None:
         return span
+    usage, thinking = corrected
     # ReadableSpan exposes attributes read-only, so re-project rather than mutate.
     merged = dict(attributes)
     merged[USAGE_DETAILS_ATTR] = json.dumps(usage)
     merged[OBSERVATION_TYPE_ATTR] = GENERATION
+    if thinking:
+        merged[THINKING_TOKENS_ATTR] = thinking
     cached = usage.get(USAGE_CACHED, 0)
     # Only meaningful against a non-empty prompt; a request with no prompt tokens has
     # nothing to say about caching, so it gets neither attribute rather than a 0/0.

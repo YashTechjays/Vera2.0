@@ -24,6 +24,7 @@ from vera_core.integrations.llm import (
     SpecialValues,
     TranscriptTurn,
 )
+from vera_core.observability import phi_safe_span
 from vera_core.observability.usage_spans import (
     GENERATION,
     OBSERVATION_MODEL_ATTR,
@@ -224,10 +225,11 @@ class VertexLLMClient(LLMClient):
         # auto-instrumented path (raw google.genai, not a LiveKit plugin), so without
         # this span the post-call eval's whole Vertex bill is invisible.
         #
-        # record_exception/set_status_on_exception are OFF and no prompt/response text
-        # is attached: the prompt embeds the full transcript and the response carries
-        # extracted answer values (design §8).
-        with _tracer.start_as_current_span(
+        # No prompt/response text is attached: the prompt embeds the full transcript and
+        # the response carries extracted answer values (design §8). phi_safe_span keeps
+        # the provider's own error message off the span for the same reason.
+        with phi_safe_span(
+            _tracer,
             SPAN_EVAL_GENERATE,
             attributes={
                 OBSERVATION_TYPE_ATTR: GENERATION,
@@ -236,8 +238,6 @@ class VertexLLMClient(LLMClient):
                 "gen_ai.provider.name": "google",
                 "vera.eval.pass": pass_name,
             },
-            record_exception=False,
-            set_status_on_exception=False,
         ) as span:
             async with self._semaphore:
                 resp = await self._client.aio.models.generate_content(

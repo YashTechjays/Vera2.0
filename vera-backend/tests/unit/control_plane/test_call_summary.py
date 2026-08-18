@@ -18,6 +18,7 @@ from control_plane.call_summary import (
     snapshot_turns,
     summarize_call,
 )
+from tests.unit.conftest import FakeTraceLinkRedis
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,
@@ -85,20 +86,6 @@ class _StubLLM:
         self.calls += 1
         self.last_user = user
         return self.text
-
-
-class _FakeRedis:
-    """Minimal get/set stand-in for TraceLinkStore (mirrors test_trace_link's fake)."""
-
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.values[key] = value
-
-    async def get(self, key: str) -> bytes | None:
-        value = self.values.get(key)
-        return value.encode() if value is not None else None
 
 
 def _turn_event(source: str, role: str, text: str, ts: int = 1) -> CallStreamEvent:
@@ -309,7 +296,7 @@ class TestSummaryTraceJoin:
             traceparent = current_traceparent()
             worker_trace_id = worker_span.get_span_context().trace_id
 
-        store = TraceLinkStore(_FakeRedis())
+        store = TraceLinkStore(FakeTraceLinkRedis())
         assert traceparent is not None
         await store.publish(room_name_for_call(tenant_id, call_id), traceparent)
 

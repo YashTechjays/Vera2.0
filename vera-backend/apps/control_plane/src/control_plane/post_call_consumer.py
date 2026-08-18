@@ -32,7 +32,7 @@ from vera_core.events import (
     parse_post_call_job,
 )
 from vera_core.integrations.llm import LLMClient, TranscriptTurn
-from vera_core.observability import TraceLinkStore, call_trace_attributes, room_name_for_call
+from vera_core.observability import TraceLinkStore, call_scoped_span, room_name_for_call
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
 
 logger = logging.getLogger("control_plane.post_call_consumer")
@@ -192,17 +192,9 @@ class PostCallConsumer:
     async def _process_job(self, job: PostCallJob) -> None:
         room_name = room_name_for_call(job.tenant_id, job.call_id)
         # Joins the worker's trace for this call, so every eval generation below sums
-        # into that call's total cost. A missing/expired link yields None and this
-        # becomes its own trace root — degraded, not broken.
-        parent = (
-            await self._trace_links.resolve(room_name) if self._trace_links is not None else None
-        )
-        with _tracer.start_as_current_span(
-            "vera.post_call.eval",
-            context=parent,
-            attributes=call_trace_attributes(room_name),
-            record_exception=False,
-            set_status_on_exception=False,
+        # into that call's total cost.
+        async with call_scoped_span(
+            _tracer, "vera.post_call.eval", room_name=room_name, trace_links=self._trace_links
         ):
             turns = await build_turns(
                 self._call_stream, self._sessionmaker, job.tenant_id, job.call_id

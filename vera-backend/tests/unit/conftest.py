@@ -24,3 +24,30 @@ def otel_spans() -> Iterator[InMemorySpanExporter]:
     exporter.clear()
     yield exporter
     exporter.clear()
+
+
+class FakeTraceLinkRedis:
+    """The get/set surface `TraceLinkStore` uses. One copy, because three test modules
+    stubbing the same client drifted on whether `get` returns str or bytes — the two
+    the store is written to accept."""
+
+    def __init__(self, *, fails: bool = False, returns_bytes: bool = True) -> None:
+        self.values: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self._fails = fails
+        self._returns_bytes = returns_bytes
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        if self._fails:
+            raise ConnectionError("redis down")
+        self.values[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+
+    async def get(self, key: str) -> bytes | str | None:
+        if self._fails:
+            raise ConnectionError("redis down")
+        value = self.values.get(key)
+        if value is None:
+            return None
+        return value.encode() if self._returns_bytes else value

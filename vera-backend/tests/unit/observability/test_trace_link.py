@@ -3,13 +3,18 @@ opened in the control plane lands in the SAME TRACE as the worker's call span �
 Langfuse rolls cost up reliably per trace, and its session rollup renders $0.00 for
 model-calculated cost (langfuse#15109), so this is what makes a per-call total real."""
 
+import asyncio
 from typing import Any
 
 import pytest
 from opentelemetry import trace
 
+from tests.unit.conftest import FakeTraceLinkRedis
+from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.trace_link import (
+    TRACE_LINK_TIMEOUT_SECONDS,
     TraceLinkStore,
+    call_scoped_span,
     current_traceparent,
     remote_parent,
     trace_link_key,
@@ -18,27 +23,18 @@ from vera_core.observability.trace_link import (
 _ROOM = "call--00000000-0000-0000-0000-0000000000aa--00000000-0000-0000-0000-0000000000bb"
 
 
-class _FakeRedis:
-    """Minimal get/set stand-in; `fails` makes every call raise, standing in for a
-    Redis outage."""
+_TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
 
-    def __init__(self, *, fails: bool = False) -> None:
-        self.values: dict[str, str] = {}
-        self.ttls: dict[str, int] = {}
-        self._fails = fails
+
+class _HangingRedis:
+    """Reachable but wedged: every command hangs instead of raising."""
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        if self._fails:
-            raise ConnectionError("redis down")
-        self.values[key] = value
-        if ex is not None:
-            self.ttls[key] = ex
+        await asyncio.sleep(10)
 
     async def get(self, key: str) -> bytes | None:
-        if self._fails:
-            raise ConnectionError("redis down")
-        value = self.values.get(key)
-        return value.encode() if value is not None else None
+        await asyncio.sleep(10)
+        return None
 
 
 class _NonUtf8Redis:
@@ -91,7 +87,7 @@ class TestAdoption:
 class TestStore:
     @pytest.mark.asyncio
     async def test_publish_then_resolve_round_trips(self, otel_spans: Any) -> None:
-        redis = _FakeRedis()
+        redis = FakeTraceLinkRedis()
         store = TraceLinkStore(redis)
         tracer = trace.get_tracer("test")
         with tracer.start_as_current_span("job_entrypoint") as worker_span:
@@ -109,18 +105,18 @@ class TestStore:
     async def test_publish_sets_a_ttl(self) -> None:
         # Sized for the longest post-call window: the sweeper can re-drive a stranded
         # job minutes after call.ended, long after the call itself is over.
-        redis = _FakeRedis()
+        redis = FakeTraceLinkRedis()
         await TraceLinkStore(redis).publish(_ROOM, "00-" + "a" * 32 + "-" + "b" * 16 + "-01")
         assert redis.ttls[trace_link_key(_ROOM)] >= 3600
 
     @pytest.mark.asyncio
     async def test_a_missing_key_resolves_to_none(self) -> None:
-        assert await TraceLinkStore(_FakeRedis()).resolve(_ROOM) is None
+        assert await TraceLinkStore(FakeTraceLinkRedis()).resolve(_ROOM) is None
 
     @pytest.mark.asyncio
     async def test_a_redis_outage_never_raises(self) -> None:
         # Tracing must never break a call or an API request (design §6).
-        store = TraceLinkStore(_FakeRedis(fails=True))
+        store = TraceLinkStore(FakeTraceLinkRedis(fails=True))
         await store.publish(_ROOM, "00-" + "a" * 32 + "-" + "b" * 16 + "-01")
         assert await store.resolve(_ROOM) is None
 
@@ -128,3 +124,91 @@ class TestStore:
     async def test_non_utf8_bytes_resolve_to_none_rather_than_raise(self) -> None:
         # A read failure includes a decode failure, not just a Redis outage (design §6).
         assert await TraceLinkStore(_NonUtf8Redis()).resolve(_ROOM) is None
+
+
+class TestAWedgedRedisCannotStallTheCaller:
+    """`create_redis()` sets no socket timeout, so an outage that HANGS rather than
+    raising is the dangerous shape: it would hold up a greeting, an HTTP request, or
+    the post-call consumer. Both directions must be time-boxed."""
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_publish_returns_and_does_not_raise(self) -> None:
+        store = TraceLinkStore(_HangingRedis(), timeout_s=0.05)
+        await asyncio.wait_for(store.publish(_ROOM, _TRACEPARENT), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_resolve_degrades_to_no_parent(self) -> None:
+        store = TraceLinkStore(_HangingRedis(), timeout_s=0.05)
+        assert await asyncio.wait_for(store.resolve(_ROOM), timeout=1.0) is None
+
+    def test_the_default_budget_is_short(self) -> None:
+        # A short fixed budget — not the general Redis timeout, which is unset — is
+        # what keeps best-effort tracing off every caller's critical path.
+        assert TRACE_LINK_TIMEOUT_SECONDS == 2.0
+
+
+class TestCallScopedSpan:
+    """The single seam every out-of-worker span for a call goes through. It decides
+    two things that were previously re-decided at each call site: what the span is
+    parented to, and that no exception text is ever recorded on it."""
+
+    @pytest.mark.asyncio
+    async def test_the_span_joins_the_calls_trace(self, otel_spans: Any) -> None:
+        store = TraceLinkStore(FakeTraceLinkRedis())
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("job_entrypoint") as worker_span:
+            traceparent = current_traceparent()
+            worker_trace_id = worker_span.get_span_context().trace_id
+        assert traceparent is not None
+        await store.publish(_ROOM, traceparent)
+
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=store):
+            pass
+
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
+        assert span.context.trace_id == worker_trace_id
+
+    @pytest.mark.asyncio
+    async def test_an_absent_link_degrades_to_a_root_span(self, otel_spans: Any) -> None:
+        # Degraded, not broken: the work still traces, it just forms its own trace.
+        tracer = trace.get_tracer("test")
+        store = TraceLinkStore(FakeTraceLinkRedis())
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=store):
+            pass
+        assert (
+            next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing").parent
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_store_at_all_degrades_to_a_root_span(self, otel_spans: Any) -> None:
+        tracer = trace.get_tracer("test")
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=None):
+            pass
+        assert (
+            next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing").parent
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_span_carries_the_call_correlation(self, otel_spans: Any) -> None:
+        tracer = trace.get_tracer("test")
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=None):
+            pass
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
+        assert span.attributes["vera.room"] == _ROOM
+
+    @pytest.mark.asyncio
+    async def test_an_exception_leaves_no_text_on_the_span(self, otel_spans: Any) -> None:
+        # THE PHI guard. A provider error can embed the request payload — a transcript,
+        # a supervisor's audio — and both record_exception and set_status_on_exception
+        # would copy its message onto a span that leaves the trust boundary.
+        tracer = trace.get_tracer("test")
+        with pytest.raises(RuntimeError):
+            async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=None):
+                raise RuntimeError("member id 123-45-6789 rejected by provider")
+
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
+        # The shared denylist sweep: name, every attribute, the status description AND
+        # every event's attributes — more than an inline check remembers to cover.
+        assert_no_phi_values(span, "123-45-6789")

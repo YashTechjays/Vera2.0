@@ -59,8 +59,11 @@ source langfuse-rates.env && just langfuse-seed-prices
 ```
 
 Run `just langfuse-seed-prices` with nothing set and it lists every variable it wants. It
-is idempotent and **all-or-nothing** — a missing, zero, negative or non-finite rate writes
-nothing, because a `$0.00` entry is indistinguishable from broken tracing.
+is **all-or-nothing** — a missing, zero, negative or non-finite rate writes nothing,
+because a `$0.00` entry is indistinguishable from broken tracing — and it is idempotent
+in the non-destructive sense: this API has no upsert, so changing an entry means DELETE
+then POST, and the seeder leaves any entry that already matches untouched rather than
+cycling it through that window. A replacement that fails is named and exits non-zero.
 
 Two units are easy to get wrong, and both render a plausible number when wrong:
 
@@ -86,6 +89,11 @@ coverage, per-model spend and cache-hit ratio, whether any billable generation i
 whether `input + cached` reconciles against the provider's own token count, and whether the
 control-plane spans (post-call eval, summary, whisper) landed in the **call's own trace** —
 that last one is what makes a per-call total real.
+
+The OpenAI and AssemblyAI fallback tiers are deliberately unpriced (`KNOWN_UNPRICED` in the
+seeder, `adr/devops-todo.md` #23). They are listed in the report but do **not** fail the run:
+a gate that is red on a healthy system is a gate everyone learns to ignore. A configured model
+that nobody decided about still fails it.
 
 Seed **before** the call: Langfuse computes cost at ingestion and stores the number, so
 seeding afterwards will not retro-price an existing trace.
