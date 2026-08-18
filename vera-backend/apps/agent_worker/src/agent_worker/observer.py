@@ -42,11 +42,7 @@ from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
 from vera_core.forms.answers import canonical_answer, literals_of
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
-from vera_core.forms.extraction_prompt import (
-    ANSWER_UNIT_FORMAT_RULE,
-    EXACT_VALUE_RULE,
-    special_values_hint,
-)
+from vera_core.forms.extraction_prompt import answer_shape_rules, special_values_hint
 from vera_core.forms.review import is_blank_answer
 from vera_core.plan_store import PlanRunStateService
 from vera_core.transcript import (
@@ -169,7 +165,7 @@ def _extraction_instructions(task: PlanTask) -> str:
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
         "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE + ' ' if names_exact else ''}"
+        f"{answer_shape_rules(names_exact=names_exact)} "
         "Use only these field_path values:"
     )
     return "\n".join([preamble, *lines])
