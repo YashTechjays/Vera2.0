@@ -9,7 +9,7 @@ import pytest
 from opentelemetry import trace
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from tests.unit.conftest import FakeTraceLinkRedis
+from tests.conftest import FakeTraceLinkRedis
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.trace_link import (
     TraceLinkStore,

@@ -18,7 +18,7 @@ from control_plane.call_summary import (
     snapshot_turns,
     summarize_call,
 )
-from tests.unit.conftest import FakeTraceLinkRedis
+from tests.conftest import FakeTraceLinkRedis
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,

@@ -10,7 +10,7 @@ from opentelemetry import trace
 from control_plane import post_call_consumer
 from control_plane.call_summary import TranscriptTurn as StreamTurn
 from control_plane.post_call_consumer import PostCallConsumer, build_turns
-from tests.unit.conftest import FakeTraceLinkRedis
+from tests.conftest import FakeTraceLinkRedis
 from vera_core.events import PostCallJob
 from vera_core.integrations.llm import TranscriptTurn
 from vera_core.observability import TraceLinkStore, room_name_for_call
