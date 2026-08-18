@@ -6,7 +6,7 @@ import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
 import { confidenceHighlightClass } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
-import { dialedPhonePath } from "@/lib/ibv/phone"
+import { phonePaths } from "@/lib/ibv/phone"
 import { USAGE_META } from "./usageMeta"
 import {
   Tooltip,
@@ -130,7 +130,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? disputeGutter : undefined}
           noRightBorder
-          countrySelect={schema !== null && path === dialedPhonePath(schema)}
+          countrySelect={schema !== null && phonePaths(schema).has(path)}
         />
         {showDispute &&
           (compact ? (

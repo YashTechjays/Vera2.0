@@ -183,6 +183,14 @@ function describeBlockedSubmit(titles: string[]): string {
     : `Fill the required fields before submitting: ${shown}.`
 }
 
+/** Lead with the first offending field's own fix, then count the rest (VR2-206). */
+function describeInvalidSubmit(firstMessage: string | undefined, invalidCount: number): string {
+  const message = firstMessage ?? "Fix the highlighted fields before submitting."
+  const rest = invalidCount - 1
+  if (rest <= 0) return message
+  return `${message} (${rest} more field${rest === 1 ? "" : "s"} to fix.)`
+}
+
 /** The earliest of `paths` in schema document order — the one to scroll to. */
 function firstInDocumentOrder(schema: FormSchema, paths: string[]): string | null {
   const wanted = new Set(paths)
@@ -507,11 +515,15 @@ export function IbvProvider({
       setCreateError(describeBlockedSubmit(blocking.map((leaf) => leaf.field.title)))
       return blocking[0].path
     }
-    // A format error on a filled field blocks too, but has no title list to name.
-    const invalid = Object.keys(validateCreate(schema, values))
-    if (invalid.length > 0) {
-      setCreateError("Fix the highlighted fields before submitting.")
-      return firstInDocumentOrder(schema, invalid)
+    // A format error on a filled field blocks too — name the first one's fix (VR2-206).
+    const invalid = validateCreate(schema, values)
+    const invalidPaths = Object.keys(invalid)
+    if (invalidPaths.length > 0) {
+      const first = firstInDocumentOrder(schema, invalidPaths)
+      setCreateError(
+        describeInvalidSubmit(first === null ? undefined : invalid[first], invalidPaths.length),
+      )
+      return first
     }
     setCreateError(null)
     setCreateSubmitting(true)

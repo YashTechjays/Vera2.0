@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { FormSchema } from "./types"
-import { composePhoneValue, dialedPhonePath } from "./phone"
+import { composePhoneValue, phonePaths } from "./phone"
 
 const PHONE_PATH = "sections.insurance_reference_information.insurance_phone_number"
 
@@ -28,13 +28,15 @@ const schema = {
   },
 } as unknown as FormSchema
 
-describe("dialedPhonePath", () => {
-  it("resolves only the insurance_provider_phone_number handle, not other phone leaves", () => {
-    expect(dialedPhonePath(schema)).toBe(PHONE_PATH)
+describe("phonePaths", () => {
+  it("resolves the dialed phone and callback handles, not other phone leaves", () => {
+    expect(phonePaths(schema)).toEqual(
+      new Set([PHONE_PATH, "sections.verification_information.callback_number"]),
+    )
   })
 
-  it("is undefined when the schema has no such handle", () => {
-    expect(dialedPhonePath({ ...schema, system_fields: {} } as FormSchema)).toBeUndefined()
+  it("is empty when the schema has no such handles", () => {
+    expect(phonePaths({ ...schema, system_fields: {} } as FormSchema)).toEqual(new Set())
   })
 })
 

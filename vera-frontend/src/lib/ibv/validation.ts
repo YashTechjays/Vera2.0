@@ -6,7 +6,7 @@ import {
   isSatisfied,
   titleOf,
 } from "./schema"
-import { dialedPhonePath, E164_RE } from "./phone"
+import { phonePaths, E164_RE } from "./phone"
 import type { FlatLeaf, FormSchema, FormValues } from "./types"
 
 /** Errors keyed by root-anchored field path (absent = valid). */
@@ -131,6 +131,67 @@ function dateFormatRegex(format: string): RegExp {
   return new RegExp(`^${source}$`)
 }
 
+// An exact-digit-count pattern (^[0-9]{9}$ / ^\d{10}$) gets a message naming the count.
+const DIGIT_COUNT_PATTERN_RE = /^\^(?:\[0-9\]|\\d)\{(\d+)\}\$$/
+
+function patternMessage(title: string, pattern: string): string {
+  const digits = DIGIT_COUNT_PATTERN_RE.exec(pattern)?.[1]
+  return digits
+    ? `Enter a valid ${title}. Please enter a ${digits}-digit ${title}.`
+    : `${title} is invalid`
+}
+
+// Single-digit tokens accept 1-2 digits but are shown padded, so users type the padded shape.
+const DISPLAY_DATE_TOKENS: Record<string, string> = { M: "MM", D: "DD" }
+
+/** "M/D/YYYY" shown to users as "MM/DD/YYYY" — 1-digit entries still validate. */
+function displayDateFormat(format: string): string {
+  return format.replace(DATE_TOKEN_ONLY_RE, (token) => DISPLAY_DATE_TOKENS[token] ?? token)
+}
+
+/** Parse a value in the DSL date_format to a Date; null unless it round-trips exactly. */
+function parseDateInFormat(value: string, format: string): Date | null {
+  const tokens = format.match(DATE_TOKEN_ONLY_RE) ?? []
+  const numbers = value.match(/\d+/g) ?? []
+  if (tokens.length !== numbers.length) return null
+
+  const parts: { year?: number; month?: number; day?: number } = {}
+  tokens.forEach((token, i) => {
+    const n = Number(numbers[i])
+    if (token.startsWith("Y")) parts.year = n
+    else if (token.startsWith("M")) parts.month = n
+    else parts.day = n
+  })
+
+  const { year, month, day } = parts
+  if (!year || !month || !day) return null
+  const date = new Date(year, month - 1, day)
+  const roundTrips =
+    date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+  return roundTrips ? date : null
+}
+
+/** VR2-206: the patient must be at least 18. Only fires on a parseable DOB. */
+function underageError(schema: FormSchema, values: FormValues): ValidationErrors {
+  const path = schema.system_fields?.["patient_dob"]
+  if (!path) return {}
+  const value = (values[path] ?? "").trim()
+  if (value === "") return {}
+  const leaf = allLeaves(schema).find((candidate) => candidate.path === path)
+  const format = leaf?.field.validation?.date_format
+  if (!format) return {}
+  const dob = parseDateInFormat(value, format)
+  if (!dob) return {}
+  const cutoff = new Date()
+  cutoff.setFullYear(cutoff.getFullYear() - 18)
+  return dob > cutoff ? { [path]: "Patient must be 18 years of age or older." } : {}
+}
+
+/** Add cross-field errors without overwriting a leaf's own message. */
+function mergeErrors(into: ValidationErrors, from: ValidationErrors): void {
+  for (const [path, message] of Object.entries(from)) into[path] ??= message
+}
+
 /**
  * Values legal by declaration (spec §4.4): special_values plus the declared
  * default / inapplicable_value — they bypass pattern and range checks.
@@ -164,17 +225,17 @@ function validateLeaf(
   if (isDeclaredLegal(leaf, value)) return undefined
 
   if (f.validation?.pattern && !new RegExp(f.validation.pattern).test(value)) {
-    return `${f.title} is invalid`
+    return patternMessage(f.title, f.validation.pattern)
   }
 
   // The dialed phone must be E.164 — the backend 422s on it at intake and dispute-resolve.
-  if (leaf.path === dialedPhonePath(schema) && !E164_RE.test(value)) {
-    return `${f.title} must be an international number like +12125551234`
+  if (phonePaths(schema).has(leaf.path) && !E164_RE.test(value)) {
+    return `Enter a valid ${f.title} including the country code.`
   }
 
   const dateFormat = f.validation?.date_format
   if (dateFormat && f.type === "date" && !dateFormatRegex(dateFormat).test(value)) {
-    return `${f.title} must match ${dateFormat}`
+    return `Enter ${f.title} in ${displayDateFormat(dateFormat)} format.`
   }
 
   const range = f.validation?.range
@@ -206,9 +267,8 @@ export function validateAll(schema: FormSchema, values: FormValues): ValidationE
     const message = validateLeaf(schema, leaf, values)
     if (message) errors[leaf.path] = message
   }
-  for (const [path, message] of Object.entries(numericConsistencyErrors(schema, values))) {
-    errors[path] ??= message
-  }
+  mergeErrors(errors, numericConsistencyErrors(schema, values))
+  mergeErrors(errors, underageError(schema, values))
   return errors
 }
 
@@ -245,6 +305,7 @@ export function validateCreate(
     const message = validateLeaf(schema, leaf, values)
     if (message) errors[leaf.path] = message
   }
+  mergeErrors(errors, underageError(schema, values))
   if (!includeRequired) return errors
   for (const leaf of missingCreateLeaves(schema, values)) {
     errors[leaf.path] = `${leaf.field.title} is required`
