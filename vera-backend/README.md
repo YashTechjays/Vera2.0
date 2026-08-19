@@ -55,8 +55,21 @@ which looks exactly like broken instrumentation.
 
 ```bash
 cp langfuse-rates.env.example langfuse-rates.env   # gitignored; edit in your rates
-source langfuse-rates.env && just langfuse-seed-prices
+just langfuse-seed-prices langfuse-rates.env
 ```
+
+To seed a **different environment** — a tunnelled test or prod instance — copy the template
+once per environment and fill in that environment's host, keys and project alongside its
+rates, then pass that file instead:
+
+```bash
+just langfuse-seed-prices langfuse-test.env
+```
+
+The key pair is what selects the project (the API has no project parameter), so naming
+`VERA_LANGFUSE_PROJECT` in the file makes the seeder confirm the keys belong to it and
+refuse any other — which matters because replacing an entry is DELETE then POST, so keys
+aimed at the wrong project can leave *that* project's models unpriced.
 
 Run `just langfuse-seed-prices` with nothing set and it lists every variable it wants. It
 is **all-or-nothing** — a missing, zero, negative or non-finite rate writes nothing,

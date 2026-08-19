@@ -51,7 +51,28 @@ langfuse-down:
 # Seed the Langfuse model price entries Vera's usage attributes are priced against.
 # Idempotent; refuses to run without every rate env var set (see the script header —
 # note the audio rates are PER MILLISECOND, i.e. published per-minute / 60000).
-langfuse-seed-prices:
+#
+# With no arguments it seeds whatever VERA_LANGFUSE_* already resolves to (the local
+# stack) at the rates already in the environment. To seed ANOTHER environment — a
+# tunnelled test or prod instance — keep its host, keys, project and rates in one
+# per-environment file and pass it as the first argument:
+#
+#     just langfuse-seed-prices langfuse-test.env
+#
+# A file is the right home for the secret key: an inline argument is visible in shell
+# history and to anyone running `ps`. The remaining arguments override the file for a
+# one-off, and `project` is a GUARD rather than a target — the key pair alone selects the
+# project, so naming it makes the run refuse any other (see the script header).
+langfuse-seed-prices env_file="" project="" host="" public_key="" secret_key="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Only when asked: sourcing by default would let a file's rates quietly replace
+    # contracted ones already exported, and a wrong rate still renders a plausible $.
+    if [ -n "{{env_file}}" ]; then set -a; . "{{env_file}}"; set +a; fi
+    if [ -n "{{project}}" ]; then export VERA_LANGFUSE_PROJECT="{{project}}"; fi
+    if [ -n "{{host}}" ]; then export VERA_LANGFUSE_HOST="{{host}}"; fi
+    if [ -n "{{public_key}}" ]; then export VERA_LANGFUSE_PUBLIC_KEY="{{public_key}}"; fi
+    if [ -n "{{secret_key}}" ]; then export VERA_LANGFUSE_SECRET_KEY="{{secret_key}}"; fi
     uv run python scripts/seed_langfuse_prices.py
 
 # Database
