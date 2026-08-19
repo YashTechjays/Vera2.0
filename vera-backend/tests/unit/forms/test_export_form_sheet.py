@@ -349,6 +349,25 @@ def test_grid_full_width_and_two_up_flow_below_band() -> None:
     assert ws.cell(row=alpha_row, column=4).value == "Beta"
 
 
+def test_long_value_anchors_to_the_top_while_band_labels_stay_centered() -> None:
+    """A note past _MAX_LINES overflows its capped row, losing the opening words when
+    centered rather than only the tail."""
+    long_note = "The representative said " + "x" * 400
+    # A group-level extra — how 8 of the shipped schema's 9 `additional_notes` are placed,
+    # so the merged case is the one that matters here.
+    ws = _render({"sections.treatment.ivf.notes": long_note})
+    titles = {ws.cell(row=r, column=1).value: r for r in range(1, ws.max_row + 1)}
+    header = titles["Treatment"] + 2
+    ivf_first = header + 1
+    notes_col = 7
+    assert ws.cell(row=ivf_first, column=notes_col).value == long_note
+    assert ws.cell(row=ivf_first, column=notes_col).alignment.vertical == "top"
+    # The merged Service band label keeps its centering — that is what the alignment
+    # change was for, and it must not regress into floating at the top of the merge.
+    assert ws.cell(row=ivf_first, column=1).value == "In Vitro Fertilization (IVF)"
+    assert ws.cell(row=ivf_first, column=1).alignment.vertical == "center"
+
+
 def test_inapplicable_grid_extras_cell_grayed_with_empty_value() -> None:
     from vera_core.forms.dsl import PromotedFields
 

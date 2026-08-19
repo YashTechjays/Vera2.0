@@ -149,6 +149,35 @@ async def provenance_form_id(
                     value={"value": "y"},
                     source=AnswerSource.AI_CALL.value,
                     call_id=call2_id,
+                    # The top-up extractor's single-turn capture — the rep's answer alone.
+                    evidence="y.",
+                    is_current=True,
+                )
+            )
+            # cov.c: an AI answer that AGREES with its intake baseline, so it has NO
+            # dispute — the case a dispute-nested evidence field could never serve.
+            session.add(
+                FieldAnswer(
+                    id=uuid7(),
+                    tenant_id=tenant_id,
+                    form_id=form_id,
+                    field_path="cov.c",
+                    value={"value": "z"},
+                    source=AnswerSource.INTAKE.value,
+                    call_id=None,
+                    is_current=False,
+                )
+            )
+            answer_c_id = uuid7()
+            session.add(
+                FieldAnswer(
+                    id=answer_c_id,
+                    tenant_id=tenant_id,
+                    form_id=form_id,
+                    field_path="cov.c",
+                    value={"value": "z"},
+                    source=AnswerSource.AI_CALL.value,
+                    call_id=call2_id,
                     is_current=True,
                 )
             )
@@ -160,6 +189,18 @@ async def provenance_form_id(
                     answer_id=answer_b_id,
                     confidence=88,
                     supported=True,
+                    # The judge quotes the role-labelled transcript, so this carries the
+                    # agent's question as well as the rep's answer.
+                    evidence="Agent: which plan? Rep: y.",
+                )
+            )
+            session.add(
+                FieldEvaluation(
+                    tenant_id=tenant_id,
+                    answer_id=answer_c_id,
+                    confidence=91,
+                    supported=True,
+                    evidence="Agent: confirm the group number? Rep: z.",
                 )
             )
 
@@ -241,6 +282,43 @@ async def test_detail_carries_provenance_for_ai_fields(
     assert ai["provenance"]["judge"]["supported"] is True
     human = fields["cov.a"]
     assert human["provenance"] is None
+
+
+@pytest.mark.asyncio
+async def test_field_evidence_prefers_the_judge_quote(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
+) -> None:
+    """cov.b stores both texts: the extractor's bare rep turn and the judge's verdict
+    quote. The judge's wins — it carries the agent's question too — and it surfaces in
+    exactly one place."""
+    resp = await client.get(
+        f"/api/v1/patient-forms/{provenance_form_id}",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    ai = {f["field_path"]: f for f in resp.json()["data"]["fields"]}["cov.b"]
+    assert ai["evidence"] == "Agent: which plan? Rep: y."
+    # Contract locks for the two removals — nothing else would catch a re-add.
+    assert "evidence" not in ai["provenance"]["judge"]
+    assert "evidence" not in ai["dispute"]
+
+
+@pytest.mark.asyncio
+async def test_agreeing_ai_answer_still_carries_evidence(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
+) -> None:
+    """cov.c's AI value matches its intake baseline, so there is no dispute at all —
+    yet the reviewer still gets the evidence and provenance. This is the whole reason
+    evidence sits on the field rather than inside `dispute`."""
+    resp = await client.get(
+        f"/api/v1/patient-forms/{provenance_form_id}",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    agreeing = {f["field_path"]: f for f in resp.json()["data"]["fields"]}["cov.c"]
+    assert agreeing["dispute"] is None
+    assert agreeing["evidence"] == "Agent: confirm the group number? Rep: z."
+    assert agreeing["provenance"]["judge"]["confidence"] == 91
 
 
 @pytest.mark.asyncio
