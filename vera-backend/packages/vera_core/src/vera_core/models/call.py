@@ -34,7 +34,6 @@ from vera_core.db.base import (
 from vera_core.models.enums import CallEventType, CallHealthFlag, CallMode, CallStatus, check_in
 
 # Terminal call statuses — a call in one of these will never become live again.
-# Keep in sync with control_plane/call_closeout.py.
 TERMINAL_CALL_STATUSES = (
     CallStatus.COMPLETED,
     CallStatus.FAILED,
@@ -42,6 +41,7 @@ TERMINAL_CALL_STATUSES = (
     CallStatus.BUSY,
     CallStatus.CANCELED,
 )
+TERMINAL_CALL_STATUS_VALUES = frozenset(s.value for s in TERMINAL_CALL_STATUSES)
 _TERMINAL_SQL = ", ".join(f"'{s.value}'" for s in TERMINAL_CALL_STATUSES)
 
 

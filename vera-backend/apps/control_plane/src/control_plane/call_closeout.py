@@ -21,14 +21,14 @@ from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.models import Call, CallEvent, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
-from vera_core.models.call import TERMINAL_CALL_STATUSES
+from vera_core.models.call import TERMINAL_CALL_STATUS_VALUES
 from vera_core.models.enums import CallEventType, CallStatus
 from vera_core.observability.correlation import RoomRef, parse_room_name
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_VALUES = frozenset(s.value for s in TERMINAL_CALL_STATUSES)
+TERMINAL_VALUES = TERMINAL_CALL_STATUS_VALUES  # re-export: the control-plane spelling
 
 
 async def announce_terminal_status(

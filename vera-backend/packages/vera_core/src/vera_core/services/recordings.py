@@ -52,7 +52,7 @@ def recording_object_path(config: RecordingConfig, tenant_id: UUID, call_id: UUI
 
 async def start_recording_for_call(
     session: AsyncSession | Any,
-    livekit: Any,  # duck-typed like try_dispatch's gateway param
+    livekit: Any,  # duck-typed like the dispatcher's gateway param
     *,
     config: RecordingConfig,
     tenant_id: UUID,

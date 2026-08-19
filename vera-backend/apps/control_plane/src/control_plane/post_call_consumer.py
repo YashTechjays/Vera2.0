@@ -20,6 +20,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.call_summary import snapshot_turns
+from control_plane.dispatch import run_dispatch_pass
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
@@ -83,13 +84,13 @@ class PostCallConsumer:
         self._reclaim_idle_ms = reclaim_idle_ms
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._bus = PostCallJobBus(redis)
+        self._livekit = livekit
+        self._kms = kms
+        self._recording = recording
+        self._plan_service = plan_service
         self._deps = EvalDeps(
             llm=llm,
             audit=audit,
-            livekit=livekit,
-            kms=kms,
-            recording=recording,
-            plan_service=plan_service,
             floor=review_floor,
             auto_retry_enabled=auto_retry_enabled,
         )
@@ -200,6 +201,18 @@ class PostCallConsumer:
             outcome.status.value,
             outcome.answers_written,
             len(outcome.reviewed_fields),
+        )
+        if not outcome.transitioned:
+            return  # stale job: the form was left untouched, so no slot was freed
+        await run_dispatch_pass(
+            self._sessionmaker,
+            job.tenant_id,
+            self._livekit,
+            self._kms,
+            self._deps.audit,
+            recording=self._recording,
+            plan_service=self._plan_service,
+            retry_floor=self._deps.floor,
         )
 
     async def _ack(self, entry_id: str) -> None:

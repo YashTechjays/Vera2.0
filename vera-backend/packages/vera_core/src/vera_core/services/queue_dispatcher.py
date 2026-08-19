@@ -6,6 +6,14 @@ insurance-provider working hours, and initiates calls. Invoked on two events:
 browser-callee transport (a test-only gateway flag) no SIP call is placed and the
 room simply waits for a browser participant.
 
+A pass runs in two phases (`stage_and_dial` = both). `stage_dispatch` claims the
+forms and provisions their INITIATED calls in one transaction; the caller COMMITS;
+`place_dials` then dials. Dialing after the commit is load-bearing, not incidental: a
+payer IVR answers within a second, and the worker's `call.answered` cannot update a
+Call row it can't yet see — dialing inside the staging transaction made that event
+lose the race and park for the consumer's 60s XAUTOCLAIM window, stranding the call
+at `initiated` in live monitoring.
+
 Mostly PHI-free — it operates on form IDs, statuses, and tenant/provider config. The one
 exception is the dispatch `metadata`, which carries `agent_context` (raw patient/provider
 identifiers) into LiveKit; never log the `metadata` dict, and never log a traceback from the
@@ -19,15 +27,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from opentelemetry import trace
 from sqlalchemy import func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.audit import AuditRecord
+from vera_core.db.rls import tenant_session
 from vera_core.forms.call_plan import (
     CallPlan,
     PrefillFuser,
@@ -57,6 +67,7 @@ from vera_core.models import (
     Tenant,
 )
 from vera_core.models.audit_log import ActorType, AuditEvent
+from vera_core.models.call import TERMINAL_CALL_STATUS_VALUES
 from vera_core.models.enums import (
     CallEventType,
     CallMode,
@@ -127,8 +138,26 @@ def is_within_working_hours(provider: InsuranceProvider) -> bool:
     return provider.working_hour_start <= now_time <= provider.working_hour_end
 
 
-async def try_dispatch(
-    session: AsyncSession,
+@dataclass(frozen=True)
+class StagedCall:
+    """One committed INITIATED call awaiting its outbound dial.
+
+    ``phone_number is None`` means browser-callee transport: the room waits for a
+    browser participant and no SIP leg is placed. The tenant's retry knobs are
+    snapshotted here so the dial-failure path needs no second tenant read.
+    """
+
+    call_id: UUID
+    form_id: UUID
+    phone_number: str | None
+    trunk_id: str | None
+    mode: str
+    max_retries: int
+    auto_retry_enabled: bool
+
+
+async def stage_and_dial(
+    sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: UUID,
     livekit: Any,
     kms: KeyManagementService | Any,
@@ -139,11 +168,48 @@ async def try_dispatch(
     plan_service: CallPlanService | None = None,
     retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
-    """Attempt to dispatch queued forms for *tenant_id*.
+    """One full dispatch pass: stage and COMMIT every call, then place the dials.
 
-    Returns the number of calls initiated (dial-failed calls do NOT count,
-    even though a Call row was created for them). Designed to be called after
-    commit of the triggering event (enqueue or call-end).
+    See the module docstring for why the phases are separate transactions. Returns the
+    number of calls dialed.
+    """
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        staged = await stage_dispatch(
+            session,
+            tenant_id,
+            livekit,
+            kms,
+            audit=audit,
+            plan_service=plan_service,
+            retry_floor=retry_floor,
+        )
+    return await place_dials(
+        sessionmaker,
+        tenant_id,
+        livekit,
+        staged,
+        audit=audit,
+        recording=recording,
+        dial_pacing_s=dial_pacing_s,
+    )
+
+
+async def stage_dispatch(
+    session: AsyncSession,
+    tenant_id: UUID,
+    livekit: Any,
+    kms: KeyManagementService | Any,
+    *,
+    audit: AuditSink | None = None,
+    plan_service: CallPlanService | None = None,
+    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
+) -> list[StagedCall]:
+    """Phase one of a dispatch pass: claim queued forms and provision their calls.
+
+    Everything up to (but not including) the outbound dial — slot math, FIFO
+    candidate selection, expiry, `form -> IN_CALL`, the INITIATED Call row, the
+    staged CallPlan, and the LiveKit room + agent dispatch. The caller commits, then
+    hands the returned records to `place_dials`.
 
     Parameters
     ----------
@@ -152,26 +218,18 @@ async def try_dispatch(
     tenant_id:
         The tenant whose queue to drain.
     livekit:
-        A ``LiveKitGateway`` (or duck-typed fake) with ``create_call_room``,
-        ``create_sip_participant``, and ``delete_room``.
+        A ``LiveKitGateway`` (or duck-typed fake) with ``create_call_room``.
     kms:
         The ``KeyManagementService`` used to open the tenant's sealed outbound
         SIP trunk credential.
     audit:
-        Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
-        ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
+        Optional ``AuditSink``. When provided, ``QUEUE_EXPIRED`` events are emitted
+        for HIPAA evidence (``QUEUE_DISPATCH`` is emitted by ``place_dials``, once
+        the call is actually dialed).
     retry_floor:
         Confidence floor for which field labels to embed in RETRY room
         metadata. Best-effort prompt guidance only — the authoritative
         retry-vs-review decision happened earlier in ``evaluate_call``.
-    recording:
-        Optional ``RecordingConfig``. When provided, audio egress is started
-        for each successfully dialed call (fail-open — a recording failure
-        never rolls back a dispatched call).
-    dial_pacing_s:
-        Seconds to sleep between successive dials in one pass, to stay under
-        the carrier's calls-per-second limit (Twilio ~1 CPS). Applied between
-        dials only — never before the first.
     plan_service:
         Optional ``CallPlanService``. When provided and the form's pinned
         schema is DSL v2, the compiled CallPlan is staged in Redis for the
@@ -179,11 +237,13 @@ async def try_dispatch(
         dispatch metadata carries ``use_call_plan``. Fail-fast: if the plan
         can't be prepared or staged, the form is NOT dispatched (it stays
         IN_QUEUE for a later pass) — the plan-only worker can't serve a
-        plan-less call, so we never place one.
+        plan-less call.
     """
     # Serialize dispatch passes per tenant (consumer refill / sweeper / enqueue
     # tasks race otherwise and can over-allocate concurrency slots): the two-int
-    # advisory lock is transaction-scoped, so it releases on commit/rollback.
+    # advisory lock is transaction-scoped, so it releases when this phase commits. By
+    # then every claimed form is IN_CALL, so a concurrent pass counts it in active_count
+    # and still cannot over-allocate while the dials go out.
     # close_call takes row locks without this lock — no ordering inversion, since
     # the advisory lock is always acquired first, at the very start of a pass.
     await session.execute(
@@ -196,7 +256,7 @@ async def try_dispatch(
     ).scalar_one_or_none()
     if tenant is None:
         logger.warning("dispatch: tenant %s not found", tenant_id)
-        return 0
+        return []
 
     # 2. Count active calls (forms currently IN_CALL or AI_PROCESSING).
     active_count: int = (
@@ -212,7 +272,7 @@ async def try_dispatch(
 
     slots = tenant.max_concurrent_calls - active_count
     if slots <= 0:
-        return 0
+        return []
 
     # 3. Fetch FIFO candidates — FOR UPDATE SKIP LOCKED prevents double-dispatch.
     # The expiry filter is pushed into the DB WHERE clause to use the DB clock,
@@ -301,8 +361,7 @@ async def try_dispatch(
         except InvalidTransitionError:
             pass
 
-    dispatched = 0
-    dial_attempted = False
+    staged: list[StagedCall] = []
 
     # Tenant-level persona overlay — computed once, nested per-call below.
     tweak = (
@@ -342,9 +401,9 @@ async def try_dispatch(
     schema_versions: dict[UUID, SchemaVersion] = {}
 
     for form in candidates:
-        # 4b. Working-hours re-check at dial time — the SQL gate above used the
-        # pass-start clock, and the window can close mid-pass (dial pacing).
-        # Provider reused below for id + playbook.
+        # 4b. Working-hours re-check at stage time — the SQL gate above used the
+        # pass-start clock, and plan compile + room creation can carry the pass past a
+        # closing window. Provider reused below for id + playbook.
         provider = await _resolve_provider(session, form)
         if provider is not None and not is_within_working_hours(provider):
             continue
@@ -360,7 +419,7 @@ async def try_dispatch(
         # Fail fast (plan-only worker): a form whose plan can't be prepared can't be
         # served, so mark it CALL_FAILED. An operator manually requeues (CALL_FAILED →
         # IN_QUEUE); enqueued_at is left as-is (inert until then), matching the dial-
-        # failure path below.
+        # failure path in place_dials.
         if plan_service is not None and staged_plan is None:
             logger.warning(
                 "dispatch: no usable call plan for form %s — marking CALL_FAILED", form.id
@@ -424,7 +483,7 @@ async def try_dispatch(
                     staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
-        # roll back successfully-dispatched calls earlier in the same pass.
+        # roll back successfully-staged calls earlier in the same pass.
         # The plan is staged to Redis (non-transactional) BEFORE create_call_room so
         # it's present when create_call_room dispatches the worker (no read race). If
         # create_call_room then fails, the savepoint rolls the Call row back but the
@@ -555,76 +614,165 @@ async def try_dispatch(
             )
             continue
 
-        # 4d. Dial OUTSIDE the savepoint: a failed dial keeps the Call row as
-        # evidence (FAILED + retry accounting) instead of rolling it back. Pace
-        # every dial attempt ~1/s (carrier CPS limit) — failed dials still consume
-        # carrier capacity — sleep between attempts, never before the first.
-        if not browser_callee:
-            if dial_attempted:
-                await asyncio.sleep(dial_pacing_s)
-            dial_attempted = True
-            try:
-                await livekit.create_sip_participant(
-                    room_name, form.insurance_provider_phone_number, trunk_id
-                )
-            except OutboundDialError as exc:
-                # str(exc), not .diagnostic: keeps the detail when there is no code to render.
-                logger.warning("dispatch: outbound dial failed for call %s: %s", call.id, exc)
-                with contextlib.suppress(Exception):  # room teardown is best-effort
-                    await livekit.delete_room(room_name)
-                requeued = apply_terminal_call_status(
-                    call,
-                    form,
-                    CallStatus.FAILED,
-                    tenant_max_retries=tenant.max_retries,
-                    auto_retry_enabled=tenant.auto_retry_enabled,
-                )
-                call.ended_at = func.now()
-                if requeued:
-                    form.enqueued_at = func.now()
-                session.add(
-                    CallEvent(
-                        tenant_id=tenant_id,
-                        call_id=call.id,
-                        event_type=CallEventType.STATUS.value,
-                        event_value=CallStatus.FAILED.value,
-                    )
-                )
-                continue
+        staged.append(
+            StagedCall(
+                call_id=call.id,
+                form_id=form.id,
+                phone_number=None if browser_callee else form.insurance_provider_phone_number,
+                trunk_id=trunk_id,
+                mode=call_mode.value,
+                max_retries=tenant.max_retries,
+                auto_retry_enabled=tenant.auto_retry_enabled,
+            )
+        )
 
-        dispatched += 1
-        if recording is not None:
-            # Fail-open, after a successful dial: a recording failure must never
-            # undo a dispatched call, and a failed dial should not leave an egress
-            # recording an empty room.
+    return staged
+
+
+async def place_dials(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    livekit: Any,
+    staged: list[StagedCall],
+    *,
+    audit: AuditSink | None = None,
+    recording: RecordingConfig | None = None,
+    dial_pacing_s: float = 1.0,
+) -> int:
+    """Phase two: dial each staged call — see the module docstring for why it is separate.
+
+    Returns the number of calls dialed; a rejected dial does not count, even though its
+    Call row survives as evidence. *dial_pacing_s* separates successive dial ATTEMPTS (a
+    failed dial still consumes carrier capacity), never applied before the first.
+    """
+    dispatched = 0
+    dialed_once = False
+    for call in staged:
+        try:
+            if call.phone_number is not None:
+                if dialed_once:
+                    await asyncio.sleep(dial_pacing_s)
+                dialed_once = True
+                if not await _dial(sessionmaker, tenant_id, livekit, call):
+                    continue
+            dispatched += 1
+            await _finish_dispatch(
+                sessionmaker, tenant_id, livekit, call, audit=audit, recording=recording
+            )
+        except Exception as exc:
+            # One call's failure must not strand every later staged call undialed — and
+            # if its SIP leg is already live, losing the recording or audit row is the
+            # lesser harm.
+            logger.error(
+                "dispatch: call %s did not complete its dial step (%s)",
+                call.call_id,
+                type(exc).__name__,
+            )
+
+    return dispatched
+
+
+async def _dial(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    livekit: Any,
+    call: StagedCall,
+) -> bool:
+    """Dial one staged call under its row lock, recording a rejection as terminal.
+
+    The lock is what keeps the dial and the row agreeing. Committing the row before the
+    dial is the point of the split, but it also makes the call endable in the gap:
+    `POST /calls/{id}/end` closes a pre-answer call as CANCELED and deletes its room, and
+    an unsynchronized dial would recreate that room and ring the payer into it with no
+    agent — a terminal call with a live SIP leg, which no sweeper reconciles. Holding the
+    lock across the dial is cheap because `create_sip_participant` is
+    `wait_until_answered=False`: it returns once LiveKit accepts the request, long before
+    the callee picks up, so no `call.answered` can be waiting behind it. Call then form,
+    the same lock order as `close_call`.
+    """
+    room_name = room_name_for_call(tenant_id, call.call_id)
+    dialed = False
+    reap_room = False
+    async with tenant_session(sessionmaker, tenant_id) as session:
+        row = (
+            await session.execute(select(Call).where(Call.id == call.call_id).with_for_update())
+        ).scalar_one_or_none()
+        if row is None or row.current_status in TERMINAL_CALL_STATUS_VALUES:
+            logger.info("dispatch: skipping dial for call %s — no longer live", call.call_id)
+            return False
+        try:
+            await livekit.create_sip_participant(room_name, call.phone_number, call.trunk_id)
+            dialed = True
+        except OutboundDialError as exc:
+            # str(exc), not .diagnostic: keeps the detail when there is no code to render.
+            logger.warning("dispatch: outbound dial failed for call %s: %s", call.call_id, exc)
+            form = (
+                await session.execute(
+                    select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
+                )
+            ).scalar_one()
+            if apply_terminal_call_status(
+                row,
+                form,
+                CallStatus.FAILED,
+                tenant_max_retries=call.max_retries,
+                auto_retry_enabled=call.auto_retry_enabled,
+            ):
+                form.enqueued_at = func.now()
+            row.ended_at = func.now()
+            session.add(
+                CallEvent(
+                    tenant_id=tenant_id,
+                    call_id=row.id,
+                    event_type=CallEventType.STATUS.value,
+                    event_value=CallStatus.FAILED.value,
+                )
+            )
+            reap_room = True
+    if reap_room:
+        with contextlib.suppress(Exception):  # room teardown is best-effort
+            await livekit.delete_room(room_name)
+    return dialed
+
+
+async def _finish_dispatch(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    livekit: Any,
+    call: StagedCall,
+    *,
+    audit: AuditSink | None,
+    recording: RecordingConfig | None,
+) -> None:
+    """Start audio egress and emit the QUEUE_DISPATCH evidence for a dialed call."""
+    if recording is not None:
+        # Fail-open, after a successful dial: a recording failure must never undo a
+        # dispatched call, and a failed dial should not leave an egress recording an
+        # empty room.
+        async with tenant_session(sessionmaker, tenant_id) as session:
             await start_recording_for_call(
                 session,
                 livekit,
                 config=recording,
                 tenant_id=tenant_id,
-                call_id=call.id,
+                call_id=call.call_id,
                 audit=audit,
             )
-        logger.info(
-            "dispatch: initiated call %s for form %s (mode=%s)",
-            call.id,
-            form.id,
-            call_mode.value,
-        )
-        if audit is not None:
-            await audit.emit(
-                AuditRecord(
-                    tenant_id=tenant_id,
-                    actor_type=ActorType.SYSTEM,
-                    actor_label="queue-dispatcher",
-                    event_type=AuditEvent.QUEUE_DISPATCH.value,
-                    resource_type="patient_form",
-                    resource_id=str(form.id),
-                    detail={"call_id": str(call.id), "mode": call_mode.value},
-                )
+    logger.info(
+        "dispatch: initiated call %s for form %s (mode=%s)", call.call_id, call.form_id, call.mode
+    )
+    if audit is not None:
+        await audit.emit(
+            AuditRecord(
+                tenant_id=tenant_id,
+                actor_type=ActorType.SYSTEM,
+                actor_label="queue-dispatcher",
+                event_type=AuditEvent.QUEUE_DISPATCH.value,
+                resource_type="patient_form",
+                resource_id=str(call.form_id),
+                detail={"call_id": str(call.call_id), "mode": call.mode},
             )
-
-    return dispatched
+        )
 
 
 async def _resolve_call_plan(
