@@ -89,7 +89,9 @@ class TakeoverTranscriber:
         sink: TurnPublisher,
         room_name: str,
         *,
-        stt_factory: Callable[[], agents_stt.STT[Any]],
+        # Receives the track's attribution so the caller can tag per-channel usage
+        # generations (a takeover bills two concurrent STT streams).
+        stt_factory: Callable[[SpeakerAttribution], agents_stt.STT[Any]],
         callee_identity: str,
     ) -> None:
         self._room = room
@@ -135,7 +137,7 @@ class TakeoverTranscriber:
 
     async def _transcribe_track(self, track: rtc.Track, attribution: SpeakerAttribution) -> None:
         audio = rtc.AudioStream(track, sample_rate=_SAMPLE_RATE, num_channels=1)
-        stream = self._stt_factory().stream()
+        stream = self._stt_factory(attribution).stream()
         pump = asyncio.create_task(self._pump(audio, stream))
         try:
             await publish_final_turns(stream, self._sink, self._room_name, attribution)

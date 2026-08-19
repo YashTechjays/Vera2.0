@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from livekit import rtc
 
 from vera_core.config.secrets import SecretProvider
+from vera_core.observability import attach_usage_spans
 
 if TYPE_CHECKING:
     import aiohttp
@@ -183,6 +184,18 @@ class ResilientSTT:
                 raise STTUnavailableError
             self._stts = stts
             self._chain = FallbackAdapter(self._stts)
+            # Whisper STT is billed Deepgram usage and was invisible in Langfuse.
+            # Attach to the ADAPTER, not each inner STT: it re-emits the inner
+            # STTMetrics verbatim, so metadata.model_name stays the real provider's
+            # model rather than the literal "FallbackAdapter".
+            #
+            # No parent_context: the intended parent is the per-request
+            # vera.coaching.whisper span, which does not exist yet at chain-construction
+            # time. Ambient context at emit time is correct here — the metrics task is
+            # created inside transcribe(), so it inherits the request's span. aclose()
+            # drops the chain, so a rebuilt chain gets a fresh listener and there is no
+            # double registration.
+            attach_usage_spans(self._chain)
         return self._chain
 
     async def transcribe(self, audio: bytes, *, mime_type: str) -> str:

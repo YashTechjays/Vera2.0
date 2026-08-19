@@ -41,7 +41,9 @@ class _StubJudgeClient(VertexLLMClient):
         self._model = "fake-model"
         self.generate_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _generate(
+        self, prompt: str, schema: dict[str, Any], *, pass_name: str
+    ) -> list[dict[str, Any]]:
         self.generate_calls.append((prompt, schema))
         item: _Queued = self._responses.pop(0) if self._responses else []
         if isinstance(item, Exception):
@@ -332,7 +334,9 @@ class _ConcurrencyProbeClient(VertexLLMClient):
         self._started = 0
         self._all_started = asyncio.Event()
 
-    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _generate(
+        self, prompt: str, schema: dict[str, Any], *, pass_name: str
+    ) -> list[dict[str, Any]]:
         self._started += 1
         if self._started == self._expected:
             self._all_started.set()

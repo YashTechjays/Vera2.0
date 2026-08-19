@@ -8,16 +8,21 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.conftest import FakeTraceLinkRedis
 from tests.integration.control_plane.conftest import RBACWorld, seed_call
 from tests.integration.control_plane.test_calls import _auth, seeded_form_id  # noqa: F401
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
 from vera_core.llm import LLMUnavailableError
 from vera_core.models import AuditLog, Transcript
+from vera_core.observability import TraceLinkStore
 from vera_core.observability.correlation import room_name_for_call
+from vera_core.observability.trace_link import current_traceparent
 
 
 class _StubSummaryLLM:
@@ -276,3 +281,59 @@ async def test_summary_llm_unavailable_returns_503(
         assert resp.json()["error_code"] == "SERVICE_UNAVAILABLE"
     finally:
         authz_app.state.summary_llm, authz_app.state.summary_cache = prior_llm, prior_cache
+
+
+@pytest.mark.asyncio
+async def test_the_summary_span_joins_the_worker_trace_through_the_endpoint(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,  # noqa: F811
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    call_stream_service: CallStreamService,
+    stub_llm: _StubSummaryLLM,
+    authz_app: FastAPI,
+    otel_spans: InMemorySpanExporter,
+) -> None:
+    """`summarize_call`'s own test proves the span nests when handed a store. This
+    proves the ENDPOINT hands it one — the `get_trace_link_store` dependency through
+    `trace_links=trace_links`. Deleting that argument leaves the unit test green and
+    the summary's LLM cost in an orphan trace no per-call query can find, which is
+    invisible in the HTTP response and in the audit rows this file already checks.
+    """
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
+    )
+    room = room_name_for_call(rbac_world.tenant_id, call_id)
+    await _publish_turns(call_stream_service, room)
+
+    # Stand in for the worker having published its traceparent for this call.
+    store = TraceLinkStore(FakeTraceLinkRedis())
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("job_entrypoint") as worker_span:
+        traceparent = current_traceparent()
+        worker_trace_id = worker_span.get_span_context().trace_id
+    assert traceparent is not None
+    await store.publish(room, traceparent)
+
+    prior = authz_app.state.trace_link_store
+    authz_app.state.trace_link_store = store
+    otel_spans.clear()
+    try:
+        resp = await client.get(
+            f"/api/v1/calls/{call_id}/summary", headers=_auth(rbac_world.admin_token)
+        )
+    finally:
+        authz_app.state.trace_link_store = prior
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "ready"
+
+    spans = [s for s in otel_spans.get_finished_spans() if s.name == "vera.call_summary"]
+    assert len(spans) == 1, "the endpoint opened no vera.call_summary span"
+    assert spans[0].context.trace_id == worker_trace_id, (
+        "vera.call_summary formed its own trace — the endpoint is not passing "
+        "trace_links through to summarize_call"
+    )
