@@ -35,6 +35,15 @@ _OBSERVER_PREFIXES = (MONITOR_IDENTITY_PREFIX, SUPERVISOR_IDENTITY_PREFIX)
 
 _SESSION_SEP = "~"  # supervisor identity: user id ~ session id
 
+# Langfuse names a trace after its ROOT span, but it also re-derives the trace from
+# EVERY span carrying a trace-level attribute — `langfuse.session.id` below is one —
+# and on that path it reads the name from `langfuse.trace.name` alone. A child span
+# that omits it therefore writes the trace's name as empty, and a call emits hundreds
+# of them, so the trace reliably ends up unnamed. Spans inside the call's trace
+# restate the name instead of leaving it to whichever write lands last.
+TRACE_NAME_ATTR = "langfuse.trace.name"
+CALL_TRACE_NAME = "job_entrypoint"  # = LiveKit's own root span name; keep them equal
+
 
 def is_observer_identity(identity: str) -> bool:
     """True for a participant that observes the call (monitor, supervisor) rather
@@ -84,15 +93,25 @@ def parse_room_name(room_name: str) -> RoomRef | None:
         return None
 
 
-def call_trace_attributes(room_name: str) -> dict[str, str]:
+def call_trace_attributes(room_name: str, *, in_call_trace: bool) -> dict[str, str]:
     """Span/trace attributes shared by every span belonging to this call.
-    langfuse.session.id groups all of a call's traces into one session view."""
+    langfuse.session.id groups all of a call's traces into one session view.
+
+    Pass *in_call_trace* True only for a span that lands in the trace the worker rooted,
+    which restates that trace's name (see TRACE_NAME_ATTR). False is for a span rooting
+    a trace of its own — the dispatch span, or a post-call span whose trace link
+    expired — where claiming the worker's name would disguise a broken link as a
+    healthy call trace.
+    """
     ref = parse_room_name(room_name)
     if ref is None:
         return {"vera.room": room_name}
-    return {
+    attributes = {
         "vera.room": room_name,
         "vera.tenant_id": str(ref.tenant_id),
         "vera.call_id": str(ref.call_id),
         "langfuse.session.id": room_name,
     }
+    if in_call_trace:
+        attributes[TRACE_NAME_ATTR] = CALL_TRACE_NAME
+    return attributes

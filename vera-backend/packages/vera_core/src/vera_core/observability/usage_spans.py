@@ -179,7 +179,7 @@ def _emit_usage_span(
         return
     _warn_if_nameless(metrics, attrs)
     if room_name is not None:
-        attrs.update(call_trace_attributes(room_name))
+        attrs.update(call_trace_attributes(room_name, in_call_trace=True))
     if source is not None:
         attrs[SOURCE_ATTR] = source
     name = SPAN_TTS_USAGE if isinstance(metrics, TTSMetrics) else SPAN_STT_USAGE

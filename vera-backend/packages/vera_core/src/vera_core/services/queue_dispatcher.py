@@ -479,7 +479,7 @@ async def try_dispatch(
 
                 room_name = room_name_for_call(tenant_id, call.id)
                 span_attrs: dict[str, Any] = {
-                    **call_trace_attributes(room_name),
+                    **call_trace_attributes(room_name, in_call_trace=False),
                     "vera.dispatch.ivr_enabled": bool(metadata.get("enable_ivr_navigation")),
                     TRANSPORT_ATTR: TRANSPORT_BROWSER if browser_callee else TRANSPORT_SIP,
                 }

@@ -10,6 +10,7 @@ from opentelemetry import trace
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from tests.conftest import FakeTraceLinkRedis
+from vera_core.observability.correlation import CALL_TRACE_NAME, TRACE_NAME_ATTR
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.trace_link import (
     TraceLinkStore,
@@ -191,6 +192,30 @@ class TestCallScopedSpan:
             pass
         span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
         assert span.attributes["vera.room"] == _ROOM
+
+    @pytest.mark.asyncio
+    async def test_a_linked_span_restates_the_call_trace_name(self, otel_spans: Any) -> None:
+        """Joining the worker's trace makes Langfuse re-derive it from THIS span, and
+        that path reads the name only from langfuse.trace.name."""
+        tracer = trace.get_tracer("test")
+        store = TraceLinkStore(FakeTraceLinkRedis())
+        await store.publish(_ROOM, _TRACEPARENT)
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=store):
+            pass
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
+        assert span.attributes[TRACE_NAME_ATTR] == CALL_TRACE_NAME
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_span_does_not_claim_to_be_worker_rooted(
+        self, otel_spans: Any
+    ) -> None:
+        # Without the link this span roots its OWN trace; naming that trace
+        # job_entrypoint would disguise the missing link as a healthy call trace.
+        tracer = trace.get_tracer("test")
+        async with call_scoped_span(tracer, "vera.thing", room_name=_ROOM, trace_links=None):
+            pass
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.thing")
+        assert TRACE_NAME_ATTR not in span.attributes
 
     @pytest.mark.asyncio
     async def test_an_exception_leaves_no_text_on_the_span(self, otel_spans: Any) -> None:

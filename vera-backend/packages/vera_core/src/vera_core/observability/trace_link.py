@@ -156,5 +156,6 @@ async def call_scoped_span(
     so per-TRACE is the only unit that makes a per-call total real.
     """
     parent = await trace_links.resolve(room_name) if trace_links is not None else None
-    with phi_safe_span(tracer, name, attributes=call_trace_attributes(room_name), context=parent):
+    attributes = call_trace_attributes(room_name, in_call_trace=parent is not None)
+    with phi_safe_span(tracer, name, attributes=attributes, context=parent):
         yield

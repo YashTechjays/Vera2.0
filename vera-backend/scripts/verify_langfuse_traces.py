@@ -44,7 +44,7 @@ from scripts.seed_langfuse_prices import (
     matching_entry,
 )
 from vera_core.config import get_settings
-from vera_core.observability.correlation import parse_room_name
+from vera_core.observability.correlation import CALL_TRACE_NAME, parse_room_name
 from vera_core.observability.llm_usage_export import THINKING_TOKENS_ATTR
 from vera_core.observability.usage_spans import (
     SPAN_STT_USAGE,
@@ -57,9 +57,10 @@ from vera_core.observability.usage_spans import (
 # point of the cross-process trace link; in a separate trace they are orphans.
 CONTROL_PLANE_SPANS = ("vera.post_call.eval", "vera.call_summary", "vera.coaching.whisper")
 
-# The worker's root span for a call. Used to CONFIRM which of ONE call's traces the
-# worker rooted — never to find a call trace in the first place (see _call_traces).
-CALL_ROOT_SPAN = "job_entrypoint"
+# The worker's root span for a call, which `call_trace_attributes` also restates as the
+# trace's name. Used to CONFIRM which of ONE call's traces the worker rooted — never to
+# find a call trace in the first place (see _call_traces).
+CALL_ROOT_SPAN = CALL_TRACE_NAME
 
 
 def _auth(settings: Any) -> str:
@@ -122,13 +123,14 @@ def _thinking(observation: dict[str, Any]) -> int:
 async def _call_traces(client: httpx.AsyncClient, limit: int = 100) -> list[dict[str, Any]]:
     """Recent call traces, newest first, identified by SESSION rather than by name.
 
-    Not by trace name. Langfuse takes a trace's name from whichever observation it
-    ingests first, and on a long call the root `job_entrypoint` span does not end until
-    hangup while its children flush continuously through the BatchSpanProcessor — so the
-    trace often lands with an EMPTY name and is never backfilled. Selecting on the name
-    then skips the newest call and validates an OLDER one while printing PASS, which is
-    the worst failure a gate can have. Observed: a call whose trace was named "" was
-    passed over in favour of the previous call's trace.
+    Not by trace name. Langfuse names a trace after its ROOT span, but it re-derives the
+    trace from every span carrying `langfuse.session.id` too, and on that path reads the
+    name from `langfuse.trace.name` alone — so before Vera restated that attribute a call
+    trace routinely landed with an EMPTY name. Selecting on the name then skips the newest
+    call and validates an OLDER one while printing PASS, which is the worst failure a gate
+    can have. Observed: a call whose trace was named "" was passed over in favour of the
+    previous call's trace. Still keyed on the session now the attribute is set, because a
+    gate must not rest on a field that one dropped span blanks.
 
     `sessionId` is the room name (`room_name_for_call`), stamped on every span by
     `call_trace_attributes`, so it is set whichever span arrives first.

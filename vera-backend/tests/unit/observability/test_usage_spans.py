@@ -14,6 +14,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from vera_core.observability.correlation import CALL_TRACE_NAME, TRACE_NAME_ATTR
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.observability.usage_spans import (
     GENERATION,
@@ -177,6 +178,9 @@ class TestDefensiveHandling:
         assert usage_span_attributes(None) is None
 
 
+_ROOM = "call--00000000-0000-0000-0000-0000000000aa--00000000-0000-0000-0000-0000000000bb"
+
+
 class _FakeEmitter(rtc.EventEmitter[str]):
     """Stands in for deepgram.STTv2 / cartesia.TTS / stt.FallbackAdapter — all of
     which are rtc.EventEmitters that emit 'metrics_collected'."""
@@ -206,15 +210,23 @@ class TestListener:
         assert otel_spans.get_finished_spans() == ()
 
     def test_room_name_adds_call_correlation(self, otel_spans: Any) -> None:
-        tenant = "00000000-0000-0000-0000-0000000000aa"
         call = "00000000-0000-0000-0000-0000000000bb"
-        room = f"call--{tenant}--{call}"
+        room = _ROOM
         emitter = _FakeEmitter()
         attach_usage_spans(emitter, room_name=room)
         emitter.emit("metrics_collected", _stt())
         span = _only(otel_spans, SPAN_STT_USAGE)
         assert span.attributes["langfuse.session.id"] == room
         assert span.attributes["vera.call_id"] == call
+
+    def test_a_usage_span_restates_the_call_trace_name(self, otel_spans: Any) -> None:
+        """Carrying langfuse.session.id makes Langfuse re-derive the trace from this
+        span, and that path takes the name from langfuse.trace.name alone — without it
+        the hundreds of usage spans on a call blank the trace's name."""
+        emitter = _FakeEmitter()
+        attach_usage_spans(emitter, room_name=_ROOM)
+        emitter.emit("metrics_collected", _stt())
+        assert _only(otel_spans, SPAN_STT_USAGE).attributes[TRACE_NAME_ATTR] == CALL_TRACE_NAME
 
     def test_source_is_set_only_when_given(self, otel_spans: Any) -> None:
         emitter = _FakeEmitter()

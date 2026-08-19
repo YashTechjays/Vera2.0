@@ -386,7 +386,9 @@ async def entrypoint(ctx: JobContext) -> None:
         # Attach correlation attributes to the active OTel span so every pipeline
         # span is grouped under langfuse.session.id = room_name in Langfuse. For a
         # console/connect mic test (foreign room) this sets only `vera.room`.
-        trace.get_current_span().set_attributes(call_trace_attributes(room_name))
+        trace.get_current_span().set_attributes(
+            call_trace_attributes(room_name, in_call_trace=True)
+        )
 
         # Captured HERE, where LiveKit's job_entrypoint span is genuinely ambient.
         # Usage-span listeners are registered from code that later runs in other tasks
