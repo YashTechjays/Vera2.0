@@ -158,6 +158,41 @@ describe("authSlice", () => {
     expect(deadline!).toBeLessThanOrEqual(after + 10 * 3600 * 1000)
   })
 
+  // VR2-202: a slow logout reply must never wipe a NEWER login's token, so the
+  // local session is dropped the moment logout is dispatched, not at settle time.
+  it("clears the session immediately on logout, before the revoke call settles", async () => {
+    vi.mocked(api.getMe).mockResolvedValue(me)
+    let resolveRevoke!: (value: null) => void
+    vi.mocked(api.logout).mockReturnValue(
+      new Promise((resolve) => {
+        resolveRevoke = resolve
+      }),
+    )
+    const store = makeStore()
+    await store.dispatch(fetchMe())
+
+    const settled = store.dispatch(logoutThunk())
+    expect(storage.clearSession).toHaveBeenCalled()
+    resolveRevoke(null)
+    await settled
+  })
+
+  // VR2-202: the password was accepted, so a failed /auth/me hydration must reject with
+  // its own message, not the login POST's 401 (which the UI maps to the generic
+  // "Invalid workspace, email, or password.").
+  it("reports a session-load failure distinctly from bad credentials", async () => {
+    vi.mocked(api.login).mockResolvedValue({
+      mfa: "none", session_token: "tok", mfa_token: null, provisioning_uri: null,
+    })
+    vi.mocked(api.getMe).mockRejectedValue(new Error("session expired"))
+    const store = makeStore()
+    await expect(
+      store.dispatch(loginThunk({ slug: "acme", email: "a@b.co", password: "x" })).unwrap(),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("loading your session failed"),
+    })
+  })
+
   it("captures the platform plane on logout so the redirect path is /platform/login", async () => {
     vi.mocked(api.getMe).mockResolvedValue(platformMe)
     vi.mocked(api.logout).mockResolvedValue(null)

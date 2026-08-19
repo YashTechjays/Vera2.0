@@ -78,7 +78,12 @@ export const loginThunk = createAsyncThunk(
     const res = await authApi.login(arg.slug, arg.email, arg.password)
     if (res.mfa === "none") {
       setSession(res.session_token ?? "", arg.slug)
-      await dispatch(fetchMe()).unwrap()
+      try {
+        await dispatch(fetchMe()).unwrap()
+      } catch {
+        // The password WAS accepted — a hydration failure must not read as bad credentials (VR2-202).
+        throw new Error("Signed in, but loading your session failed. Please try again.")
+      }
     } else if (res.mfa === "verify") {
       dispatch(setMfa({ token: res.mfa_token ?? "", step: "verify" }))
     } else if (res.mfa === "enroll") {
@@ -170,10 +175,14 @@ export const keepaliveThunk = createAsyncThunk("auth/keepalive", async () => {
 })
 
 export const logoutThunk = createAsyncThunk("auth/logout", async () => {
+  // Start the revoke first (it reads the token synchronously), then drop the local session
+  // NOW — a slow revoke reply must never wipe a newer login's token (VR2-202).
+  const revoking = authApi.logout()
+  clearSession()
   try {
-    await authApi.logout()
+    await revoking
   } catch {
-    // Best effort — clear locally even if the revoke call fails.
+    // Best effort — the local session is already gone.
   }
 })
 
@@ -222,7 +231,7 @@ const authSlice = createSlice({
       })
       .addCase(loginThunk.rejected, (s, a) => {
         s.loading = false
-        s.error = apiErrorMessage(a.error, "Invalid credentials.")
+        s.error = apiErrorMessage(a.error, "Invalid workspace, email, or password.")
       })
       .addCase(fetchMe.pending, (s) => {
         if (s.status !== "authenticated") s.status = "loading"
@@ -302,7 +311,6 @@ const authSlice = createSlice({
         s.error = apiErrorMessage(a.error, "Enrollment failed.")
       })
       .addCase(logoutThunk.fulfilled, (s) => {
-        clearSession()
         // Capture the plane before nulling user so the redirect path survives.
         if (s.user) {
           s.logoutPlane = s.user.account_type === "platform" ? "platform" : "tenant"
