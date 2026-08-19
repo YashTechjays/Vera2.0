@@ -17,6 +17,7 @@ const COVERAGE = "sections.benefit_coverage.coverage_type"
 const COPAY = "sections.general_coverage.office_visits.cpt_99211.copay"
 const COVERED = "sections.general_coverage.office_visits.cpt_99211.covered"
 const COINSURANCE = "sections.general_coverage.office_visits.cpt_99211.coinsurance"
+const DOB = "sections.patient_information.patient_dob"
 
 describe("validateAll — requiredness", () => {
   it("flags an empty required field without a default", () => {
@@ -60,7 +61,7 @@ describe("validateAll — pattern and range", () => {
       validateAll(schema, { "sections.hospital_information.tax_id": "12345" })[
         "sections.hospital_information.tax_id"
       ]
-    ).toMatch(/invalid/i)
+    ).toMatch(/9-digit/)
     expect(
       validateAll(schema, { "sections.hospital_information.tax_id": "123456789" })[
         "sections.hospital_information.tax_id"
@@ -91,16 +92,14 @@ describe("validateAll — pattern and range", () => {
 })
 
 describe("validateAll — date format", () => {
-  const DOB = "sections.patient_information.patient_dob"
-
   it("accepts values matching the schema's date_format (M/D/YYYY)", () => {
     expect(validateAll(schema, { [DOB]: "2/15/1990" })[DOB]).toBeUndefined()
     expect(validateAll(schema, { [DOB]: "02/15/1990" })[DOB]).toBeUndefined()
   })
 
   it("flags values in another date shape", () => {
-    expect(validateAll(schema, { [DOB]: "1990-02-15" })[DOB]).toMatch(/M\/D\/YYYY/)
-    expect(validateAll(schema, { [DOB]: "Feb 15 1990" })[DOB]).toMatch(/M\/D\/YYYY/)
+    expect(validateAll(schema, { [DOB]: "1990-02-15" })[DOB]).toMatch(/MM\/DD\/YYYY/)
+    expect(validateAll(schema, { [DOB]: "Feb 15 1990" })[DOB]).toMatch(/MM\/DD\/YYYY/)
   })
 })
 
@@ -221,6 +220,125 @@ describe("missingCreateLeaves", () => {
 
   it("reports every unfilled required field of the real schema", () => {
     expect(missingCreateLeaves(schema, {})).toHaveLength(createRequiredPaths(schema).size)
+  })
+})
+
+const DIALED_PHONE = "sections.insurance_reference_information.insurance_phone_number"
+const CONTEXT_PHONE = "sections.verification_information.callback_number"
+
+// Dialed-phone E.164 checks: keyed on the promoted handle, not the leaf type, so a
+// phone leaf no handle points at stays free-text (backend parity).
+const phoneSchema = {
+  dsl_version: "2.1",
+  name: "Test Form",
+  sections: {
+    insurance_reference_information: {
+      title: "Insurance Reference Information",
+      fields: {
+        insurance_phone_number: { type: "phone", title: "Insurance Provider Phone" },
+      },
+    },
+    verification_information: {
+      title: "Verification Information",
+      fields: {
+        callback_number: { type: "phone", title: "Callback Number" },
+      },
+    },
+  },
+  system_fields: { insurance_provider_phone_number: DIALED_PHONE },
+} as unknown as FormSchema
+
+describe("validateAll — dialed phone E.164", () => {
+  it("flags a non-E.164 dialed phone value", () => {
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "555-010-0100" })[DIALED_PHONE]).toBe(
+      "Enter a valid Insurance Provider Phone including the country code.",
+    )
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "+1 555 0100" })[DIALED_PHONE]).toMatch(
+      /country code/i,
+    )
+  })
+
+  it("accepts a valid E.164 dialed phone value", () => {
+    expect(validateAll(phoneSchema, { [DIALED_PHONE]: "+12125551234" })[DIALED_PHONE]).toBeUndefined()
+  })
+
+  it("leaves unbound phone leaves free-text", () => {
+    expect(validateAll(phoneSchema, { [CONTEXT_PHONE]: "555-010-0100" })[CONTEXT_PHONE]).toBeUndefined()
+  })
+
+  it("applies the same check in create mode", () => {
+    const errors = validateCreate(phoneSchema, { [DIALED_PHONE]: "5550100" }, { includeRequired: false })
+    expect(errors[DIALED_PHONE]).toMatch(/country code/i)
+  })
+})
+
+// VR2-206 — specific pre-upload messages, exercised against the real schema.
+const APPT_DATE = "sections.appointment_information.appointment_date"
+const CALLBACK = "sections.verification_information.callback_number"
+const INS_PHONE = "sections.insurance_reference_information.insurance_phone_number"
+const TAX_ID = "sections.hospital_information.tax_id"
+const FACILITY_NPI = "sections.hospital_information.npi"
+const PROVIDER_NPI = "sections.provider_reference_information.npi"
+
+/** Today minus `years` (plus `extraDays`), in the schema's M/D/YYYY shape. */
+function dobYearsAgo(years: number, extraDays = 0): string {
+  const date = new Date()
+  date.setFullYear(date.getFullYear() - years)
+  date.setDate(date.getDate() + extraDays)
+  return `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`
+}
+
+describe("validateAll — VR2-206 specific messages", () => {
+  it("names the digit count for digit-only patterns", () => {
+    expect(validateAll(schema, { [TAX_ID]: "12345" })[TAX_ID]).toBe(
+      "Enter a valid Tax ID. Please enter a 9-digit Tax ID.",
+    )
+    expect(validateAll(schema, { [FACILITY_NPI]: "99" })[FACILITY_NPI]).toBe(
+      "Enter a valid Facility NPI. Please enter a 10-digit Facility NPI.",
+    )
+    expect(validateAll(schema, { [PROVIDER_NPI]: "99" })[PROVIDER_NPI]).toBe(
+      "Enter a valid Provider NPI. Please enter a 10-digit Provider NPI.",
+    )
+  })
+
+  it("spells out the date format", () => {
+    expect(validateAll(schema, { [DOB]: "1990-02-23" })[DOB]).toBe(
+      "Enter Patient Date of Birth in MM/DD/YYYY format.",
+    )
+    expect(validateAll(schema, { [APPT_DATE]: "23rd Aug" })[APPT_DATE]).toBe(
+      "Enter Appointment Date in MM/DD/YYYY format.",
+    )
+  })
+
+  it("requires the country code on the callback number too", () => {
+    expect(validateAll(schema, { [CALLBACK]: "5550199" })[CALLBACK]).toBe(
+      "Enter a valid Callback Number including the country code.",
+    )
+    expect(validateAll(schema, { [CALLBACK]: "+15125550199" })[CALLBACK]).toBeUndefined()
+    expect(validateAll(schema, { [INS_PHONE]: "5550100" })[INS_PHONE]).toBe(
+      "Enter a valid Insurance Provider Phone including the country code.",
+    )
+  })
+
+  it("blocks a patient under 18", () => {
+    expect(validateAll(schema, { [DOB]: dobYearsAgo(10) })[DOB]).toBe(
+      "Patient must be 18 years of age or older.",
+    )
+    // A day short of the 18th birthday still blocks; 18+ passes.
+    expect(validateAll(schema, { [DOB]: dobYearsAgo(18, 1) })[DOB]).toBe(
+      "Patient must be 18 years of age or older.",
+    )
+    expect(validateAll(schema, { [DOB]: dobYearsAgo(18) })[DOB]).toBeUndefined()
+    expect(validateAll(schema, { [DOB]: dobYearsAgo(40) })[DOB]).toBeUndefined()
+  })
+
+  it("prefers the format message over the age rule and applies both in create mode", () => {
+    expect(validateCreate(schema, { [DOB]: "bad" }, { includeRequired: false })[DOB]).toBe(
+      "Enter Patient Date of Birth in MM/DD/YYYY format.",
+    )
+    expect(
+      validateCreate(schema, { [DOB]: dobYearsAgo(10) }, { includeRequired: false })[DOB],
+    ).toBe("Patient must be 18 years of age or older.")
   })
 })
 

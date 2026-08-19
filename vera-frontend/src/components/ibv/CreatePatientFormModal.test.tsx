@@ -86,9 +86,10 @@ function fillRequired() {
   for (const path of createRequiredPaths(parseSchema(rawSchema))) {
     const value = SAMPLE_VALUES[path]
     expect(value, `no sample value for ${path}`).toBeDefined()
-    const input = document
-      .querySelector(`[data-field-path="${path}"]`)
-      ?.querySelector("input, select")
+    // The dialed-phone row leads with a country <select>, so prefer the row's text
+    // input — enum rows have only the select.
+    const cell = document.querySelector(`[data-field-path="${path}"]`)
+    const input = cell?.querySelector("input") ?? cell?.querySelector("select")
     expect(input, path).not.toBeNull()
     fireEvent.change(input as HTMLElement, { target: { value } })
   }

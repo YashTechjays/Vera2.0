@@ -8,7 +8,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { cn, triggerBlobDownload } from "@/lib/utils"
@@ -42,8 +41,6 @@ export function IbvFormModal() {
     dirty,
     saveState,
     save,
-    resolveAll,
-    pendingDisputeCount,
     loading,
     error,
     clearedRequired,
@@ -228,46 +225,29 @@ export function IbvFormModal() {
             (tab === "form" ? <SchemaForm /> : <CallHistoryTab key={formId ?? "demo"} />)}
         </div>
 
-        <div className="flex items-center justify-between gap-4 border-t border-border p-4">
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox
-              checked={pendingDisputeCount === 0}
-              onCheckedChange={(c) => {
-                if (c) resolveAll()
-              }}
-              disabled={pendingDisputeCount === 0}
-            />
-            Resolve all disputes
-            {pendingDisputeCount > 0 && (
-              <span className="text-muted-foreground">
-                ({pendingDisputeCount} pending)
-              </span>
-            )}
-          </label>
-          <div className="flex items-center gap-3">
-            {saveState === "saved" && !dirty && (
-              <span className="text-sm text-emerald-600">Saved</span>
-            )}
-            <Button
-              variant="outline"
-              onClick={closeForm}
-              className="min-w-[140px] border-ibv-row bg-white text-foreground hover:bg-muted/50"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={save}
-              disabled={!dirty || saveState === "saving" || clearedRequired.length > 0}
-              title={
-                clearedRequired.length > 0
-                  ? "Restore the cleared required fields before saving."
-                  : undefined
-              }
-              className="min-w-[140px]"
-            >
-              {saveState === "saving" ? "Saving…" : "Save"}
-            </Button>
-          </div>
+        <div className="flex items-center justify-end gap-3 border-t border-border p-4">
+          {saveState === "saved" && !dirty && (
+            <span className="text-sm text-emerald-600">Saved</span>
+          )}
+          <Button
+            variant="outline"
+            onClick={closeForm}
+            className="min-w-[140px] border-ibv-row bg-white text-foreground hover:bg-muted/50"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={save}
+            disabled={!dirty || saveState === "saving" || clearedRequired.length > 0}
+            title={
+              clearedRequired.length > 0
+                ? "Restore the cleared required fields before saving."
+                : undefined
+            }
+            className="min-w-[140px]"
+          >
+            {saveState === "saving" ? "Saving…" : "Save"}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

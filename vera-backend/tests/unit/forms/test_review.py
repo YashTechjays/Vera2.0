@@ -134,17 +134,17 @@ class TestDisputeView:
     both go through it, so its dict shape is what the UI renders either way."""
 
     def test_diverging_ai_value_builds_payload(self) -> None:
+        # No `evidence` key: it belongs to the answer, not the divergence, so it rides on
+        # the field view instead (an agreeing AI answer has evidence but no dispute).
         assert dispute_view(
             source="ai_call",
             value={"value": "Blue Cross"},
             confidence=88,
-            evidence="member said Blue Cross",
             baseline_value={"value": "BCBS TX"},
         ) == {
             "previous_value": "BCBS TX",
             "current_value": "Blue Cross",
             "confidence": 88,
-            "evidence": "member said Blue Cross",
             "reasoning": None,
         }
 
@@ -154,37 +154,26 @@ class TestDisputeView:
                 source="ai_call",
                 value="BCBS TX",
                 confidence=None,
-                evidence=None,
                 baseline_value={"value": "BCBS TX"},
             )
             is None
         )
 
     def test_absent_baseline_disputes_non_null_value(self) -> None:
-        view = dispute_view(
-            source="ai_call", value="Aetna", confidence=None, evidence=None, baseline_value=None
-        )
+        view = dispute_view(source="ai_call", value="Aetna", confidence=None, baseline_value=None)
         assert view is not None
         assert view["previous_value"] is None
         assert view["current_value"] == "Aetna"
 
     def test_non_ai_source_is_never_disputed(self) -> None:
-        assert (
-            dispute_view(
-                source="human", value="x", confidence=None, evidence=None, baseline_value=None
-            )
-            is None
-        )
+        assert dispute_view(source="human", value="x", confidence=None, baseline_value=None) is None
 
     def test_accepts_raw_unwrapped_values(self) -> None:
         # The live path passes raw values (not {"value": ...}) \u2014 must behave identically.
-        assert dispute_view(
-            source="ai_call", value="Yes", confidence=90, evidence=None, baseline_value="No"
-        ) == {
+        assert dispute_view(source="ai_call", value="Yes", confidence=90, baseline_value="No") == {
             "previous_value": "No",
             "current_value": "Yes",
             "confidence": 90,
-            "evidence": None,
             "reasoning": None,
         }
 
@@ -253,9 +242,10 @@ class TestBuildFieldViews:
             "previous_value": "BCBS TX",  # the intake/human baseline
             "current_value": "Blue Cross",  # the diverging AI value
             "confidence": 95,  # the AI answer's own confidence
-            "evidence": "rep said so",  # field_answer.evidence (what was captured)
             "reasoning": None,  # field_evaluation plays no part in disputes
         }
+        # Evidence is top-level on the view, never nested in the dispute.
+        assert by_path["insurance_information.health_plan"]["evidence"] == "rep said so"
         assert by_path["insurance_information.health_plan"]["value"] == "Blue Cross"
         assert by_path["patient_information.patient_name"]["dispute"] is None
 
@@ -263,6 +253,21 @@ class TestBuildFieldViews:
         a = self._answer("insurance_information.health_plan", "X", confidence=80)
         views = build_field_views([a], {"insurance_information.health_plan": {"value": "X"}})
         assert views[0]["dispute"] is None
+
+    def test_evidence_is_top_level_even_when_undisputed(self) -> None:
+        """The reason evidence is not dispute-nested: an AI answer that AGREES with the
+        baseline has no dispute, but its evidence is still what a reviewer needs."""
+        a = self._answer(
+            "insurance_information.health_plan", "X", confidence=80, evidence="rep said X"
+        )
+        views = build_field_views([a], {"insurance_information.health_plan": {"value": "X"}})
+        assert views[0]["dispute"] is None
+        assert views[0]["evidence"] == "rep said X"
+
+    def test_evidence_is_none_when_the_answer_carries_none(self) -> None:
+        # The live Observer path stamps evidence_seq but never the text column.
+        a = self._answer("insurance_information.health_plan", "New", confidence=80)
+        assert build_field_views([a], {})[0]["evidence"] is None
 
     def test_ai_value_without_baseline_is_disputed(self) -> None:
         a = self._answer("insurance_information.health_plan", "New", confidence=80)

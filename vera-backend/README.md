@@ -46,6 +46,62 @@ just langfuse-down       # stop it and free the RAM
 Leaving it running balloons the Docker VM until the kernel OOM-kills ClickHouse. The worker
 degrades gracefully (drops spans) when it's down.
 
+#### Per-call cost tracking — seeding prices, then verifying
+
+Vera emits raw **usage** (audio milliseconds, synthesized characters, tokens) and holds no
+prices; Langfuse does the arithmetic against model price entries you seed into it. Until
+those entries exist, usage ingests fine and every observation renders a **blank `$`** —
+which looks exactly like broken instrumentation.
+
+```bash
+cp langfuse-rates.env.example langfuse-rates.env   # gitignored; edit in your rates
+source langfuse-rates.env && just langfuse-seed-prices
+```
+
+Run `just langfuse-seed-prices` with nothing set and it lists every variable it wants. It
+is **all-or-nothing** — a missing, zero, negative or non-finite rate writes nothing,
+because a `$0.00` entry is indistinguishable from broken tracing — and it is idempotent
+in the non-destructive sense: this API has no upsert, so changing an entry means DELETE
+then POST, and the seeder leaves any entry that already matches untouched rather than
+cycling it through that window. A replacement that fails is named and exits non-zero.
+
+Two units are easy to get wrong, and both render a plausible number when wrong:
+
+- **audio is priced per MILLISECOND** (Langfuse stores usage as integers, so Vera reports
+  whole ms). Vendors publish per minute → divide by `60000`. The per-minute figure is
+  60,000× too high.
+- **LLM is priced per TOKEN.** Vendors publish per million → divide by `1e6`.
+
+Each Gemini model is priced **separately** (their rates differ by ~10×); Deepgram and
+Cartesia are family-matched (`^flux-.*$`, `^nova-.*$`, `^sonic-.*$`) so a rate-compatible
+version bump can't silently zero cost. A Gemini model not listed in `GEMINI_MODELS` matches
+nothing — the seeder warns by name when that happens.
+
+Then place a call and check that it actually priced:
+
+```bash
+just langfuse-verify              # newest call trace
+just langfuse-verify <trace-id>   # a specific one
+```
+
+It exits non-zero on a real problem, so it works as a gate. It reports price-entry
+coverage, per-model spend and cache-hit ratio, whether any billable generation is unpriced,
+whether `input + cached` reconciles against the provider's own token count, and whether the
+control-plane spans (post-call eval, summary, whisper) landed in the **call's own trace** —
+that last one is what makes a per-call total real.
+
+The OpenAI and AssemblyAI fallback tiers are deliberately unpriced (`KNOWN_UNPRICED` in the
+seeder, `adr/devops-todo.md` #23). They are listed in the report but do **not** fail the run:
+a gate that is red on a healthy system is a gate everyone learns to ignore. A configured model
+that nobody decided about still fails it.
+
+Seed **before** the call: Langfuse computes cost at ingestion and stores the number, so
+seeding afterwards will not retro-price an existing trace.
+
+For a full-coverage check the call must be **multi-turn** (cache hits need a repeated
+prefix), and you should fire hold-to-whisper, request a summary, and let post-call eval run
+— which needs `VERA_GCP_PROJECT` set, or that consumer never starts.
+
 ### Eval harness (call-flow simulation) — opt-in
 
 `apps/agent_worker/tests/evals/` replays a whole call without placing one — real entrypoint, real

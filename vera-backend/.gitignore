@@ -32,3 +32,7 @@ infra/**/*.tfstate*
 
 # Generated TTS probe audio (scripts/tts_probe.py)
 tts-probe/
+
+# Langfuse price rates: contract values, not secrets, but never committed —
+# the app holds no prices and a second copy in the repo is one that drifts.
+langfuse-rates.env

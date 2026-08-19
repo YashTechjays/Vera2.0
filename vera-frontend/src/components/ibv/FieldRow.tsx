@@ -1,48 +1,12 @@
-import { Info } from "lucide-react"
-
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
 import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
-import { confidenceHighlightClass } from "@/lib/ibv/disputes"
+import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
+import { phonePaths } from "@/lib/ibv/phone"
 import { USAGE_META } from "./usageMeta"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import type { FieldProvenance } from "@/lib/patient-forms/types"
 import type { Condition, LeafField } from "@/lib/ibv/types"
-
-/** Tooltip body for AI-sourced field provenance — mirrors DisputeTooltipBody altitude. */
-function ProvenanceTooltip({ prov }: { prov: FieldProvenance }) {
-  const judgeLabel = prov.judge
-    ? ` · judge ${prov.judge.confidence ?? "—"}, ${prov.judge.supported ? "supported" : "unsupported"}`
-    : ""
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          aria-label="Field provenance"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-        >
-          <Info className="h-3 w-3" />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-[280px]">
-        <p className="font-medium">
-          Attempt {prov.attempt} ({prov.mode}){judgeLabel}
-        </p>
-        {prov.judge?.evidence && (
-          <p className="mt-1 text-xs text-muted-foreground">"{prov.judge.evidence}"</p>
-        )}
-      </TooltipContent>
-    </Tooltip>
-  )
-}
 
 type Props = {
   field: LeafField
@@ -50,7 +14,7 @@ type Props = {
   depth: number
   /** applicable_when chain from the section down to this leaf */
   gates: Condition[]
-  /** narrow layout (the 340px rail): controls + badge overflow the ~120px input,
+  /** narrow layout (the 420px rail): controls + badge overflow the narrow input,
    *  so the badge folds into the tooltip */
   compact?: boolean
 }
@@ -71,13 +35,15 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     flagsFor,
     applyDispute,
     swapDispute,
+    confidenceFor,
     provenanceFor,
     isPathRequired,
   } = useIbv()
 
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
-  const prov = provenanceFor(path)
+  const confidence = confidenceFor(path)
+  const provenance = provenanceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const required = applicable && isPathRequired(path, field)
@@ -91,7 +57,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   // against completion, so hiding the controls would block the form invisibly (VR2-166).
   const showDispute = !!dispute && !flags.applied
   const highlightClass = showDispute
-    ? confidenceHighlightClass(dispute!.confidence)
+    ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
   const disputeGutter = compact ? "50px" : "150px"
 
@@ -113,10 +79,9 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <span className="text-[#b91c1c]">*</span>
           </span>
         )}
-        {prov && <ProvenanceTooltip prov={prov} />}
       </div>
 
-      <div className="relative flex flex-1 items-stretch">
+      <div className="relative flex min-w-0 flex-1 items-stretch">
         <FieldRenderer
           field={field}
           path={path}
@@ -129,11 +94,14 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
           highlightClass={highlightClass}
           inputPaddingRight={showDispute ? disputeGutter : undefined}
           noRightBorder
+          countrySelect={schema !== null && phonePaths(schema).has(path)}
         />
         {showDispute &&
           (compact ? (
             <CompactDisputeControls
               dispute={dispute!}
+              confidence={confidence}
+              provenance={provenance}
               flags={flags}
               className="top-1/2 right-1 -translate-y-1/2"
               canSwap={applicable}
@@ -143,6 +111,8 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
           ) : (
             <InlineDisputeControls
               dispute={dispute!}
+              confidence={confidence}
+              provenance={provenance}
               flags={flags}
               className="top-1/2 right-1.5 -translate-y-1/2"
               canSwap={applicable}

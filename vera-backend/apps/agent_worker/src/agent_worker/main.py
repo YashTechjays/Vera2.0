@@ -26,6 +26,7 @@ from livekit.agents import (
     cli,
 )
 from livekit.plugins import deepgram
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from redis.asyncio import Redis
 
@@ -43,7 +44,7 @@ from agent_worker.intervention import AgentTakeoverController, intervener_presen
 from agent_worker.observer import ObserverManager, ResilientAnswerExtractor
 from agent_worker.plan_runtime import PlanRunController
 from agent_worker.prompt import parse_persona_tweak
-from agent_worker.takeover_transcript import TakeoverTranscriber
+from agent_worker.takeover_transcript import SpeakerAttribution, TakeoverTranscriber
 from agent_worker.transcript_publisher import (
     FanOutTurnPublisher,
     ReorderingEmitter,
@@ -62,6 +63,7 @@ from vera_core.events import (
     WorkerEventBus,
 )
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
+from vera_core.observability import TraceLinkStore, attach_usage_spans, current_traceparent
 from vera_core.observability.correlation import (
     PARTICIPANT_MODE_ATTR,
     TRANSPORT_ATTR,
@@ -384,7 +386,24 @@ async def entrypoint(ctx: JobContext) -> None:
         # Attach correlation attributes to the active OTel span so every pipeline
         # span is grouped under langfuse.session.id = room_name in Langfuse. For a
         # console/connect mic test (foreign room) this sets only `vera.room`.
-        trace.get_current_span().set_attributes(call_trace_attributes(room_name))
+        trace.get_current_span().set_attributes(
+            call_trace_attributes(room_name, in_call_trace=True)
+        )
+
+        # Captured HERE, where LiveKit's job_entrypoint span is genuinely ambient.
+        # Usage-span listeners are registered from code that later runs in other tasks
+        # — notably the takeover STT, reached via a room-event callback whose task does
+        # NOT carry this context. Capturing now and closing over the value keeps every
+        # usage span inside this call's trace; reading ambient context at emit time
+        # would silently produce new trace roots that never sum into the call's cost.
+        usage_parent_ctx = otel_context.get_current()
+        # Publish this call's trace id so the control plane's later spans (post-call
+        # eval, summary, coaching whisper) join THIS trace rather than forming their
+        # own. Langfuse's per-trace cost rollup is what makes a per-call total real.
+        if events_redis is not None and (traceparent := current_traceparent()):
+            # TraceLinkStore is time-boxed internally, so a wedged Redis degrades this
+            # call to session-only correlation rather than delaying the greeting.
+            await TraceLinkStore(events_redis).publish(room_name, traceparent)
 
         # Dispatch metadata gates greeting timing. The /calls path passes none, so it
         # keeps the immediate behavior; Voice Lab passes {"wait_for_speaker": true} so
@@ -482,6 +501,8 @@ async def entrypoint(ctx: JobContext) -> None:
             llm_model=meta.get("llm_model_override"),
             thinking_override=meta.get("llm_thinking_override"),
             default_model=settings.voice_llm_default_model,
+            room_name=room_name,
+            parent_context=usage_parent_ctx,
         )
 
         # THE call event stream: transcript turns + call_status frames, feeding the
@@ -601,11 +622,26 @@ async def entrypoint(ctx: JobContext) -> None:
 
         takeover_transcriber: TakeoverTranscriber | None = None
         if turn_sink is not None and speaker is not None:
+
+            def _takeover_stt(attribution: SpeakerAttribution) -> deepgram.STT:
+                # One STT per subscribed track, so one listener per track. The parent
+                # context is the entrypoint's, NOT the ambient one: a supervisor who
+                # joins after takeover starts arrives via room.on("track_subscribed"),
+                # whose task does not carry the entrypoint span.
+                stt = deepgram.STT(model="nova-3")
+                attach_usage_spans(
+                    stt,
+                    parent_context=usage_parent_ctx,
+                    room_name=room_name,
+                    source=attribution.source,
+                )
+                return stt
+
             takeover_transcriber = TakeoverTranscriber(
                 ctx.room,
                 turn_sink,
                 room_name,
-                stt_factory=lambda: deepgram.STT(model="nova-3"),
+                stt_factory=_takeover_stt,
                 callee_identity=speaker.identity,
             )
 

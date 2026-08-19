@@ -5,10 +5,12 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from livekit import rtc
 from livekit.agents import stt as agents_stt
 
 from agent_worker.takeover_transcript import (
     SpeakerAttribution,
+    TakeoverTranscriber,
     classify_source,
     publish_final_turns,
 )
@@ -113,3 +115,76 @@ async def test_publish_final_turns_swallows_sink_errors() -> None:
     events = _aiter([_Event(agents_stt.SpeechEventType.FINAL_TRANSCRIPT, "hi")])
     # must not raise
     await publish_final_turns(events, _BoomSink(), "room-1", SpeakerAttribution(SOURCE_REP, None))
+
+
+class _StubAudioStream:
+    """Stands in for rtc.AudioStream — the real one needs a live track."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self
+
+    async def __anext__(self) -> Any:
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeSTTStream:
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self
+
+    async def __anext__(self) -> Any:
+        raise StopAsyncIteration
+
+    def push_frame(self, frame: Any) -> None:
+        pass
+
+    def end_input(self) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeSTT:
+    def stream(self) -> _FakeSTTStream:
+        return _FakeSTTStream()
+
+
+class TestSTTFactoryAttribution:
+    @pytest.mark.asyncio
+    async def test_factory_receives_the_attribution_for_the_track(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The generation must be able to say WHICH channel it billed — a takeover runs
+        two concurrent Deepgram streams (callee + intervening supervisor), and both are
+        real spend."""
+        # `rtc` here is the same `livekit.rtc` module object takeover_transcript.py
+        # imports and calls `rtc.AudioStream(...)` on — patching it here reaches
+        # that exact lookup without needing a live track.
+        monkeypatch.setattr(rtc, "AudioStream", _StubAudioStream)
+
+        seen: list[SpeakerAttribution] = []
+
+        def factory(attribution: SpeakerAttribution) -> Any:
+            seen.append(attribution)
+            return _FakeSTT()
+
+        transcriber = TakeoverTranscriber(
+            object(),  # type: ignore[arg-type]  # room is never touched by _transcribe_track
+            _FakeSink(),
+            "room-1",
+            stt_factory=factory,
+            callee_identity="callee",
+        )
+
+        await transcriber._transcribe_track(
+            object(),  # type: ignore[arg-type]  # track only reaches the stubbed AudioStream
+            SpeakerAttribution(SOURCE_REP, None),
+        )
+
+        assert [a.source for a in seen] == [SOURCE_REP]

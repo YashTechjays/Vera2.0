@@ -38,6 +38,7 @@ from vera_core.events import PostCallJobBus
 from vera_core.llm import ResilientLLM
 from vera_core.models.enums import AccountType
 from vera_core.notifications import NotificationService
+from vera_core.observability import TraceLinkStore
 from vera_core.plan_store import CallPlanService
 from vera_core.stt import ResilientSTT
 
@@ -158,6 +159,11 @@ def get_password_reset_rate_limiter(request: Request) -> PasswordResetRateLimite
 def get_whisper_stt(request: Request) -> ResilientSTT:
     stt: ResilientSTT = request.app.state.whisper_stt
     return stt
+
+
+def get_trace_link_store(request: Request) -> TraceLinkStore:
+    store: TraceLinkStore = request.app.state.trace_link_store
+    return store
 
 
 def get_email_sender(request: Request) -> EmailSender:

@@ -24,8 +24,10 @@ from google.genai.types import ThinkingConfig
 from livekit.agents import AgentSession
 from livekit.plugins import cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.english import EnglishModel
+from opentelemetry.context import Context
 
 from agent_worker.intervention import TakeoverState
+from vera_core.observability import attach_usage_spans
 from vera_core.services.model_config import (
     ThinkingOverride,
     is_gemini_3_model,
@@ -124,6 +126,30 @@ def stt_kwargs(key_terms: list[str] | None) -> dict[str, Any]:
     return {"keyterm": key_terms} if key_terms else {}
 
 
+def build_speech_components(
+    *,
+    key_terms: list[str] | None = None,
+    room_name: str | None = None,
+    parent_context: Context | None = None,
+) -> tuple[deepgram.STTv2, cartesia.TTS]:
+    """The two billed speech components, with usage listeners already attached.
+
+    Split out of build_session so the money-spending pair can be constructed — and
+    its instrumentation asserted — without also building the Vertex LLM, Silero VAD
+    and the turn detector, which need ADC and downloaded model files.
+
+    LiveKit reports STT usage only to the OTel Metrics API (a no-op meter here) and
+    TTS usage only in a custom attribute bag Langfuse cannot price, so without these
+    listeners both providers' spend is invisible. The LLM needs none — the SDK already
+    sets the gen_ai.usage.* attributes Langfuse prices.
+    """
+    stt = deepgram.STTv2(model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms))
+    tts = cartesia.TTS(model=_CARTESIA_TTS_MODEL, emotion=["confident"])
+    attach_usage_spans(stt, parent_context=parent_context, room_name=room_name)
+    attach_usage_spans(tts, parent_context=parent_context, room_name=room_name)
+    return stt, tts
+
+
 def build_session(
     vad: Any | None = None,
     *,
@@ -131,21 +157,24 @@ def build_session(
     llm_model: str | None = None,
     thinking_override: dict[str, Any] | None = None,
     default_model: str,
+    room_name: str | None = None,
+    parent_context: Context | None = None,
 ) -> AgentSession[TakeoverState]:
     model = resolve_llm_model(llm_model, default_model)
+    stt, tts = build_speech_components(
+        key_terms=key_terms, room_name=room_name, parent_context=parent_context
+    )
     # The latch must exist from construction: agents read it before speaking or hanging up.
     return AgentSession(
         userdata=TakeoverState(),
-        stt=deepgram.STTv2(
-            model="flux-general-en", eager_eot_threshold=0.5, **stt_kwargs(key_terms)
-        ),
+        stt=stt,
         llm=google.LLM(
             model=model,
             vertexai=True,
             location="global",
             thinking_config=resolve_thinking_config(model, thinking_override),
         ),
-        tts=cartesia.TTS(model=_CARTESIA_TTS_MODEL, emotion=["confident"]),
+        tts=tts,
         vad=vad if vad is not None else _build_vad(),
         **cascade_session_kwargs(turn_detector=EnglishModel()),
     )

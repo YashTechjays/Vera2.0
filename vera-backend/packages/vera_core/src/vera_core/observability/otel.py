@@ -35,6 +35,8 @@ def configure_observability(settings: Settings) -> TracerProvider | None:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+    from vera_core.observability.llm_usage_export import UsageEnrichingExporter
+
     headers: dict[str, str] | None = None
     if settings.langfuse_public_key and settings.langfuse_secret_key:
         token = base64.b64encode(
@@ -49,7 +51,9 @@ def configure_observability(settings: Settings) -> TracerProvider | None:
         endpoint=f"{settings.langfuse_host.rstrip('/')}/api/public/otel/v1/traces",
         headers=headers,
     )
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    # Corrects the SDK's llm_request spans so Gemini cache hits are not billed at the
+    # full input rate (see llm_usage_export). Every other span passes through untouched.
+    provider.add_span_processor(BatchSpanProcessor(UsageEnrichingExporter(exporter)))
     trace.set_tracer_provider(provider)
     logger.info("observability: exporting OTLP traces to %s", settings.langfuse_host)
     return provider

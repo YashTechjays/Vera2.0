@@ -13,7 +13,8 @@ export type Dispute = {
   currentValue: string
   /** 0–100 confidence the AI answer carried for the captured value */
   confidence?: number
-  /** short supporting evidence */
+  /** supporting transcript evidence — the field-level text from the REST detail, or the
+   *  frame's own evidence on the live SSE path */
   evidence?: string
   /** model reasoning */
   reasoning?: string
@@ -107,22 +108,67 @@ export function humanizeLabel(path: string): string {
 
 export type ConfidenceLevel = "high" | "medium" | "low" | "very-low" | "unknown"
 
-/** Map a confidence score to a level (matches smart-caller-fe thresholds). */
+/** Map a confidence score to a level. The bands are 10 points wide from 95 down, so
+ *  "high" is a range rather than the single value 100 the smart-caller-fe port used —
+ *  a 99% judge verdict no longer reads the same as a 90% one. */
 export function confidenceLevel(score?: number): ConfidenceLevel {
   if (score === undefined || score === null) return "unknown"
-  if (score >= 100) return "high"
-  if (score >= 90) return "medium"
-  if (score >= 80) return "low"
+  if (score >= 95) return "high"
+  if (score >= 85) return "medium"
+  if (score >= 75) return "low"
   return "very-low"
+}
+
+/** Which pass produced the confidence a field displays. */
+export type ConfidenceSource = "judge" | "captured"
+
+/**
+ * The single confidence a field shows. Two different numbers reach the browser:
+ * the extractor's own score, stamped when the answer was captured (live during the
+ * call, or by the post-call top-up), and the post-call judge's verdict on whether
+ * the transcript supports that value. Showing both bare — in two tooltips on one
+ * row — is what made them unreadable, so one wins and says which it is.
+ *
+ * The judge wins when it has run. That mirrors the backend: `load_field_status`
+ * gates retries on the judge's score and falls back to the extractor's, so the
+ * number on screen is now the number the system acted on.
+ */
+export type FieldConfidence = {
+  score?: number
+  source: ConfidenceSource
+  /** false only when the judge explicitly rejected the value */
+  supported: boolean
+}
+
+export function resolveConfidence(
+  captured: number | undefined,
+  judge: { confidence: number | null; supported: boolean } | null | undefined
+): FieldConfidence {
+  if (!judge) return { score: captured, source: "captured", supported: true }
+  return { score: judge.confidence ?? undefined, source: "judge", supported: judge.supported }
+}
+
+/** A judge-rejected value is always "very-low" whatever its score: the judge prompt
+ *  never says whether that number grades the value or the rejection, so trusting it
+ *  here would paint a rejected field green. */
+export function fieldConfidenceLevel(c: FieldConfidence): ConfidenceLevel {
+  return c.supported ? confidenceLevel(c.score) : "very-low"
+}
+
+/** Chip text — one number, named by the pass that produced it. An unsupported
+ *  verdict shows no number, for the reason in `fieldConfidenceLevel`. */
+export function confidenceLabel(c: FieldConfidence): string {
+  if (!c.supported) return "judge · unsupported"
+  return `${c.source} ${c.score ?? "—"}% · ${fieldConfidenceLevel(c)}`
 }
 
 /**
  * Tailwind border+bg+ring classes for an unresolved disputed field, by
- * confidence. Exact smart-caller-fe palette: 100% green, 90–99% yellow,
- * 80–89% amber, <80% red; unknown → base navy. Full 1px border + 2px ring.
+ * confidence. smart-caller-fe palette on the confidenceLevel bands: ≥95 green,
+ * 85–94 yellow, 75–84 amber, <75 red; unknown → base navy. 1px border + 2px ring.
  */
-export function confidenceHighlightClass(score?: number): string {
-  switch (confidenceLevel(score)) {
+export function confidenceHighlightClass(level: ConfidenceLevel): string {
+  switch (level) {
     case "high":
       return "border border-[#10b981] bg-[#F0FDF4] shadow-[0_0_0_2px_rgba(16,185,129,0.2)]"
     case "medium":
@@ -137,8 +183,8 @@ export function confidenceHighlightClass(score?: number): string {
 }
 
 /** Tailwind classes for the small confidence chip in the tooltip. */
-export function confidenceChipClass(score?: number): string {
-  switch (confidenceLevel(score)) {
+export function confidenceChipClass(level: ConfidenceLevel): string {
+  switch (level) {
     case "high":
       return "bg-[#10b981] text-white"
     case "medium":
@@ -155,8 +201,8 @@ export function confidenceChipClass(score?: number): string {
 /**
  * Demo disputes spanning every confidence color. currentValue matches the mock
  * values so the seeded display stays consistent.
- *  - 100 → green (high), 90–99 → yellow (medium), 80–89 → amber (low),
- *    <80 → red (very-low), no confidence → navy (base).
+ *  - ≥95 → green (high), 85–94 → yellow (medium), 75–84 → amber (low),
+ *    <75 → red (very-low), no confidence → navy (base).
  */
 export const mockDisputes: DisputeMap = {
   "sections.patient_information.patient_name": {
@@ -169,14 +215,14 @@ export const mockDisputes: DisputeMap = {
   "sections.insurance_information.plan_type": {
     previousValue: "POS",
     currentValue: "PPO",
-    confidence: 95,
+    confidence: 88,
     evidence: "Rep confirmed the plan type during the call.",
     reasoning: "Plan type corrected from the carrier portal during the call.",
   },
   "sections.general_coverage.office_visits.cpt_99211.covered": {
     previousValue: "No",
     currentValue: "Yes",
-    confidence: 92,
+    confidence: 78,
     evidence: "Confirmed covered for CPT 99211.",
     reasoning: "Office visit is a covered benefit.",
   },

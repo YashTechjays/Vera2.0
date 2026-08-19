@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({ values: {} as FormValues }))
 
 vi.mock("./IbvProvider", async () => {
   const { demoSchema } = await import("@/lib/ibv/mock")
-  const { defaultFlags } = await import("@/lib/ibv/disputes")
+  const { defaultFlags, resolveConfidence } = await import("@/lib/ibv/disputes")
   const dispute = { previousValue: "No", currentValue: "Yes", confidence: 90 }
   return {
     useIbv: () => ({
@@ -24,6 +24,7 @@ vi.mock("./IbvProvider", async () => {
       applyDispute: vi.fn(),
       swapDispute: vi.fn(),
       provenanceFor: () => undefined,
+      confidenceFor: () => resolveConfidence(dispute.confidence, null),
       isPathRequired: () => false,
     }),
   }

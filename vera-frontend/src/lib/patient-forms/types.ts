@@ -22,8 +22,9 @@ export type PatientFormStatusResult = {
 /** Where a field's current value came from (vera_core AnswerSource enum). */
 export type FieldSource = "intake" | "ai_call" | "human"
 
-/** Judge verdict attached to a field's provenance. */
-export type FieldJudge = { confidence: number | null; supported: boolean; evidence: string | null }
+/** Judge verdict attached to a field's provenance. The judge's evidence quote is NOT
+ *  here — it is merged into `PatientFormField.evidence`, the one evidence surface. */
+export type FieldJudge = { confidence: number | null; supported: boolean }
 
 /** Which call attempt produced a field's current value and the judge verdict. */
 export type FieldProvenance = { attempt: number; mode: "full" | "retry"; judge: FieldJudge | null }
@@ -48,22 +49,25 @@ export type FieldValue = string | number | boolean | null
 
 /** A disputed field: the current AI-captured value diverges from the most recent
  *  intake/human baseline. `previous_value` is that baseline, `current_value` the
- *  AI value; `confidence` is the AI answer's own confidence, `evidence` what it
- *  captured, `reasoning` the optional judge explanation (all nullable). */
+ *  AI value; `confidence` is the AI answer's own confidence, `reasoning` the optional
+ *  judge explanation. The divergence only — evidence lives on the field, because an AI
+ *  answer that AGREES with the baseline has no dispute yet still has evidence. */
 export type FieldDispute = {
   previous_value: FieldValue
   current_value: FieldValue
   confidence: number | null
-  evidence: string | null
   reasoning: string | null
 }
 
-/** One extracted data point. `dispute` is null unless the judge flagged it. */
+/** One extracted data point. `dispute` is null unless the value diverges from the
+ *  baseline; `evidence` is the field's single evidence text (the judge's transcript
+ *  quote, falling back to the extractor's capture) and is present regardless. */
 export type PatientFormField = {
   field_path: string
   value: FieldValue
   source: FieldSource
   confidence: number | null
+  evidence: string | null
   dispute: FieldDispute | null
   provenance: FieldProvenance | null
 }

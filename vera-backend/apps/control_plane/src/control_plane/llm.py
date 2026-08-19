@@ -9,6 +9,7 @@ from typing import Any
 
 from google import genai
 from google.genai import types
+from opentelemetry import trace
 
 from vera_core.forms.extraction_prompt import (
     ANSWER_UNIT_FORMAT_RULE,
@@ -23,8 +24,40 @@ from vera_core.integrations.llm import (
     SpecialValues,
     TranscriptTurn,
 )
+from vera_core.observability import phi_safe_span
+from vera_core.observability.usage_spans import (
+    GENERATION,
+    OBSERVATION_MODEL_ATTR,
+    OBSERVATION_TYPE_ATTR,
+    USAGE_DETAILS_ATTR,
+    llm_token_usage,
+)
 
 logger = logging.getLogger("control_plane.llm")
+
+SPAN_EVAL_GENERATE = "vera.eval.generate"
+
+_tracer = trace.get_tracer("vera.control_plane.post_call_eval")
+
+
+def _token(usage: Any, field: str) -> int:
+    """One Vertex usage counter, absent or None reading as zero — the SDK omits fields
+    it has no value for, and `usage` itself is None on a blocked response."""
+    return int(getattr(usage, field, 0) or 0)
+
+
+def _eval_usage(usage: Any) -> dict[str, int]:
+    """Vertex token counts mapped onto Langfuse usage keys (design §5.4).
+
+    Thinking tokens bill as output, and gemini-2.5-flash is a thinking model Vera
+    configures thinking on. Shares `llm_token_usage` with the SDK's own LLM spans, so
+    one model price entry prices both surfaces.
+    """
+    return llm_token_usage(
+        prompt=_token(usage, "prompt_token_count"),
+        cached=_token(usage, "cached_content_token_count"),
+        output=_token(usage, "candidates_token_count") + _token(usage, "thoughts_token_count"),
+    )
 
 
 def _turns_block(turns: list[TranscriptTurn]) -> str:
@@ -185,17 +218,41 @@ class VertexLLMClient(LLMClient):
             raise RuntimeError("empty LLM response (finish/safety block)")
         return json.loads(text)  # type: ignore[no-any-return]
 
-    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
-        async with self._semaphore:
-            resp = await self._client.aio.models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                ),
-            )
-        return self._loads_response(resp.text)
+    async def _generate(
+        self, prompt: str, schema: dict[str, Any], *, pass_name: str
+    ) -> list[dict[str, Any]]:
+        # This is the ONLY chokepoint for both eval passes, and it bypasses every
+        # auto-instrumented path (raw google.genai, not a LiveKit plugin), so without
+        # this span the post-call eval's whole Vertex bill is invisible.
+        #
+        # No prompt/response text is attached: the prompt embeds the full transcript and
+        # the response carries extracted answer values (design §8). phi_safe_span keeps
+        # the provider's own error message off the span for the same reason.
+        with phi_safe_span(
+            _tracer,
+            SPAN_EVAL_GENERATE,
+            attributes={
+                OBSERVATION_TYPE_ATTR: GENERATION,
+                OBSERVATION_MODEL_ATTR: self._model,
+                "gen_ai.request.model": self._model,
+                "gen_ai.provider.name": "google",
+                "vera.eval.pass": pass_name,
+            },
+        ) as span:
+            async with self._semaphore:
+                resp = await self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                    ),
+                )
+            # A response with no usage metadata gets NO usage_details rather than zeros:
+            # a zero-cost generation is indistinguishable from a broken one.
+            if usage := _eval_usage(getattr(resp, "usage_metadata", None)):
+                span.set_attribute(USAGE_DETAILS_ATTR, json.dumps(usage))
+            return self._loads_response(resp.text)
 
     async def extract(
         self,
@@ -205,7 +262,9 @@ class VertexLLMClient(LLMClient):
         special_values: SpecialValues | None = None,
     ) -> list[ExtractedField]:
         data = await self._generate(
-            build_extract_prompt(field_paths, turns, special_values), _EXTRACT_SCHEMA
+            build_extract_prompt(field_paths, turns, special_values),
+            _EXTRACT_SCHEMA,
+            pass_name="extract",
         )
         return parse_extract_response(data)
 
@@ -214,7 +273,9 @@ class VertexLLMClient(LLMClient):
     ) -> list[JudgeVerdict]:
         chunk_paths = [ef.field_path for ef in chunk]
         data = await self._generate(
-            build_judge_prompt(list(chunk), turns_block), _judge_schema(chunk_paths)
+            build_judge_prompt(list(chunk), turns_block),
+            _judge_schema(chunk_paths),
+            pass_name="judge",
         )
         # ignore reworded/stray paths
         return [v for v in parse_judge_response(data) if v.field_path in chunk_paths]
