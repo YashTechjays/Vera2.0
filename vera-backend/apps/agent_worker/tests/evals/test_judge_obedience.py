@@ -48,8 +48,8 @@ _RULES = (
     "- flow rule `insurance_not_active`: when "
     '`sections.patient_verification.is_insurance_active` is "No" -> VERA must skip ahead to task '
     "`wrap_up`\n"
-    "    intent: Skip all remaining tasks, collect the representative name and call reference "
-    "number, then end the call."
+    "    intent: The representative confirmed the patient's insurance is not active even "
+    "after the member ID, insurance provider and verification details were provided."
 )
 
 
