@@ -148,6 +148,9 @@ class ReviewReason(enum.StrEnum):
     # A supervisor ended the call by hand — it is never auto-redialed even with
     # unsatisfied retryable fields; a human takes it from here.
     USER_ENDED = "user_ended"
+    # A flow rule cut the call short (e.g. the rep confirmed the plan is inactive) —
+    # never auto-redialed: a retry would only re-reach the same terminal answer.
+    TERMINATED_BY_RULE = "terminated_by_rule"
     # Required fields are unsatisfied and retryable, but the deployment-wide
     # form_auto_retry_enabled flag is off — the eval never auto-redials, so
     # the form parks for a human instead of re-queueing.

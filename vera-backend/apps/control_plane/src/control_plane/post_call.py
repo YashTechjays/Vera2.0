@@ -41,6 +41,7 @@ from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
+from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 
 logger = logging.getLogger(__name__)
@@ -85,27 +86,23 @@ async def resolve_ai_processing(
         # value with no recompute needed on this path.
         sm = FormStateMachine()
         requeued = False
-        # A user-ended (CANCELED) call never auto-retries, whatever the fill:
-        # the supervisor who ended it does not want the payer redialed. The
-        # end-intent stamp is checked too, in case a resolver races the
-        # closeout's status write.
-        user_ended = (
-            call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
-        )
+        # A supervisor-ended or rule-terminated call never auto-retries, whatever the
+        # fill — the shared never-redial policy (call_lifecycle.no_retry_reason).
+        no_retry = no_retry_reason(call)
         # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
         low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
-        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and not user_ended:
+        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and no_retry is None:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
                 form.enqueued_at = func.now()
                 requeued = True
         if not requeued:
-            # Stamp WHY so the reviewer isn't left with a blank reason: a
-            # supervisor-ended call is USER_ENDED; anything else reaching this
-            # fallback (eval consumer unconfigured, or the sweeper reclaiming a
-            # stranded form) was never AI-evaluated.
-            reason = ReviewReason.USER_ENDED if user_ended else ReviewReason.NOT_EVALUATED
+            # Stamp WHY so the reviewer isn't left with a blank reason: anything
+            # reaching this fallback with no never-redial cause (eval consumer
+            # unconfigured, or the sweeper reclaiming a stranded form) was never
+            # AI-evaluated.
+            reason = no_retry if no_retry is not None else ReviewReason.NOT_EVALUATED
             sm.transition(
                 form,
                 FormStatus.EXCEPTION_REVIEW,

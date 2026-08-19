@@ -36,11 +36,12 @@ from vera_core.events import (
     CallEndedEvent,
     CallFailedEvent,
     CallFailureReason,
+    CallRuleTerminatedEvent,
     IvrExitedEvent,
 )
 from vera_core.models import Call, PatientForm, SchemaVersion, Tenant
 from vera_core.models.audit_log import AuditEvent
-from vera_core.models.enums import CallEventType, CallStatus, FormStatus
+from vera_core.models.enums import CallEventType, CallStatus, FormStatus, ReviewReason
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer
 from vera_core.observability.correlation import room_name_for_call
 
@@ -632,6 +633,74 @@ async def test_call_ended_routes_form_through_ai_processing_to_review(
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0][0] == tenant_id  # refill ran for the freed tenant
     assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_call_ended_with_flow_rule_flag_stamps_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call.ended carrying terminated_by_flow_rule stamps the call row and routes
+    the form to review with the matching reason (VR2-188)."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    tenant = _tenant(id=tenant_id, max_retries=3)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    event = CallEndedEvent(room_name=room, ts=1, terminated_by_flow_rule=True)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.terminated_by_flow_rule is True
+    assert call.current_status == CallStatus.COMPLETED.value
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value
+
+
+@pytest.mark.asyncio
+async def test_rule_terminated_event_stamps_the_live_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mid-call call.rule_terminated event stamps the row immediately, so the
+    fact survives a worker crash before call.ended (VR2-188)."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=40.0)
+    session = _FakeSession(call=call, form=form, tenant=_tenant(id=tenant_id))
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    event = CallRuleTerminatedEvent(room_name=room, rule_key="insurance_not_active", ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.terminated_by_flow_rule is True
+    assert call.current_status == CallStatus.ACTIVE.value  # the call itself stays live
+    assert form.status == FormStatus.IN_CALL.value  # no lifecycle edge here
+    assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_late_flag_is_stamped_even_after_losing_the_close_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call.ended with the flag arriving after another closer won (e.g. the
+    sweeper) must still stamp the terminal row — the fact must not be lost."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.FAILED.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.CALL_FAILED.value, completion_pct=40.0)
+    session = _FakeSession(call=call, form=form, tenant=_tenant(id=tenant_id))
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session)
+
+    event = CallEndedEvent(room_name=room, ts=1, terminated_by_flow_rule=True)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert call.terminated_by_flow_rule is True
+    assert call.current_status == CallStatus.FAILED.value  # closeout stays a no-op
 
 
 class _EmptyRows:

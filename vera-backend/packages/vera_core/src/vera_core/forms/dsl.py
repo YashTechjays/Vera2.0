@@ -881,8 +881,17 @@ class FormSchemaDoc(_Model):
         for rule in self.flow_rules or []:
             check_key(f"flow_rule {rule.rule_key}", rule.rule_key)
             check_condition(f"flow_rule {rule.rule_key}.when", rule.when)
-            if rule.skip_to_task is not None and rule.skip_to_task not in task_keys:
-                errors.append(f"flow_rule {rule.rule_key}: unknown skip_to_task")
+            if rule.skip_to_task is not None:
+                if rule.skip_to_task not in task_keys:
+                    errors.append(f"flow_rule {rule.rule_key}: unknown skip_to_task")
+                elif rule.skip_to_task != task_keys[-1]:
+                    # Every flow rule's action is terminate_call, and the runtime treats
+                    # a fired rule as "this call is over" (retry suppression, VR2-188) —
+                    # a mid-plan skip would let the call outlive its own terminal stamp.
+                    errors.append(
+                        f"flow_rule {rule.rule_key}: skip_to_task must target the "
+                        "terminal task (a terminate_call rule cannot skip mid-plan)"
+                    )
 
         # contradictions
         rule_keys: set[str] = set()

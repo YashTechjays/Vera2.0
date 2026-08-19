@@ -9,8 +9,12 @@ from vera_core.services.call_lifecycle import apply_terminal_call_status
 _FORM_COMPLETION_PCT = Decimal("62.50")
 
 
-def _call() -> SimpleNamespace:
-    return SimpleNamespace(current_status=CallStatus.ACTIVE.value, completion_pct=Decimal("0"))
+def _call(*, terminated_by_flow_rule: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        current_status=CallStatus.ACTIVE.value,
+        completion_pct=Decimal("0"),
+        terminated_by_flow_rule=terminated_by_flow_rule,
+    )
 
 
 def _form(status: FormStatus = FormStatus.IN_CALL, retry_count: int = 0) -> SimpleNamespace:
@@ -55,6 +59,18 @@ def test_failed_call_not_requeued_when_auto_retry_disabled() -> None:
     assert call.current_status == CallStatus.NO_ANSWER.value
     assert form.status == FormStatus.CALL_FAILED.value
     assert form.retry_count == 0  # budget untouched — no clinical retry was spent
+    assert requeued is False
+
+
+def test_rule_terminated_call_never_requeues_on_the_failed_edge() -> None:
+    """A rule-terminated call closed as FAILED (e.g. the sweeper reconciling a
+    crashed worker's room) parks in CALL_FAILED — never redialed (VR2-188)."""
+    call, form = _call(terminated_by_flow_rule=True), _form(retry_count=0)
+    requeued = apply_terminal_call_status(
+        call, form, CallStatus.FAILED, tenant_max_retries=3, auto_retry_enabled=True
+    )
+    assert form.status == FormStatus.CALL_FAILED.value
+    assert form.retry_count == 0  # budget untouched — the redial was refused
     assert requeued is False
 
 

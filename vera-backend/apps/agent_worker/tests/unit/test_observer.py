@@ -20,7 +20,7 @@ from agent_worker.observer import (
     _Turn,
 )
 from vera_core.call_stream import TYPE_CALL_STATUS, TYPE_TRANSCRIPT, CallStreamEvent
-from vera_core.events.worker import CallAnswerRecordedEvent
+from vera_core.events.worker import CallRuleTerminatedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule, NumericConsistency
 from vera_core.llm import LLMUnavailableError
@@ -154,7 +154,7 @@ class FakeRunState:
 
 class FakeBus:
     def __init__(self) -> None:
-        self.events: list[CallAnswerRecordedEvent] = []
+        self.events: list[Any] = []
 
     async def emit(self, event: Any) -> None:
         self.events.append(event)
@@ -165,12 +165,18 @@ class FakeController:
         self.active_task_index: int | None = 0
         self.answers: dict[str, Any] = {}
         self.applied: list[Any] = []
+        # Mirrors PlanRunController's receipt semantics; tests flip `accepts` to
+        # model the takeover fence declining a directive.
+        self.accepts = True
+        self.ended_by_flow_rule = False
 
     def update_answers(self, answers: dict[str, Any]) -> None:
         self.answers = dict(answers)
 
     async def apply_directive_now(self, directive: Any) -> None:
         self.applied.append(directive)
+        if self.accepts and not isinstance(directive, ReAsk):
+            self.ended_by_flow_rule = True
 
 
 def _manager(
@@ -550,6 +556,36 @@ class TestRuleIntervention:
         manager, _, _, controller = _manager(_plan(flow_rules=[flow]), extractor)
         await _feed(manager, _rep("the answer is no"))
         assert controller.applied == [Terminate(rule_key="stop")]
+
+    @pytest.mark.asyncio
+    async def test_fired_rule_emits_the_durable_rule_terminated_event(self) -> None:
+        """The fact must land on the bus at directive time — a worker crash before
+        call.ended would otherwise lose it (VR2-188)."""
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, bus, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is no"))
+        terminated = [e for e in bus.events if isinstance(e, CallRuleTerminatedEvent)]
+        assert [e.rule_key for e in terminated] == ["stop"]
+        assert terminated[0].room_name == ROOM
+
+    @pytest.mark.asyncio
+    async def test_no_rule_terminated_event_when_the_controller_declines(self) -> None:
+        """A directive the takeover fence discards must not stamp the call."""
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, bus, controller = _manager(_plan(flow_rules=[flow]), extractor)
+        controller.accepts = False  # supervisor owns the call
+        await _feed(manager, _rep("the answer is no"))
+        assert not any(isinstance(e, CallRuleTerminatedEvent) for e in bus.events)
 
     @pytest.mark.asyncio
     async def test_fired_rule_tags_the_evaluate_span(self, otel_spans: Any) -> None:
