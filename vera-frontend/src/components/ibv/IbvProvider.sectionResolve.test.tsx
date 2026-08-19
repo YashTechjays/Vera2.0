@@ -50,6 +50,7 @@ const DETAIL = {
       value: "Ava Davis",
       source: "ai_call" as const,
       confidence: 95,
+      evidence: null,
       dispute: {
         previous_value: "Ava D.",
         current_value: "Ava Davis",
@@ -69,10 +70,14 @@ function Harness() {
     setValue,
     values,
     resolveOpenDisputes,
-    pendingDisputeCount,
+    disputes,
+    flagsFor,
     save,
     loading,
   } = useIbv()
+  const pendingDisputeCount = Object.keys(disputes).filter(
+    (path) => !flagsFor(path).applied,
+  ).length
   useEffect(() => {
     openFormById(FORM_ID)
   }, [openFormById])
