@@ -37,6 +37,16 @@ YES_NO_NA = ["Yes", "No", "N/A"]
 DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 
 
+# A first version told the agent to "ask again" and it did — once — then took the repeated
+# "valid" as an answer and moved on. Naming the missing thing is what makes the re-ask land.
+COVERAGE_CONFIRMATION_RULE = (
+    '"Valid", "billable", "active" or "on file" describe the CODE, not the benefit, and '
+    "never answer a coverage question. Never accept one, thank them for it, or move on: say "
+    "you still need to know whether the plan PAYS for the service, and ask again — reworded, "
+    "not repeated — until they say covered, not covered, or not applicable."
+)
+
+
 def coverage_ask(service: str) -> str:
     """The standard service-level coverage question."""
     return f"Can you provide coverage and benefit details for {service}?"

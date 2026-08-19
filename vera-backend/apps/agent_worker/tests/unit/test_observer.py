@@ -896,6 +896,24 @@ def test_the_exact_value_rule_is_omitted_when_no_field_names_one() -> None:
     assert marker in named
 
 
+def test_a_coverage_task_is_told_valid_is_not_a_coverage_answer() -> None:
+    """Told only `(one of: Yes, No, N/A)`, the extractor wrote `Yes` from a rep saying the code
+    was valid — a coverage claim nobody made, which then retired the question from the owed set
+    so the completion guard had nothing left to refuse."""
+    marker = "has described the CODE"
+    covered = _field("sections.s.cpt_58340.covered", type="enum", values=["Yes", "No", "N/A"])
+    assert marker in _extraction_instructions(_plan(fields=[covered]).tasks[0])
+
+    gate = _field("sections.s.diagnostic_testing_covered", type="enum", values=["Yes", "No"])
+    assert marker in _extraction_instructions(_plan(fields=[gate]).tasks[0])
+
+    plain = _extraction_instructions(_plan(fields=[_field("sections.s.plain")]).tasks[0])
+    assert marker not in plain
+    # "coverage" is not "covered": this leaf records a network rule, not a benefit status.
+    oon = _field("sections.s.out_of_network_coverage", type="enum", values=["Yes", "No"])
+    assert marker not in _extraction_instructions(_plan(fields=[oon]).tasks[0])
+
+
 def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:
     """`values` and `special_values` are one vocabulary for an enum. A second clause would be
     27 redundant annotations on the CPT panel, where every `prior_auth` leaf carries both."""

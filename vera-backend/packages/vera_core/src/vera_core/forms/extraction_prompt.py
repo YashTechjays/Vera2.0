@@ -41,6 +41,21 @@ EXACT_VALUE_RULE = (
 )
 
 
+# Told only that the field is `(one of: Yes, No, N/A)`, both extractors wrote `Yes` from a rep
+# saying "that code is valid" — a coverage claim the rep never made, which then retired the
+# question from the owed set so the completion guard had nothing left to refuse.
+COVERAGE_STATUS_RULE = (
+    "A coverage-status field records the plan BENEFIT, not the code. Fill it only from an "
+    "explicit statement that the service is or is not covered. A representative who says the "
+    "code is valid, billable, active, recognized or on file has described the CODE and has "
+    "not answered coverage — omit the field."
+)
+
+
+def is_coverage_status_path(path: str) -> bool:
+    return path.endswith("covered")
+
+
 def special_values_hint(special_values: Sequence[str] | None) -> str:
     """The clause naming a NON-enum leaf's declared answers, or "" when it has none."""
     # Not optional on a currency leaf: without it the model writes no non-numeric answer at all.
