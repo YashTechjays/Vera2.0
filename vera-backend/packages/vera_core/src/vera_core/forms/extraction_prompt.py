@@ -31,6 +31,23 @@ ANSWER_UNIT_FORMAT_RULE = (
 )
 
 
+# Same exposure as the rule above — nothing normalizes a date on the AI write path either.
+# UNGATED at ~215 chars/pass, deliberately: the field this was written for
+# (`plan_year_information`) is a `text` leaf holding a RANGE, so no `date_format` reaches it
+# and a `type == "date"` gate would never fire on it — and `build_extract_prompt` sees only
+# bare paths, so gating one extractor and not the other IS the two-shapes defect above.
+#
+# Padded, and NOT `DATE_VALIDATION.date_format` ("M/D/YYYY", which `format_date` renders
+# un-padded): the shape this column converges on is that leaf's padded derive literal, and
+# padded input still parses under M/D/YYYY. Every clause stays subordinate to "a date answer"
+# — generalized, it would truncate `additional_notes`, a leaf whose answer IS prose.
+ANSWER_DATE_FORMAT_RULE = (
+    'Write a date answer as digits in MM/DD/YYYY and nothing else — never "January 1st" '
+    'and never the sentence around it; a date range is two such dates joined by " - ". '
+    "Never add a year the representative did not state."
+)
+
+
 # "ADDITIONAL possibilities, not the full range" is load-bearing: read as the field's WHOLE
 # vocabulary, the model treats a normal answer as not belonging and diverts it to a neighbouring
 # free-text leaf. Said once here rather than per-field, which cost +18% of the whole prompt.
@@ -54,6 +71,23 @@ COVERAGE_STATUS_RULE = (
 
 def is_coverage_status_path(path: str) -> bool:
     return path.endswith("covered")
+
+
+# Every ungated shape convention, in preamble order. Both extractors interpolate this block
+# rather than naming the rules themselves, so a new convention lands on BOTH sides in one edit
+# — the module's whole premise, previously upheld only by remembering to touch two files (which
+# also spelled the separating space in two different places).
+UNGATED_ANSWER_SHAPE_RULES = (ANSWER_UNIT_FORMAT_RULE, ANSWER_DATE_FORMAT_RULE)
+
+
+def answer_shape_rules(*, names_exact: bool, collects_coverage: bool) -> str:
+    """The shape rules a preamble carries; each flag appends its one gated rule."""
+    rules = [*UNGATED_ANSWER_SHAPE_RULES]
+    if names_exact:
+        rules.append(EXACT_VALUE_RULE)
+    if collects_coverage:
+        rules.append(COVERAGE_STATUS_RULE)
+    return " ".join(rules)
 
 
 def special_values_hint(special_values: Sequence[str] | None) -> str:
