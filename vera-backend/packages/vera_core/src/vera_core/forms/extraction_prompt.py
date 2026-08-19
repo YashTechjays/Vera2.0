@@ -58,6 +58,21 @@ EXACT_VALUE_RULE = (
 )
 
 
+# Told only that the field is `(one of: Yes, No, N/A)`, both extractors wrote `Yes` from a rep
+# saying "that code is valid" — a coverage claim the rep never made, which then retired the
+# question from the owed set so the completion guard had nothing left to refuse.
+COVERAGE_STATUS_RULE = (
+    "A coverage-status field records the plan BENEFIT, not the code. Fill it only from an "
+    "explicit statement that the service is or is not covered. A representative who says the "
+    "code is valid, billable, active, recognized or on file has described the CODE and has "
+    "not answered coverage — omit the field."
+)
+
+
+def is_coverage_status_path(path: str) -> bool:
+    return path.endswith("covered")
+
+
 # Every ungated shape convention, in preamble order. Both extractors interpolate this block
 # rather than naming the rules themselves, so a new convention lands on BOTH sides in one edit
 # — the module's whole premise, previously upheld only by remembering to touch two files (which
@@ -65,11 +80,13 @@ EXACT_VALUE_RULE = (
 UNGATED_ANSWER_SHAPE_RULES = (ANSWER_UNIT_FORMAT_RULE, ANSWER_DATE_FORMAT_RULE)
 
 
-def answer_shape_rules(*, names_exact: bool) -> str:
-    """The shape rules a preamble carries; `names_exact` appends the one gated rule."""
+def answer_shape_rules(*, names_exact: bool, collects_coverage: bool) -> str:
+    """The shape rules a preamble carries; each flag appends its one gated rule."""
     rules = [*UNGATED_ANSWER_SHAPE_RULES]
     if names_exact:
         rules.append(EXACT_VALUE_RULE)
+    if collects_coverage:
+        rules.append(COVERAGE_STATUS_RULE)
     return " ".join(rules)
 
 

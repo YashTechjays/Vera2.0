@@ -1073,7 +1073,6 @@ async def test_answer_recorded_writes_recomputes_and_audits(
                 "previous_value": "No",
                 "current_value": "Yes",
                 "confidence": 90,
-                "evidence": None,
                 "reasoning": None,
             },
             "ts": 1,

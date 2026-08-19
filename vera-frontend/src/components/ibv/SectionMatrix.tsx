@@ -4,6 +4,7 @@ import { FieldRenderer } from "./FieldRenderer"
 import { InlineDisputeControls } from "./DisputeControls"
 import {
   confidenceHighlightClass,
+  fieldConfidenceLevel,
   type Dispute,
   type DisputeFlags,
   type DisputeMap,
@@ -94,6 +95,8 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     setValue,
     errors,
     disputeFor,
+    confidenceFor,
+    provenanceFor,
     flagsFor,
     applyDispute,
     swapDispute,
@@ -107,6 +110,8 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const { path, field, gates } = cell
   const value = values[path] ?? ""
   const dispute = disputeFor(path)
+  const confidence = confidenceFor(path)
+  const provenance = provenanceFor(path)
   const flags = flagsFor(path)
   const applicable = schema !== null && isApplicable(schema, gates, values)
   const disabledReason =
@@ -114,7 +119,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const invalidReason = errors[path]
   const showDispute = showsDispute(dispute, flags)
   const highlightClass = showDispute
-    ? confidenceHighlightClass(dispute!.confidence)
+    ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
   const isTextarea = field.ui?.widget === "textarea"
 
@@ -147,6 +152,8 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
         {showDispute && (
           <InlineDisputeControls
             dispute={dispute!}
+            confidence={confidence}
+            provenance={provenance}
             flags={flags}
             className={isTextarea ? "top-1 right-1" : "top-1/2 right-1 -translate-y-1/2"}
             bareBadge={usesBareBadge(field)}

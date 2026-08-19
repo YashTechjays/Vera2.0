@@ -41,7 +41,9 @@ class _StubJudgeClient(VertexLLMClient):
         self._model = "fake-model"
         self.generate_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _generate(
+        self, prompt: str, schema: dict[str, Any], *, pass_name: str
+    ) -> list[dict[str, Any]]:
         self.generate_calls.append((prompt, schema))
         item: _Queued = self._responses.pop(0) if self._responses else []
         if isinstance(item, Exception):
@@ -116,6 +118,16 @@ def test_extract_prompt_names_the_literals_a_requested_path_declares() -> None:
     assert "- sections.deductibles.individual.total (or exactly: $0, Unlimited, No Limit)" in prompt
     assert "ADDITIONAL" in prompt  # EXACT_VALUE_RULE, which explains the clause
     assert "- sections.cov.coinsurance (" not in prompt  # a path declaring none is not annotated
+
+
+def test_extract_prompt_says_valid_is_not_a_coverage_answer() -> None:
+    """The top-up reads the same transcript as the Observer and writes the same column, so the
+    rule that keeps "that code is valid" out of a coverage field has to hold on both sides."""
+    marker = "has described the CODE"
+    assert marker in build_extract_prompt(["sections.dx.cpt_58340.covered"], [])
+    assert marker in build_extract_prompt(["sections.dx.diagnostic_testing_covered"], [])
+    # "coverage" is not "covered": this leaf records a network rule, not a benefit status.
+    assert marker not in build_extract_prompt(["sections.cov.out_of_network_coverage"], [])
 
 
 def test_extract_prompt_is_unchanged_when_no_requested_path_declares_a_literal() -> None:
@@ -332,7 +344,9 @@ class _ConcurrencyProbeClient(VertexLLMClient):
         self._started = 0
         self._all_started = asyncio.Event()
 
-    async def _generate(self, prompt: str, schema: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _generate(
+        self, prompt: str, schema: dict[str, Any], *, pass_name: str
+    ) -> list[dict[str, Any]]:
         self._started += 1
         if self._started == self._expected:
             self._all_started.set()

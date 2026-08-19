@@ -5,4 +5,4 @@ Deliver the introduction exactly once, calmly; if interrupted, continue from whe
    - Answers: Yes | No
 
 TERMINATION RULE — insurance_not_active:
-If "Is Insurance Active" is "No": The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Skip all remaining tasks, collect the representative name and call reference number, then end the call. Stop the remaining questions and move to "Wrap Up".
+If "Is Insurance Active" is "No": The representative confirmed the patient's insurance is not active even after the member ID, insurance provider and verification details were provided. Stop the remaining questions and move to "Wrap Up".

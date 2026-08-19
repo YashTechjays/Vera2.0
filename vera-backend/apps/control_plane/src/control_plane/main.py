@@ -47,6 +47,7 @@ from vera_core.db import create_engine, create_sessionmaker
 from vera_core.events import PostCallJobBus
 from vera_core.llm import FallbackOptions, LLMSpec, ResilientLLM
 from vera_core.notifications import NotificationService, RedisNotificationStore
+from vera_core.observability import TraceLinkStore
 from vera_core.observability.otel import configure_observability
 from vera_core.plan_store import CallPlanService, RedisCallPlanStore
 from vera_core.redis import create_redis
@@ -157,6 +158,9 @@ def create_app(
             secrets=app.state.secrets,
         )
         app.state.summary_cache = summary_cache or RedisSummaryCache(_redis())
+        # Lets every control-plane span for a call join the worker's trace for that
+        # call, so Langfuse's per-trace cost rollup covers the whole call.
+        app.state.trace_link_store = TraceLinkStore(_redis())
         # Coaching + whisper rate limit — one-shot INCR/EXPIRE, no tailing/blocking
         # reads, so the shared pool is fine (same reasoning as call_plans below).
         app.state.call_rate_limiter = call_rate_limiter or RedisCallRateLimiter(
@@ -335,6 +339,7 @@ def create_app(
                 reclaim_idle_ms=settings.post_call_reclaim_idle_ms,
                 review_floor=settings.post_call_review_floor,
                 auto_retry_enabled=settings.form_auto_retry_enabled,
+                trace_links=app.state.trace_link_store,
             )
             post_call_task = asyncio.create_task(post_call_consumer.run())
             post_call_task.add_done_callback(_log_task_exit("post-call consumer"))

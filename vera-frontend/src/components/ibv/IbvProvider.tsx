@@ -30,12 +30,14 @@ import {
   activeDisputeValue,
   applyFlagsForPaths,
   defaultFlags,
+  resolveConfidence,
   toggleApplied,
   toggleSwapped,
   type Dispute,
   type DisputeFlagMap,
   type DisputeFlags,
   type DisputeMap,
+  type FieldConfidence,
 } from "@/lib/ibv/disputes"
 import { canApplyLiveAnswer } from "@/lib/ibv/liveAnswers"
 import type { FormSchema, FormValues, LeafField } from "@/lib/ibv/types"
@@ -92,10 +94,8 @@ type IbvContextValue = {
   flagsFor: (path: string) => DisputeFlags
   applyDispute: (path: string) => void
   swapDispute: (path: string) => void
-  resolveAll: () => void
   /** Resolve only the disputes on the given paths — a section header passes its own leaves. */
   resolveOpenDisputes: (paths: string[]) => void
-  pendingDisputeCount: number
   dirty: boolean
   saveState: SaveState
   save: () => Promise<void>
@@ -131,6 +131,9 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
+  /** The one confidence a field displays — judge verdict when it has run, else the
+   *  capture score. See `resolveConfidence`. */
+  confidenceFor: (path: string) => FieldConfidence
   /** Open a real patient form by id, loaded (always refetched) from the API. */
   openFormById: (formId: string) => void
   /** Open the modal over the form already loaded — no refetch, no state reset. For a
@@ -183,6 +186,14 @@ function describeBlockedSubmit(titles: string[]): string {
   return rest > 0
     ? `Fill the required fields before submitting: ${shown}, and ${rest} more.`
     : `Fill the required fields before submitting: ${shown}.`
+}
+
+/** Lead with the first offending field's own fix, then count the rest (VR2-206). */
+function describeInvalidSubmit(firstMessage: string | undefined, invalidCount: number): string {
+  const message = firstMessage ?? "Fix the highlighted fields before submitting."
+  const rest = invalidCount - 1
+  if (rest <= 0) return message
+  return `${message} (${rest} more field${rest === 1 ? "" : "s"} to fix.)`
 }
 
 /** The earliest of `paths` in schema document order — the one to scroll to. */
@@ -240,7 +251,9 @@ function adaptDetail(
         previousValue: toInput(f.dispute.previous_value, f.field_path),
         currentValue: toInput(f.dispute.current_value, f.field_path),
         confidence: f.dispute.confidence ?? undefined,
-        evidence: f.dispute.evidence ?? undefined,
+        // Field-level, not dispute-nested: the backend merges the judge's transcript
+        // quote over the extractor's capture into one `evidence` per field.
+        evidence: f.evidence ?? undefined,
         reasoning: f.dispute.reasoning ?? undefined,
       }
     }
@@ -509,11 +522,15 @@ export function IbvProvider({
       setCreateError(describeBlockedSubmit(blocking.map((leaf) => leaf.field.title)))
       return blocking[0].path
     }
-    // A format error on a filled field blocks too, but has no title list to name.
-    const invalid = Object.keys(validateCreate(schema, values))
-    if (invalid.length > 0) {
-      setCreateError("Fix the highlighted fields before submitting.")
-      return firstInDocumentOrder(schema, invalid)
+    // A format error on a filled field blocks too — name the first one's fix (VR2-206).
+    const invalid = validateCreate(schema, values)
+    const invalidPaths = Object.keys(invalid)
+    if (invalidPaths.length > 0) {
+      const first = firstInDocumentOrder(schema, invalidPaths)
+      setCreateError(
+        describeInvalidSubmit(first === null ? undefined : invalid[first], invalidPaths.length),
+      )
+      return first
     }
     setCreateError(null)
     setCreateSubmitting(true)
@@ -550,16 +567,34 @@ export function IbvProvider({
     }
   }, [schema, createSelection, values])
 
-  const setValue = useCallback((path: string, value: string) => {
-    editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
-    setValues((prev) => ({ ...prev, [path]: value }))
-    setDirty(true)
-    setSaveState("idle")
-    // The server's verdict on this path is stale the moment the user retypes it,
-    // and a fresh payload deserves a fresh idempotency key.
-    setCreateServerErrors((prev) => omitPath(prev, path))
-    createIdempotencyKeyRef.current = null
+  /** Forget the judge's verdict for a path whose value has just been replaced.
+   *
+   *  The judge only runs post-call, so its verdict describes the value it graded — once
+   *  anything overwrites that value the score is about text no longer on screen, and
+   *  `confidenceFor` prefers the judge whenever one exists. `attempt`/`mode` survive:
+   *  they describe which call produced the answer, which a new value does not falsify.
+   *  A no-op (same object back, no re-render) when there is no verdict to drop. */
+  const invalidateJudge = useCallback((path: string) => {
+    setProvenance((prev) => {
+      const p = prev[path]
+      return p?.judge ? { ...prev, [path]: { ...p, judge: null } } : prev
+    })
   }, [])
+
+  const setValue = useCallback(
+    (path: string, value: string) => {
+      editedPathsRef.current.add(path) // a manual edit — live AI answers must not overwrite it
+      setValues((prev) => ({ ...prev, [path]: value }))
+      setDirty(true)
+      setSaveState("idle")
+      // The server's verdict on this path is stale the moment the user retypes it,
+      // and a fresh payload deserves a fresh idempotency key.
+      setCreateServerErrors((prev) => omitPath(prev, path))
+      invalidateJudge(path)
+      createIdempotencyKeyRef.current = null
+    },
+    [invalidateJudge],
+  )
 
   const applyLiveAnswer = useCallback(
     (
@@ -579,6 +614,8 @@ export function IbvProvider({
       const display = toDisplayValue(raw, format)
       // Not a supervisor edit: update the value only, never touch dirty/saveState.
       setValues((prev) => (prev[path] === display ? prev : { ...prev, [path]: display }))
+
+      invalidateJudge(path)
 
       if (dispute === undefined) return // frame carried no dispute info — leave disputes as-is
       if (dispute === null) {
@@ -600,7 +637,7 @@ export function IbvProvider({
         },
       }))
     },
-    [formId, dateFormats],
+    [formId, dateFormats, invalidateJudge],
   )
 
   const flagsFor = useCallback(
@@ -646,16 +683,6 @@ export function IbvProvider({
       setSaveState("idle")
     },
     [disputes],
-  )
-
-  const resolveAll = useCallback(
-    () => resolveOpenDisputes(Object.keys(disputes)),
-    [disputes, resolveOpenDisputes],
-  )
-
-  const pendingDisputeCount = useMemo(
-    () => Object.keys(disputes).filter((p) => !(flags[p]?.applied ?? false)).length,
-    [disputes, flags],
   )
 
   const changeStatus = useCallback(
@@ -771,6 +798,12 @@ export function IbvProvider({
     [provenance],
   )
 
+  const confidenceFor = useCallback(
+    (path: string) =>
+      resolveConfidence(disputes[path]?.confidence, provenance[path]?.judge),
+    [disputes, provenance],
+  )
+
   const value: IbvContextValue = {
     schema,
     values,
@@ -783,9 +816,7 @@ export function IbvProvider({
     flagsFor,
     applyDispute,
     swapDispute,
-    resolveAll,
     resolveOpenDisputes,
-    pendingDisputeCount,
     dirty,
     saveState,
     save,
@@ -806,6 +837,7 @@ export function IbvProvider({
     modalOpen,
     formId,
     provenanceFor,
+    confidenceFor,
     openFormById,
     openLoadedForm,
     loadFormById,

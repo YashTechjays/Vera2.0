@@ -52,6 +52,7 @@ from control_plane.deps import (
     get_sessionmaker,
     get_summary_cache,
     get_summary_llm,
+    get_trace_link_store,
 )
 from control_plane.dispatch import run_dispatch_pass
 from control_plane.exceptions import (
@@ -91,6 +92,7 @@ from vera_core.models import (
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import AccountType, CallStatus, InterventionType, RecordingStatus
+from vera_core.observability import TraceLinkStore
 from vera_core.observability.correlation import (
     CALLER_IDENTITY_PREFIX,
     PARTICIPANT_MODE_ATTR,
@@ -603,6 +605,7 @@ async def get_call_summary(
     stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
     summary_llm: Annotated[ResilientLLM, Depends(get_summary_llm)],
     summary_cache: Annotated[SummaryCache, Depends(get_summary_cache)],
+    trace_links: Annotated[TraceLinkStore, Depends(get_trace_link_store)],
     settings: AppSettings,
 ) -> ResponseModel[CallSummaryResponse]:
     """On-demand supervisor-handoff summary of the call's transcript so far
@@ -623,6 +626,7 @@ async def get_call_summary(
                 tenant_id=call.tenant_id,
                 call_id=call.id,
                 ttl_seconds=settings.summary_cache_ttl_seconds,
+                trace_links=trace_links,
             )
     except (LLMUnavailableError, TimeoutError) as exc:
         raise CustomAPIException(

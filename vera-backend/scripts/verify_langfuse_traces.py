@@ -1,0 +1,357 @@
+"""Verify that a real call's cost actually landed in Langfuse.
+
+Unit tests prove what Vera EMITS. They cannot prove Langfuse ingested it, typed it
+as a generation, matched a price entry and rendered a number. Only a live call does
+that, and this is the check for it — the design makes that pass the definition of
+done, so it should be a command rather than a click-through.
+
+    just langfuse-verify              # newest call trace
+    just langfuse-verify <call-id>    # by CALL id (what a human has to hand)
+    just langfuse-verify <trace-id>   # by Langfuse trace id
+
+Exits non-zero when something is wrong, so it works as a gate. What it checks:
+
+  1. every model Vera routes to has a price entry (else blank cost, which reads
+     as "this surface is free") — except the tiers in the seeder's KNOWN_UNPRICED,
+     which are deliberately unpriced and reported without failing the run;
+  2. every GENERATION carries a non-blank cost — checked across all of them, since
+     an unpriced model shows on some spans and not others;
+  3. usage reconciles: `input + cached` equals the provider's own prompt count, so
+     nothing billed was invented or dropped;
+  4. the control-plane spans (post-call eval, summary, whisper) share the call's
+     trace, which is what makes a per-call total real;
+  5. cache-hit ratios per model, so caching regressions are visible, and the derived
+     thinking-token count, which nothing else reconciles.
+
+PHI: reads span names, models, token counts and cost. It never prints span input,
+output, or metadata, all of which can carry transcript text on the SDK's own spans.
+"""
+
+import asyncio
+import base64
+import re
+import sys
+from collections import defaultdict
+from typing import Any
+
+import httpx
+
+from scripts.seed_langfuse_prices import (
+    KNOWN_UNPRICED,
+    MODELS,
+    configured_models,
+    existing_models,
+    matching_entry,
+)
+from vera_core.config import get_settings
+from vera_core.observability.correlation import CALL_TRACE_NAME, parse_room_name
+from vera_core.observability.llm_usage_export import THINKING_TOKENS_ATTR
+from vera_core.observability.usage_spans import (
+    SPAN_STT_USAGE,
+    SPAN_TTS_USAGE,
+    USAGE_CACHED,
+    USAGE_INPUT,
+)
+
+# Spans the control plane emits. Their presence IN the call's trace is the whole
+# point of the cross-process trace link; in a separate trace they are orphans.
+CONTROL_PLANE_SPANS = ("vera.post_call.eval", "vera.call_summary", "vera.coaching.whisper")
+
+# The worker's root span for a call, which `call_trace_attributes` also restates as the
+# trace's name. Used to CONFIRM which of ONE call's traces the worker rooted — never to
+# find a call trace in the first place (see _call_traces).
+CALL_ROOT_SPAN = CALL_TRACE_NAME
+
+
+def _auth(settings: Any) -> str:
+    raw = f"{settings.langfuse_public_key}:{settings.langfuse_secret_key}".encode()
+    return "Basic " + base64.b64encode(raw).decode()
+
+
+def _matches(pattern: str, model: str) -> bool:
+    """Whether a Langfuse matchPattern would price *model*. A built-in with a pattern
+    this regex engine rejects is treated as no match rather than crashing the gate."""
+    try:
+        return re.match(pattern, model) is not None
+    except re.error:
+        return False
+
+
+def _attrs(observation: dict[str, Any]) -> dict[str, Any]:
+    """One accessor for the Langfuse response shape, so a change to it is one edit."""
+    attrs: dict[str, Any] = (observation.get("metadata") or {}).get("attributes") or {}
+    return attrs
+
+
+def _usage(observation: dict[str, Any], key: str) -> int:
+    return int((observation.get("usageDetails") or {}).get(key, 0))
+
+
+def reconciles(observation: dict[str, Any]) -> bool | None:
+    """True when `input + cached` equals the SDK's own prompt count, None when the
+    span carries no SDK count to compare against (our own usage spans, and any
+    provider that reports no token usage)."""
+    reported = _attrs(observation).get("gen_ai.usage.input_tokens")
+    if reported is None or USAGE_INPUT not in (observation.get("usageDetails") or {}):
+        return None
+    return _usage(observation, USAGE_INPUT) + _usage(observation, USAGE_CACHED) == int(reported)
+
+
+def _usage_values(observation: dict[str, Any]) -> list[int]:
+    """The non-zero usage counts on this observation. Empty when it reports none, or
+    reports only zeros — both mean there is nothing here to bill."""
+    usage = observation.get("usageDetails") or {}
+    return [int(v) for v in usage.values() if int(v or 0)]
+
+
+def _cost(observation: dict[str, Any]) -> float | None:
+    """The cost Langfuse computed, or None when it computed none. Distinguishing the
+    two is the whole point: 0.0 is an answer, None is a missing price entry."""
+    for key in ("calculatedTotalCost", "totalCost"):
+        value = observation.get(key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _thinking(observation: dict[str, Any]) -> int:
+    """The thinking tokens the export-time correction derived for this span, 0 when it
+    derived none (or the span is not one it touched)."""
+    return int(_attrs(observation).get(THINKING_TOKENS_ATTR, 0) or 0)
+
+
+async def _call_traces(client: httpx.AsyncClient, limit: int = 100) -> list[dict[str, Any]]:
+    """Recent call traces, newest first, identified by SESSION rather than by name.
+
+    Not by trace name. Langfuse names a trace after its ROOT span, but it re-derives the
+    trace from every span carrying `langfuse.session.id` too, and on that path reads the
+    name from `langfuse.trace.name` alone — so before Vera restated that attribute a call
+    trace routinely landed with an EMPTY name. Selecting on the name then skips the newest
+    call and validates an OLDER one while printing PASS, which is the worst failure a gate
+    can have. Observed: a call whose trace was named "" was passed over in favour of the
+    previous call's trace. Still keyed on the session now the attribute is set, because a
+    gate must not rest on a field that one dropped span blanks.
+
+    `sessionId` is the room name (`room_name_for_call`), stamped on every span by
+    `call_trace_attributes`, so it is set whichever span arrives first.
+    """
+    response = await client.get("/api/public/traces", params={"limit": limit})
+    response.raise_for_status()
+    rows: list[dict[str, Any]] = response.json().get("data", [])
+    return [t for t in rows if parse_room_name(str(t.get("sessionId") or "")) is not None]
+
+
+def _looks_like_call_id(value: str) -> bool:
+    """A UUID is a call id; a 32-hex OTel trace id carries no dashes."""
+    return "-" in value
+
+
+def _worker_rooted(same_call: list[dict[str, Any]]) -> dict[str, Any]:
+    """Of ONE call's traces, the one the worker rooted; the newest otherwise.
+
+    Name matching is safe here and only here: every candidate belongs to the same call,
+    so a missing name costs nothing. Applying it ACROSS calls is the bug in _call_traces.
+    """
+    named = [t for t in same_call if t.get("name") == CALL_ROOT_SPAN]
+    return named[0] if named else same_call[0]
+
+
+async def _resolve_target(client: httpx.AsyncClient, wanted: str | None) -> str | None:
+    """The trace to check: an explicit trace id, an explicit CALL id, or the newest call.
+
+    Accepting a call id matters because that is what a human has to hand — it is in the
+    URL, the DB and the logs, while a trace id exists only inside Langfuse.
+    """
+    if wanted and not _looks_like_call_id(wanted):
+        return wanted
+
+    traces = await _call_traces(client)
+    if not traces:
+        return None
+    if wanted:
+        session = next(
+            (str(t.get("sessionId")) for t in traces if wanted in str(t.get("sessionId") or "")),
+            None,
+        )
+        if session is None:
+            print(f"\nno call trace found for call id {wanted}")
+            return None
+    else:
+        session = str(traces[0].get("sessionId"))
+
+    same_call = [t for t in traces if str(t.get("sessionId")) == session]
+    chosen = _worker_rooted(same_call)
+    print(f"\nchecking {session}\n  -> trace {chosen['id']}")
+    if others := [t["id"] for t in same_call if t["id"] != chosen["id"]]:
+        # e.g. the control plane's pre-dispatch `vera.dispatch.stage_call`, which cannot
+        # join a trace whose worker does not exist yet. It carries no cost.
+        print(f"  (same call, not checked: {others})")
+    return str(chosen["id"])
+
+
+async def _price_entry_report(client: httpx.AsyncClient, settings: Any) -> tuple[bool, bool]:
+    """(all Vera entries exist, every configured model is covered).
+
+    Kept separate because they mean different things: the first says the seeder ran,
+    the second says nothing Vera routes to is unpriced. A blank cost is only a
+    "go seed" instruction when the first is False."""
+    seeded = await existing_models(client)
+
+    print("\n=== PRICE ENTRIES ===")
+    missing_entries = [m.model_name for m in MODELS if m.model_name not in seeded]
+    for model in MODELS:
+        mark = "ok " if model.model_name in seeded else "MISSING"
+        print(f"  [{mark:>7}] {model.model_name}")
+    if missing_entries:
+        print(f"  -> run `just langfuse-seed-prices`; missing: {missing_entries}")
+
+    # Asked of the LIVE listing, not just Vera's own MODELS: Langfuse ships ~160
+    # built-in entries that price several of the models Vera routes to, so the offline
+    # check in the seeder can only ever answer "did WE price it". The real question a
+    # gate should ask is "will this render a number", and the listing answers it.
+    patterns = [p for p in (m.get("matchPattern") for m in seeded.values()) if p]
+    unpriced: list[str] = []
+    by_langfuse: list[str] = []
+    for configured in configured_models(settings):
+        if matching_entry(configured) is not None:
+            continue
+        if any(_matches(pattern, configured) for pattern in patterns):
+            by_langfuse.append(configured)
+        elif configured not in KNOWN_UNPRICED:
+            unpriced.append(configured)
+
+    if by_langfuse:
+        print(f"\n  priced by a Langfuse built-in entry, not by us: {by_langfuse}")
+    # Disjoint from by_langfuse on purpose: a tier we chose not to price but Langfuse
+    # prices anyway is covered, not uncovered, and listing it under both reads as a
+    # contradiction. What lands here is the residue nothing prices at all.
+    if known := [
+        m for m in configured_models(settings) if m in KNOWN_UNPRICED and m not in by_langfuse
+    ]:
+        # Not a failure: deliberately unpriced fallback tiers (adr/devops-todo.md #23).
+        # A gate that is red on a healthy system is one everyone learns to ignore.
+        print(f"\n  knowingly unpriced, nothing prices these (not a failure): {known}")
+    if unpriced:
+        print(f"\n  NO PRICE ENTRY for configured models: {unpriced}")
+        print("  their observations will render BLANK cost, which looks like broken tracing")
+    return not missing_entries, not unpriced
+
+
+def _report_trace(full: dict[str, Any], *, prices_ok: bool) -> bool:
+    """Print the per-trace findings. False when the trace has a real problem."""
+    obs = full.get("observations", [])
+    print(f"\n=== TRACE {full.get('id')} ===")
+    print(f"  name={full.get('name')}  session={full.get('sessionId')}")
+    print(f"  totalCost={full.get('totalCost')}  observations={len(obs)}")
+
+    generations = [o for o in obs if str(o.get("type")).upper() == "GENERATION"]
+    # Only a generation that reports NON-ZERO usage can be priced. Two shapes are blank
+    # by nature rather than by fault, and counting either would keep this gate
+    # permanently red: the SDK's usage-less spans that carry a model attribute
+    # (`user_turn`, `tts_node`, `llm_fallback_adapter`), and a request that genuinely
+    # consumed nothing — an interrupted or aborted LLM turn reports
+    # `{"input": 0, "output": 0, "total": 0}`, a truthy dict of zeros.
+    billable = [o for o in generations if any(_usage_values(o))]
+    # `cost is None` means never priced. Cost == 0 means priced, and the answer was
+    # zero. Treating a real 0 as blank reports correct instrumentation as broken.
+    blank = [o for o in billable if _cost(o) is None]
+
+    by_model: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for o in billable:
+        by_model[str(o.get("model"))].append(o)
+
+    print(
+        f"\n  --- {len(billable)} billable generations across {len(by_model)} models "
+        f"({len(generations) - len(billable)} usage-less SDK spans ignored) ---"
+    )
+    for model, group in sorted(by_model.items()):
+        priced = sum(1 for o in group if _cost(o) is not None)
+        cost = sum(_cost(o) or 0.0 for o in group)
+        cached = sum(_usage(o, USAGE_CACHED) for o in group)
+        prompt = cached + sum(_usage(o, USAGE_INPUT) for o in group)
+        ratio = f"{cached / prompt:.0%}" if prompt else "n/a"
+        flag = "" if priced == len(group) else f"   <-- {len(group) - priced} BLANK"
+        # Thinking is a RESIDUAL (total - prompt - completion) billed at the output
+        # rate, so anything else the provider folds into its total lands here too and
+        # costs ~8x what input would. `input + cached` reconciles below; nothing
+        # reconciles output, so surface the derived number and eyeball it.
+        thinking = sum(_thinking(o) for o in group)
+        derived = f" thinking={thinking}" if thinking else ""
+        print(
+            f"    {model:28} n={len(group):4} priced={priced:4} ${cost:<12.6f} "
+            f"cache={ratio}{derived}{flag}"
+        )
+
+    mismatched = [o for o in billable if reconciles(o) is False]
+    if mismatched:
+        print(f"\n  USAGE DOES NOT RECONCILE on {len(mismatched)} generation(s):")
+        for o in mismatched[:5]:
+            print(f"    {o.get('name')} {o.get('usageDetails')}")
+        print("    input + cached must equal the provider's own prompt-token count")
+
+    names = {str(o.get("name")) for o in obs}
+    joined = sorted(n for n in CONTROL_PLANE_SPANS if n in names)
+    print(
+        f"\n  vera usage spans: {sorted(n for n in (SPAN_STT_USAGE, SPAN_TTS_USAGE) if n in names)}"
+    )
+    print(f"  control-plane spans in THIS trace: {joined or 'none'}")
+    if not joined:
+        print("    (none ran, or they formed their own trace — exercise whisper/summary")
+        print("     and let post-call eval run, then re-check)")
+
+    if blank and not prices_ok:
+        print(f"\n  {len(blank)} generation(s) with BLANK cost — seed the missing model entries")
+    elif blank:
+        print(f"\n  {len(blank)} generation(s) with BLANK cost, but every price entry EXISTS:")
+        for o in blank[:5]:
+            print(f"    {o.get('name')} model={o.get('model')!r} usage={o.get('usageDetails')}")
+        # Only a WHOLESALE blank points at seeding order — Langfuse prices at ingestion
+        # and never backfills, so a trace older than its price entries has EVERY span
+        # for that model blank. A few blanks among many priced ones is a different bug,
+        # and sending someone to re-run an already-correct seeder wastes the trip.
+        affected = {str(o.get("model")) for o in blank}
+        wholesale = all(
+            all(_cost(o) is None for o in by_model[model])
+            for model in affected
+            if model in by_model
+        )
+        if wholesale:
+            print("  Every generation for these models is blank, which is the signature of a")
+            print("  trace ingested BEFORE its price entries. Langfuse prices at ingestion")
+            print("  and does not backfill — seed, then place a new call.")
+        else:
+            print("  Other generations for the same model DID price, so this is not seeding")
+            print("  order. Check the model name and usage keys on the spans listed above.")
+    return not blank and not mismatched
+
+
+async def main() -> int:
+    settings = get_settings()
+    if not settings.langfuse_host:
+        print("VERA_LANGFUSE_HOST is not set — nothing was traced.")
+        return 1
+
+    wanted = sys.argv[1] if len(sys.argv) > 1 else None
+    print(f"host: {settings.langfuse_host}")
+    async with httpx.AsyncClient(
+        base_url=settings.langfuse_host.rstrip("/"),
+        headers={"Authorization": _auth(settings)},
+        timeout=60.0,
+    ) as client:
+        entries_present, all_covered = await _price_entry_report(client, settings)
+
+        trace_id = await _resolve_target(client, wanted)
+        if trace_id is None:
+            print("\nno call trace found — place a call first.")
+            return 1
+        response = await client.get(f"/api/public/traces/{trace_id}")
+        response.raise_for_status()
+        trace_ok = _report_trace(response.json(), prices_ok=entries_present)
+
+    ok = entries_present and all_covered and trace_ok
+    print("\n" + ("PASS" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

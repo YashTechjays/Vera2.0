@@ -3,8 +3,10 @@ cache orchestration. The DB-fallback branch of snapshot_turns needs live
 Postgres and is covered by the endpoint integration tests."""
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
+from opentelemetry import trace
 
 from control_plane.call_summary import (
     CallSummaryResponse,
@@ -16,6 +18,7 @@ from control_plane.call_summary import (
     snapshot_turns,
     summarize_call,
 )
+from tests.conftest import FakeTraceLinkRedis
 from vera_core.call_stream import (
     TYPE_CALL_STATUS,
     TYPE_TRANSCRIPT,
@@ -23,6 +26,7 @@ from vera_core.call_stream import (
     CallStreamService,
 )
 from vera_core.db import uuid7
+from vera_core.observability import TraceLinkStore, current_traceparent
 from vera_core.observability.correlation import room_name_for_call
 
 
@@ -279,3 +283,33 @@ async def test_summarize_non_json_reply_falls_back_to_raw_text() -> None:
     assert result.status == "ready"
     assert result.sections is None
     assert result.summary == "just prose, not JSON"
+
+
+class TestSummaryTraceJoin:
+    @pytest.mark.asyncio
+    async def test_the_summary_span_joins_the_calls_trace(self, otel_spans: Any) -> None:
+        """Without this the summary's LLM span is an orphan root trace — real spend
+        that no per-call cost query can ever find."""
+        tenant_id, call_id = uuid7(), uuid7()
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("job_entrypoint") as worker_span:
+            traceparent = current_traceparent()
+            worker_trace_id = worker_span.get_span_context().trace_id
+
+        store = TraceLinkStore(FakeTraceLinkRedis())
+        assert traceparent is not None
+        await store.publish(room_name_for_call(tenant_id, call_id), traceparent)
+
+        events = [_turn_event("bot", "agent", "hi"), _turn_event("rep", "user", "hello")]
+        await summarize_call(
+            llm=_StubLLM(),
+            cache=_DictCache(),
+            stream=CallStreamService(_FakeStreamStore(events)),
+            sessionmaker=None,
+            tenant_id=tenant_id,
+            call_id=call_id,
+            ttl_seconds=5,
+            trace_links=store,
+        )
+        span = next(s for s in otel_spans.get_finished_spans() if s.name == "vera.call_summary")
+        assert span.context.trace_id == worker_trace_id

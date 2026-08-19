@@ -130,13 +130,21 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   SQLAlchemy async, `redis.asyncio`, `pytest-asyncio`). `anyio` stays **transitive-only** (pulled by
   starlette/httpx/SDKs); never add it to a `pyproject.toml` `dependencies`, never `import anyio`. For
   structured concurrency use stdlib `asyncio.TaskGroup` / `asyncio.timeout`, not anyio equivalents.
-- **`redis.asyncio` Streams BLOCK reads RAISE, they don't return empty.** `xread` / `xreadgroup`
-  with `block=<ms>` raise `redis.exceptions.TimeoutError` (which subclasses `RedisError`) when the
-  window elapses with no new entries — they do NOT return an empty result. A tailing consumer MUST
-  catch `TimeoutError as RedisTimeoutError` around the blocking read and treat it as a normal idle
-  tick; otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
+- **`redis.asyncio` Streams BLOCK reads raise on an idle window as we have them configured.**
+  `xread` / `xreadgroup` with `block=<ms>` raise `redis.exceptions.TimeoutError` (which subclasses
+  `RedisError`) rather than returning empty. A tailing consumer MUST catch
+  `TimeoutError as RedisTimeoutError` around the blocking read and treat it as a normal idle tick;
+  otherwise a broad `except RedisError` miscatches every idle poll as an error (traceback +
   back-off log spam every window). Copy the canonical handling in `RedisCallStreamStore.read`
   (`vera_core/call_stream.py`) and `control_plane/worker_events.py::_read_once`.
+  **The raise is a config artifact, not a property of redis-py** — keep the handler regardless, but
+  know the cause: every consumer blocks for `block=5000` while inheriting redis-py's default
+  `socket_timeout=5`, so the read deadline and the block window are the same 5s and the socket
+  wins. Measured: with the default, an idle poll raises at 5.00s and leaves the pooled connection
+  `is_connected=False`, so the next poll reconnects — every window, per consumer. With
+  `socket_timeout=10` the same poll returns cleanly at 5.0s and the connection survives. Raising it
+  is tracked as `adr/devops-todo.md` #24; if you do, this TimeoutError path stops firing on idle
+  (it still fires on a genuinely slow read, so the handler stays).
 - uv workspace: `vera_core` (shared core) → consumed by `control_plane` (FastAPI, owns
   Postgres, no audio) and `agent_worker` (LiveKit). Python pinned 3.12 (`<3.13`).
   In a fresh worktree run **`uv sync --all-packages`** — plain `uv sync` leaves the venv without

@@ -48,6 +48,13 @@ import type { LiveCall } from "@/lib/mock-data"
 // Test transport only, and only whether the button renders — the backend's VERA_BROWSER_CALLEE_TRANSPORT is the authority.
 const BROWSER_CALLEE = import.meta.env.VITE_BROWSER_CALLEE_TRANSPORT === "true"
 
+type RightTab = "transcript" | "summary"
+
+const RIGHT_TABS: [RightTab, string][] = [
+  ["transcript", "Transcription"],
+  ["summary", "Summary"],
+]
+
 /** Collapsible form panel; loads the call's own form on expand (VR2-64). */
 function FormPanel({
   formId,
@@ -164,12 +171,13 @@ export function LiveCallModal({
   const [keypadOpen, setKeypadOpen] = useState(false)
   // Full-width/height presentation of this modal (the header ⛶), not the IBV form.
   const [maximized, setMaximized] = useState(false)
-  // Transcript as plain text (PHI: state only, discarded on unmount) + copy feedback.
+  // Transcript/summary as plain text (PHI: state only, discarded on unmount) + copy feedback.
   const [transcript, setTranscript] = useState("")
-  const [transcriptCopied, setTranscriptCopied] = useState(false)
+  const [summary, setSummary] = useState("")
+  const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
-  const [rightTab, setRightTab] = useState<"transcript" | "summary">("transcript")
+  const [rightTab, setRightTab] = useState<RightTab>("transcript")
   const [liveHealth, setLiveHealth] = useState<CallHealth | null>(null)
   // Live form completion from the SSE field_answer frames (0-100); null until the
   // first answer, then it drives the progress bar in place of the polled value.
@@ -248,7 +256,8 @@ export function LiveCallModal({
       setActionError(null)
       setMaximized(false)
       setTranscript("")
-      setTranscriptCopied(false)
+      setSummary("")
+      setCopied(false)
       setRightTab("transcript")
       setLiveHealth(null)
       setLiveCompletion(null)
@@ -271,6 +280,24 @@ export function LiveCallModal({
     } finally {
       setEnding(false)
     }
+  }
+
+  // The copy button acts on the visible tab (VR2-209).
+  const activeText = rightTab === "summary" ? summary : transcript
+  const copyLabel = rightTab === "summary" ? "Copy summary" : "Copy transcript"
+
+  function handleCopy() {
+    void copyText(activeText).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      window.clearTimeout(copiedTimer.current)
+      copiedTimer.current = window.setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  function selectTab(tab: RightTab) {
+    setRightTab(tab)
+    setCopied(false)
   }
 
   // A publish token can be refused (409 on the mic lock, or the test transport is off) — fall back to listening.
@@ -391,16 +418,11 @@ export function LiveCallModal({
           <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white">
             <div className="flex items-center justify-between bg-[#f3f5f7] px-2 py-2">
               <div className="flex items-center gap-1">
-                {(
-                  [
-                    ["transcript", "Transcription"],
-                    ["summary", "Summary"],
-                  ] as const
-                ).map(([tab, label]) => (
+                {RIGHT_TABS.map(([tab, label]) => (
                   <button
                     key={tab}
                     type="button"
-                    onClick={() => setRightTab(tab)}
+                    onClick={() => selectTab(tab)}
                     className={cn(
                       "rounded-md px-3 py-1.5 text-sm font-semibold transition-colors",
                       rightTab === tab
@@ -414,20 +436,13 @@ export function LiveCallModal({
               </div>
               <button
                 type="button"
-                disabled={!transcript}
-                title={transcriptCopied ? "Copied" : "Copy transcript"}
-                aria-label={transcriptCopied ? "Copied" : "Copy transcript"}
+                disabled={!activeText}
+                title={copied ? "Copied" : copyLabel}
+                aria-label={copied ? "Copied" : copyLabel}
                 className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
-                onClick={() => {
-                  void copyText(transcript).then((ok) => {
-                    if (!ok) return
-                    setTranscriptCopied(true)
-                    window.clearTimeout(copiedTimer.current)
-                    copiedTimer.current = window.setTimeout(() => setTranscriptCopied(false), 2000)
-                  })
-                }}
+                onClick={handleCopy}
               >
-                {transcriptCopied ? (
+                {copied ? (
                   <Check className="size-4 text-emerald-600" />
                 ) : (
                   <Copy className="size-4" />
@@ -470,7 +485,9 @@ export function LiveCallModal({
                   />
                   {canCoach && <CoachingPanel callId={call.id} />}
                 </div>
-                {rightTab === "summary" && <CallSummaryPanel callId={call.id} />}
+                {rightTab === "summary" && (
+                  <CallSummaryPanel callId={call.id} onTextChange={setSummary} />
+                )}
               </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-muted-foreground">

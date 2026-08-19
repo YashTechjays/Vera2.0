@@ -1,8 +1,21 @@
 # STT / TTS Usage & Cost Observability in Langfuse — Design
 
+> **⚠️ SUPERSEDED (2026-08-17) — do not implement from this document.**
+> Replaced by `2026-08-17-call-cost-observability-design.md`. Never implemented, and two of its
+> load-bearing premises were disproven when the work was picked up:
+> - **§2.3 "cost is computed for any observation type"** is false — Langfuse prices only
+>   `generation` and `embedding` observations. Built as written, every usage span here would
+>   have rendered blank cost.
+> - **§5.3 "floats are accepted"** is false — the cited validator does not govern this field.
+>   `usage_details` is stored as `Map(String, UInt64)`; fractional seconds are truncated (OTel
+>   route) or dropped outright (SDK route). The successor uses integer milliseconds.
+>
+> Its correct findings — the `metrics_collected` hook, trace-parenting hazard, family match
+> patterns, seeder idempotency shape — are carried forward there with attribution.
+
 **Date:** 2026-07-28
 **Branch:** to be cut off `main` at implementation time (not yet started)
-**Status:** Approved design, pending implementation plan
+**Status:** Superseded — see banner above
 **Builds on:** `2026-07-27-voice-pipeline-observability-design.md` (the `vera.*` attribute
 convention and the PHI guardrail below are inherited from it)
 

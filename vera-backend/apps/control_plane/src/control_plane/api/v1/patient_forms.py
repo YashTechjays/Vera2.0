@@ -517,17 +517,19 @@ _SORT_COLUMNS = {
 
 
 class DisputeView(BaseModel):
+    """The divergence itself — prior vs captured. Evidence deliberately lives on
+    `FieldView`, not here: a dispute is absent whenever the AI value agrees with the
+    baseline, and those answers have evidence too."""
+
     previous_value: Any
     current_value: Any
     confidence: int | None
-    evidence: str | None
     reasoning: str | None
 
 
 class JudgeView(BaseModel):
     confidence: int | None
     supported: bool
-    evidence: str | None
 
 
 class ProvenanceView(BaseModel):
@@ -541,6 +543,8 @@ class FieldView(BaseModel):
     value: Any
     source: str
     confidence: int | None
+    #: The field's single evidence text — see `_field_evidence`.
+    evidence: str | None
     dispute: DisputeView | None
     provenance: ProvenanceView | None = None
 
@@ -549,16 +553,43 @@ def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
     # Explicit field mapping: the view models ARE the API contract, so a service-
     # dataclass rename or new field must be an explicit decision here — not a
     # silent splat-through (or runtime TypeError) via dataclasses.asdict.
+    # `JudgeInfo.evidence` is intentionally NOT exposed: field evidence has exactly one
+    # surface, and `_field_evidence` promotes the judge's quote onto `FieldView`. The
+    # dataclass keeps the field — it is that merge's input.
     if p is None:
         return None
     judge = (
-        JudgeView(
-            confidence=p.judge.confidence, supported=p.judge.supported, evidence=p.judge.evidence
-        )
+        JudgeView(confidence=p.judge.confidence, supported=p.judge.supported)
         if p.judge is not None
         else None
     )
     return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
+
+
+def _field_evidence(view: dict[str, Any], p: FieldProvenance | None) -> str | None:
+    """The field's single evidence text. The judge's verdict quote wins: it is drawn from
+    the role-labelled transcript, so it carries the agent's question as well as the rep's
+    answer, whereas `field_answer.evidence` is one rep turn — and NULL for every field the
+    live Observer wrote. Read-side only; both columns stay exactly as stored."""
+    judge_evidence = p.judge.evidence if p is not None and p.judge is not None else None
+    if judge_evidence and judge_evidence.strip():
+        return judge_evidence
+    answer_evidence: str | None = view["evidence"]
+    return answer_evidence
+
+
+def _field_view(view: dict[str, Any], p: FieldProvenance | None) -> FieldView:
+    """One field's API view."""
+    dispute = view["dispute"]
+    return FieldView(
+        field_path=view["field_path"],
+        value=view["value"],
+        source=view["source"],
+        confidence=view["confidence"],
+        evidence=_field_evidence(view, p),
+        dispute=DisputeView(**dispute) if dispute is not None else None,
+        provenance=_provenance_view(p),
+    )
 
 
 class PatientFormDetail(BaseModel):
@@ -721,10 +752,7 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         member_id=form.member_id,
         insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
-        fields=[
-            FieldView(**view, provenance=_provenance_view(prov.get(view["field_path"])))
-            for view in views
-        ],
+        fields=[_field_view(view, prov.get(view["field_path"])) for view in views],
     )
 
 

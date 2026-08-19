@@ -128,7 +128,7 @@ export function SchemaForm() {
           {renderColumn(rightTop)}
         </div>
         {rail.length > 0 && (
-          <aside className="flex w-[340px] shrink-0 flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5">
+          <aside className="flex w-[420px] shrink-0 flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5">
             {rail.map(([key, section]) => (
               <Section key={key} sectionKey={key} section={section} compact />
             ))}
