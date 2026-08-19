@@ -30,6 +30,14 @@ export function registerAuthFailureHandler(handler: () => void): void {
   authFailureHandler = handler
 }
 
+// 401 → the session behind the request is gone/expired; let the app clear auth state and
+// redirect. Only when the request carried the CURRENT token, though: a stale 401 from a
+// superseded session must not force-logout a newer login (VR2-202).
+// 403 is intentionally NOT treated here — callers handle access-denied.
+function reportAuthFailure(status: number, auth: boolean, sentToken: string | null): void {
+  if (status === 401 && auth && sentToken === getToken()) authFailureHandler?.()
+}
+
 /** Every backend response rides in this envelope (success or failure). */
 type Envelope<T> = {
   data: T | null
@@ -67,10 +75,8 @@ export async function apiRequestBlob(path: string, opts: RequestOptions = {}): P
   const { method = "GET", body, auth = true, headers: extraHeaders } = opts
   const headers: Record<string, string> = { ...extraHeaders }
   if (body !== undefined) headers["Content-Type"] = "application/json"
-  if (auth) {
-    const token = getToken()
-    if (token) headers.Authorization = `Bearer ${token}`
-  }
+  const sentToken = auth ? getToken() : null
+  if (sentToken) headers.Authorization = `Bearer ${sentToken}`
   let res: Response
   try {
     res = await fetch(`${BASE_URL}${path}`, {
@@ -88,8 +94,7 @@ export async function apiRequestBlob(path: string, opts: RequestOptions = {}): P
     } catch {
       /* non-JSON error body */
     }
-    // Reuse apiRequest's 401 handling so an expired session clears auth state.
-    if (res.status === 401 && auth) authFailureHandler?.()
+    reportAuthFailure(res.status, auth, sentToken)
     throw new ApiError(
       res.status,
       envelope?.error_code ?? null,
@@ -110,10 +115,8 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
     ...extraHeaders,
     ...(isFormData ? {} : { "Content-Type": "application/json" }),
   }
-  if (auth) {
-    const token = getToken()
-    if (token) headers.Authorization = `Bearer ${token}`
-  }
+  const sentToken = auth ? getToken() : null
+  if (sentToken) headers.Authorization = `Bearer ${sentToken}`
 
   let res: Response
   try {
@@ -135,9 +138,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
   }
 
   if (!res.ok || !envelope || envelope.status === "FAIL") {
-    // 401 → session is gone/expired. Let the app clear auth state + redirect.
-    // 403 is intentionally NOT treated here — callers handle access-denied.
-    if (res.status === 401 && auth) authFailureHandler?.()
+    reportAuthFailure(res.status, auth, sentToken)
     throw new ApiError(
       res.status,
       envelope?.error_code ?? null,
