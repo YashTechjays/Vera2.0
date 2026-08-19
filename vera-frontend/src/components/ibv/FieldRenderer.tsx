@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { optionsOf, suggestionsOf } from "@/lib/ibv/schema"
+import { PhoneCell } from "./PhoneCell"
 import type { LeafField } from "@/lib/ibv/types"
 
 type Props = {
@@ -29,6 +30,8 @@ type Props = {
   /** drop ALL of the input's borders — used inside matrix tables where the
    *  collapsed `<td>` border is the single source of truth for every edge */
   borderless?: boolean
+  /** phone fields only: prepend a country-code dropdown, composing E.164 (VR2-201) */
+  countrySelect?: boolean
 }
 
 // smart-caller-fe spreadsheet cell: Calibri 10pt bold, pale-blue bg, teal
@@ -65,7 +68,7 @@ function withReasonTooltip(
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex h-full w-full">{node}</span>
+        <span className="flex h-full w-full min-w-0">{node}</span>
       </TooltipTrigger>
       {shouldExplain && reason ? <TooltipContent>{reason}</TooltipContent> : null}
     </Tooltip>
@@ -100,6 +103,7 @@ export function FieldRenderer({
   inputPaddingTop,
   noRightBorder,
   borderless,
+  countrySelect,
 }: Props) {
   const look = cn(
     highlightClass ?? baseLook(borderless, noRightBorder),
@@ -132,6 +136,21 @@ export function FieldRenderer({
       >
         {value || hint || "—"}
       </div>
+    )
+  }
+
+  if (field.type === "phone" && countrySelect) {
+    return withReasonTooltip(
+      <PhoneCell
+        value={value}
+        onChange={onChange}
+        disabled={disabled}
+        placeholder={hint}
+        padStyle={padStyle}
+        className={look}
+      />,
+      explainable,
+      title
     )
   }
 

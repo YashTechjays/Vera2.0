@@ -3,6 +3,7 @@ import { FileText, RefreshCw } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { summaryText } from "@/lib/monitoring/summaryText"
 import {
   getCallSummary,
   type LiveCallSummary,
@@ -79,12 +80,23 @@ function SectionedSummary({ sections }: { sections: LiveCallSummarySections }) {
  * PHI hygiene: the summary is held in component state only and discarded on
  * unmount (switching tabs / closing the modal). Never persisted or logged.
  */
-export function CallSummaryPanel({ callId }: { callId: string }) {
+export function CallSummaryPanel({
+  callId,
+  onTextChange,
+}: {
+  callId: string
+  /** Plain-text rendering of the summary, for the modal's copy button. */
+  onTextChange?: (text: string) => void
+}) {
   const [result, setResult] = useState<LiveCallSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // Bumped by the refresh button; the fetch effect re-runs on it.
   const [fetchNonce, setFetchNonce] = useState(0)
+
+  useEffect(() => {
+    onTextChange?.(summaryText(result))
+  }, [result, onTextChange])
 
   useEffect(() => {
     let stale = false
