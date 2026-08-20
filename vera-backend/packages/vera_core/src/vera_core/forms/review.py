@@ -249,6 +249,26 @@ def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:
     return True  # unknown source but filled — treat as satisfied
 
 
+def is_call_confirmed(
+    status: FieldStatus | None, *, authoritative_calls: Collection[UUID], floor: int
+) -> bool:
+    """True only when an AUTHORITATIVE call collected this value and the judge supported it.
+
+    The retry ask set's rule, and deliberately stricter than `is_field_satisfied`: an intake or
+    human value is trusted for completeness and for the retry-WORTHINESS decision, but it was never
+    put to the payer's representative, so a genuine retry still owes it. Answers from a call that
+    captured no reference number are not proof either — see spec D8.
+
+    This is `gating_seed`'s rule (an ask-role value on file is a pre-call baseline, never an answer)
+    applied to the focus set, which is computed from `field_answer` and had no equivalent guard.
+    """
+    if status is None or status.source != AnswerSource.AI_CALL.value:
+        return False
+    if status.call_id is None or status.call_id not in authoritative_calls:
+        return False
+    return bool(status.ai_supported) and (status.ai_confidence or 0) >= floor
+
+
 def _required_paths(
     schema_json: Mapping[str, Any], values: Mapping[str, Any], *, askable_only: bool
 ) -> list[str]:
