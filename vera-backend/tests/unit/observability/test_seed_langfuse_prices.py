@@ -4,6 +4,7 @@ entry without a cached rate."""
 import re
 from typing import Any
 
+import httpx
 import pytest
 
 from agent_worker.cascade import _CARTESIA_TTS_MODEL
@@ -15,8 +16,10 @@ from scripts.seed_langfuse_prices import (
     build_payload,
     configured_models,
     matching_entry,
+    project_mismatch,
     resolve_rates,
     seed,
+    target_project,
     unpriced_models,
 )
 from vera_core.config.settings import Settings
@@ -350,3 +353,77 @@ class TestConfiguredModelCoverage:
         settings = Settings(_env_file=None)
         settings.observer_extract_primary_model = "google:gemini-9.9-flash"
         assert unpriced_models(settings) == ["gemini-9.9-flash"]
+
+
+class _ProjectResponse:
+    """The /api/public/projects reply. `is_error` is what the seeder branches on, so a
+    401 from another environment's keys must behave like no answer, not like a project."""
+
+    def __init__(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.is_error = status_code >= 400
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _ProjectClient:
+    def __init__(self, response: Any) -> None:
+        self._response = response
+
+    async def get(self, _url: str) -> Any:
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+
+class TestTargetProject:
+    """The key pair is the only thing that selects a project, so a run has to be able to
+    say which one it is about to change."""
+
+    @pytest.mark.asyncio
+    async def test_both_the_id_and_the_name_identify_the_project(self) -> None:
+        client = _ProjectClient(
+            _ProjectResponse({"data": [{"id": "proj-vera-test", "name": "Vera Test"}]})
+        )
+        assert await target_project(client) == (  # type: ignore[arg-type]
+            "proj-vera-test",
+            "Vera Test",
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_error_response_reports_no_project(self) -> None:
+        client = _ProjectClient(_ProjectResponse({}, status_code=401))
+        assert await target_project(client) is None  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_endpoint_reports_no_project(self) -> None:
+        # A Langfuse without the endpoint must not stop a local seed from running.
+        client = _ProjectClient(httpx.ConnectError("nope"))
+        assert await target_project(client) is None  # type: ignore[arg-type]
+
+
+class TestProjectGuard:
+    """Naming a project is a request to change ONLY that one. Replacing an entry is
+    DELETE-then-POST, so the wrong target does not merely add noise — it can leave that
+    project's models with no price at all."""
+
+    def test_a_matching_id_proceeds(self) -> None:
+        assert project_mismatch("proj-vera-test", ("proj-vera-test", "Vera Test")) is None
+
+    def test_a_matching_name_proceeds(self) -> None:
+        assert project_mismatch("Vera Test", ("proj-vera-test", "Vera Test")) is None
+
+    def test_the_wrong_project_is_refused_and_named(self) -> None:
+        reason = project_mismatch("proj-vera-test", ("proj-vera-prod", "Vera Prod"))
+        assert reason is not None
+        assert "proj-vera-prod" in reason and "proj-vera-test" in reason
+
+    @pytest.mark.parametrize("identifiers", [None, ()])
+    def test_an_unconfirmable_project_fails_closed(self, identifiers: Any) -> None:
+        assert project_mismatch("proj-vera-test", identifiers) is not None
+
+    def test_naming_no_project_leaves_the_default_run_alone(self) -> None:
+        assert project_mismatch(None, None) is None
+        assert project_mismatch("", ("proj-vera-local",)) is None
