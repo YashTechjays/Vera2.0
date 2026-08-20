@@ -110,6 +110,17 @@ seed-schemas:
 test_seed_patient_data status="ready_for_processing":
     uv run python scripts/seed_patient_data.py --status {{status}}
 
+# Seed/replace the one form a FOCUSED retry dispatches from: a prior call that captured
+# the call reference number, judge-supported answers for all but a few sections, and
+# retry_count=1. Prints the scope a correct focused retry would ask.
+seed-retry-form *args:
+    uv run python scripts/seed_retry_form.py seed {{args}}
+
+# Arm that form for the retry call (→ IN_QUEUE keeping retry_count, so the next
+# dispatch is a RETRY). The operator endpoint can't do this — it resets retry_count.
+arm-retry-form *args:
+    uv run python scripts/seed_retry_form.py arm {{args}}
+
 # Probe the real intake endpoint (POST /api/v1/patient-forms) against a running
 # `just api`, with payloads derived live from data/ibv_infertility_appscript.js's
 # DATA_MAPPING — catches drift between the Sheet's field set and the live schema. Requires
