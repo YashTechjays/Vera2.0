@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { DisputeStrip } from "./DisputeControls"
+import { ApplyButton, DisputeStrip } from "./DisputeControls"
 import {
   confidenceHighlightClass,
   fieldConfidenceLevel,
@@ -67,30 +67,44 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const isTextarea = field.ui?.widget === "textarea"
 
   return (
+    // The background lives on the td, never the content: a neighboring cell can make
+    // the row taller, and a content-level tint would leave white around it (VR2-162).
+    // focus-within turns the ENTIRE cell white while editing — one common style.
     <td
-      className="border border-ibv-input-border p-0 align-middle"
+      className={cn(
+        "border border-ibv-input-border p-0 align-middle",
+        openDispute ? (highlightClass ?? "bg-ibv-input-bg") : "bg-ibv-input-bg",
+        "focus-within:bg-white"
+      )}
       rowSpan={rowSpan}
       data-field-path={path}
     >
       <div
         className={cn(
           "flex flex-col justify-center",
-          isTextarea ? "min-h-[44px]" : "min-h-[24px]",
-          openDispute && (highlightClass ?? "bg-ibv-input-bg")
+          isTextarea ? "min-h-[44px]" : "min-h-[24px]"
         )}
       >
-        <FieldRenderer
-          field={field}
-          path={path}
-          value={value}
-          onChange={(v) => setValue(path, v)}
-          disabled={!applicable}
-          placeholder={!applicable ? field.inapplicable_value : undefined}
-          title={disabledReason ?? invalidReason}
-          invalid={invalidSeverity(invalidReason, value)}
-          highlightClass={openDispute ? "bg-transparent" : highlightClass}
-          borderless
-        />
+        {/* Apply (✓) sits beside the value it accepts; the strip below holds prior + swap. */}
+        <div className="flex min-w-0 items-center">
+          <FieldRenderer
+            field={field}
+            path={path}
+            value={value}
+            onChange={(v) => setValue(path, v)}
+            disabled={!applicable}
+            placeholder={!applicable ? field.inapplicable_value : undefined}
+            title={disabledReason ?? invalidReason}
+            invalid={invalidSeverity(invalidReason, value)}
+            highlightClass="bg-transparent"
+            borderless
+          />
+          {openDispute && (
+            <span className="flex shrink-0 items-center px-1">
+              <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
+            </span>
+          )}
+        </div>
         {openDispute && (
           <DisputeStrip
             dispute={openDispute}
@@ -99,7 +113,6 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
             flags={flags}
             canSwap={applicable}
             onSwap={() => swapDispute(path)}
-            onApply={() => applyDispute(path)}
           />
         )}
       </div>

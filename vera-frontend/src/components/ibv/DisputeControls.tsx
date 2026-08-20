@@ -1,4 +1,4 @@
-import { Check, RotateCcw, ArrowLeftRight } from "lucide-react"
+import { Check, RotateCcw, ArrowUpDown } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -41,25 +41,37 @@ export function ApplyButton({
   )
 }
 
-/** ⇄ swap the input value with the prior value. */
+/** ⇄ swap the input value with the prior value. Drawn disabled (never hidden) on an
+ *  inapplicable field — swap would write a value the reviewer could not type back
+ *  (VR2-166), but an invisible control reads as broken (VR2-162). */
 export function SwapButton({
   swapped,
+  disabled,
   onClick,
 }: {
   swapped: boolean
+  disabled?: boolean
   onClick: () => void
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      title="Swap with prior value"
+      disabled={disabled}
+      title={
+        disabled ? "Swap is unavailable while this field is not applicable" : "Swap with prior value"
+      }
       className={cn(
         "inline-flex size-5 shrink-0 items-center justify-center rounded-full text-white transition-colors",
-        swapped ? "bg-[#34B2B2] hover:bg-[#2c9a9a]" : "bg-[#003e64] hover:bg-[#002a45]"
+        disabled
+          ? "cursor-not-allowed bg-gray-400"
+          : swapped
+            ? "bg-[#34B2B2] hover:bg-[#2c9a9a]"
+            : "bg-[#003e64] hover:bg-[#002a45]"
       )}
     >
-      <ArrowLeftRight className="size-3" />
+      {/* Vertical: the value sits ABOVE the prior chip, so the swap arrow points at both. */}
+      <ArrowUpDown className="size-3" />
     </button>
   )
 }
@@ -121,14 +133,13 @@ type DisputeStripProps = {
   provenance: FieldProvenance | null
   flags: DisputeFlags
   onSwap: () => void
-  onApply: () => void
   /** false on a disabled input: Swap writes the value, which the reviewer could not type back (VR2-166) */
   canSwap: boolean
 }
 
 /**
  * The dispute row drawn on its own line under the value (VR2-162): the alternative-value
- * chip plus swap/apply — nothing overlays the value.
+ * chip plus the ⇅ swap. Apply (✓) lives beside the VALUE line — it accepts that value.
  */
 export function DisputeStrip({
   dispute,
@@ -136,7 +147,6 @@ export function DisputeStrip({
   provenance,
   flags,
   onSwap,
-  onApply,
   canSwap,
 }: DisputeStripProps) {
   const label = flags.swapped ? "Captured" : "Prior"
@@ -151,8 +161,7 @@ export function DisputeStrip({
         provenance={provenance}
         label={label}
       />
-      {canSwap && <SwapButton swapped={flags.swapped} onClick={onSwap} />}
-      <ApplyButton applied={flags.applied} onClick={onApply} />
+      <SwapButton swapped={flags.swapped} disabled={!canSwap} onClick={onSwap} />
     </div>
   )
 }

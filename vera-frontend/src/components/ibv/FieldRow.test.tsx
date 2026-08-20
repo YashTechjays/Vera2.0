@@ -51,9 +51,13 @@ describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
     expect(screen.getByText("Prior:")).toBeInTheDocument()
   })
 
-  it("hides Swap while the field is inapplicable — it writes a value the reviewer cannot undo", () => {
+  it("disables Swap while the field is inapplicable — it writes a value the reviewer cannot undo", () => {
     renderRow({})
     expect(screen.queryByTitle("Swap with prior value")).toBeNull()
+    // Visible but inert, with the reason in the tooltip (VR2-162: hidden read as broken).
+    expect(
+      screen.getByTitle("Swap is unavailable while this field is not applicable"),
+    ).toBeDisabled()
   })
 
   it("keeps the input itself disabled while the field is inapplicable", () => {

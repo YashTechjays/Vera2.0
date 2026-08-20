@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { DisputeStrip } from "./DisputeControls"
+import { ApplyButton, DisputeStrip } from "./DisputeControls"
 import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { invalidSeverity } from "@/lib/ibv/validation"
@@ -92,23 +92,34 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               "border-b border-ibv-input-border",
               capValue && "border-r",
               highlightClass ?? "bg-ibv-input-bg",
+              // One common style for the ENTIRE cell while editing — no white patch
+              // inside a tinted cell (VR2-162).
+              "focus-within:bg-white",
             ]
           )}
         >
-          <FieldRenderer
-            field={field}
-            path={path}
-            value={value}
-            onChange={(v) => setValue(path, v)}
-            disabled={!applicable}
-            placeholder={!applicable ? field.inapplicable_value : undefined}
-            title={disabledReason ?? invalidReason}
-            invalid={invalidSeverity(invalidReason, value)}
-            highlightClass={openDispute ? "bg-transparent" : highlightClass}
-            borderless={openDispute !== null}
-            noRightBorder={!capValue}
-            countrySelect={schema !== null && phonePaths(schema).has(path)}
-          />
+          {/* Apply (✓) sits beside the value it accepts; the strip below holds prior + swap. */}
+          <div className="flex min-w-0 items-center">
+            <FieldRenderer
+              field={field}
+              path={path}
+              value={value}
+              onChange={(v) => setValue(path, v)}
+              disabled={!applicable}
+              placeholder={!applicable ? field.inapplicable_value : undefined}
+              title={disabledReason ?? invalidReason}
+              invalid={invalidSeverity(invalidReason, value)}
+              highlightClass={openDispute ? "bg-transparent" : highlightClass}
+              borderless={openDispute !== null}
+              noRightBorder={!capValue}
+              countrySelect={schema !== null && phonePaths(schema).has(path)}
+            />
+            {openDispute && (
+              <span className="flex shrink-0 items-center px-1">
+                <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
+              </span>
+            )}
+          </div>
           {openDispute && (
             <DisputeStrip
               dispute={openDispute}
@@ -117,7 +128,6 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               flags={flags}
               canSwap={applicable}
               onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
             />
           )}
         </div>

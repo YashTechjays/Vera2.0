@@ -212,14 +212,13 @@ describe("DisputeStrip", () => {
         flags={defaultFlags()}
         canSwap
         onSwap={vi.fn()}
-        onApply={vi.fn()}
       />
     )
     expect(screen.getByRole("button", { name: /dispute details/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Prior: BCBS TX/ })).toBeInTheDocument()
   })
 
-  it("keeps swap and apply beside the chip on their own line", () => {
+  it("keeps swap beside the chip on its own line (apply lives on the value line)", () => {
     render(
       <DisputeStrip
         dispute={dispute()}
@@ -228,10 +227,9 @@ describe("DisputeStrip", () => {
         flags={defaultFlags()}
         canSwap
         onSwap={vi.fn()}
-        onApply={vi.fn()}
       />
     )
     expect(screen.getByTitle("Swap with prior value")).toBeInTheDocument()
-    expect(screen.getByTitle("Apply captured value")).toBeInTheDocument()
+    expect(screen.queryByTitle("Apply captured value")).toBeNull()
   })
 })
