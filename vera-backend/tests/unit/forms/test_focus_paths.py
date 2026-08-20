@@ -9,6 +9,7 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.review import (
     FieldStatus,
     _required_paths,
+    focus_paths,
     is_call_confirmed,
     is_field_satisfied,
     retryable_required_paths,
@@ -122,3 +123,76 @@ class TestDefaultedLeavesInTheAskSet:
             "sections.benefit_coverage.telehealth_covered",
             "sections.enrollment.enrollment_required",
         }
+
+
+class TestFocusPaths:
+    def test_an_authoritatively_confirmed_field_is_not_asked_again(self) -> None:
+        doc, raw = _ibv()
+        target = "sections.insurance_information.plan_type"
+        status = {target: FieldStatus("ai_call", True, 95, AUTH)}
+        paths = focus_paths(
+            doc, status, raw, floor=70, values={target: "PPO"}, authoritative_calls={AUTH}
+        )
+        assert target not in paths
+
+    def test_the_same_field_from_a_non_authoritative_call_IS_asked_again(self) -> None:
+        doc, raw = _ibv()
+        target = "sections.insurance_information.plan_type"
+        status = {target: FieldStatus("ai_call", True, 95, OTHER)}
+        paths = focus_paths(
+            doc, status, raw, floor=70, values={target: "PPO"}, authoritative_calls={AUTH}
+        )
+        assert target in paths
+
+    def test_an_intake_value_is_asked_because_no_call_confirmed_it(self) -> None:
+        doc, raw = _ibv()
+        target = "sections.insurance_information.group_name"
+        status = {target: FieldStatus("intake", None, None, None)}
+        paths = focus_paths(
+            doc, status, raw, floor=70, values={target: "Umbrella"}, authoritative_calls={AUTH}
+        )
+        assert target in paths
+
+    def test_call_scoped_paths_are_always_present(self) -> None:
+        """Even fully confirmed by an authoritative call: they describe THIS call (Plan A)."""
+        doc, raw = _ibv()
+        ref = doc.rep_call_reference_number_field
+        status = {p: FieldStatus("ai_call", True, 95, AUTH) for p in doc.collected_per_call_paths()}
+        paths = focus_paths(
+            doc,
+            status,
+            raw,
+            floor=70,
+            values=dict.fromkeys(status, "x"),
+            authoritative_calls={AUTH},
+        )
+        assert doc.collected_per_call_paths() <= set(paths)
+        assert ref in paths
+
+    def test_one_missing_group_member_pulls_in_its_whole_panel(self) -> None:
+        """`expand_to_groups`: a partial panel reads oddly on a call.
+
+        `copay` is itself gated on its group's `covered` field and the section's
+        `diagnostic_testing_covered` ref, so both must be on file for `copay` to be
+        applicable at all before its lone-gap status can pull in the panel."""
+        doc, raw = _ibv()
+        target = "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.copay"
+        status = {target: FieldStatus("ai_call", False, 38, AUTH)}
+        values = {
+            "sections.diagnostic_testing.diagnostic_testing_covered": "Yes",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": "Yes",
+            target: "$25",
+        }
+        paths = set(
+            focus_paths(doc, status, raw, floor=70, values=values, authoritative_calls={AUTH})
+        )
+        panel = "sections.diagnostic_testing.labs_xray_ultrasound."
+        assert len([p for p in paths if p.startswith(panel)]) == 32
+
+    def test_returns_document_order_without_duplicates(self) -> None:
+        doc, raw = _ibv()
+        paths = focus_paths(doc, {}, raw, floor=70, values={}, authoritative_calls=set())
+        assert len(paths) == len(set(paths))
+        order = doc.collection_paths()
+        ranked = [order.index(p) for p in paths if p in order]
+        assert ranked == sorted(ranked)

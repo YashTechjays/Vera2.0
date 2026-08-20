@@ -439,3 +439,67 @@ def expand_to_groups(doc: FormSchemaDoc, paths: Collection[str]) -> list[str]:
     ordered = [p for p in collectable if p in result]
     ordered.extend(p for p in paths if p not in collectable_set)
     return ordered
+
+
+def focus_paths(
+    doc: FormSchemaDoc,
+    status_by_path: Mapping[str, FieldStatus],
+    schema_json: Mapping[str, Any],
+    *,
+    floor: int,
+    values: Mapping[str, Any],
+    authoritative_calls: Collection[UUID],
+) -> list[str]:
+    """Every path a FOCUSED retry should put to the representative, in document order.
+
+    Three sources, unioned:
+
+    * required, applicable, askable leaves no AUTHORITATIVE call confirmed (`is_call_confirmed`) —
+      which covers never-collected, judge-rejected, intake-supplied-but-never-confirmed, and
+      collected-by-an-unverifiable-call alike;
+    * every collectable leaf of a group any of those falls inside (`expand_to_groups`) — a partly
+      re-asked panel reads oddly on a call;
+    * every `collected_per="call"` leaf, whatever is on file — the rep's name and the call reference
+      number describe THIS call, and keeping them is also what retains the greeting and wrap-up
+      tasks, since `focus_call_plan` drops a task with no kept fields.
+
+    Defaulted leaves are included: this is the ask set, and a `default` declares the value a field
+    takes when not collected, never that the question need not be asked (`owed_now`).
+
+    NOT the retry-worthiness decision — `retryable_required_paths` still answers that, and must
+    keep excluding call-scoped and defaulted leaves or a form whose only gaps are unaskable would
+    redial to no benefit (spec D3). Values are PHI; never log them.
+    """
+    applicable = _required_paths(schema_json, values, askable_only=True, include_defaulted=True)
+    alternatives = _alternatives(schema_json)
+    owed = [
+        path
+        for path in applicable
+        if not _confirmed(path, status_by_path, alternatives, authoritative_calls, floor=floor)
+    ]
+    wanted = set(expand_to_groups(doc, owed)) | doc.collected_per_call_paths()
+    ordered = [path for path in doc.collection_paths() if path in wanted]
+    ordered.extend(sorted(wanted.difference(ordered)))
+    return ordered
+
+
+def _confirmed(
+    path: str,
+    status_by_path: Mapping[str, FieldStatus],
+    alternatives: AlternativeIndex,
+    authoritative_calls: Collection[UUID],
+    *,
+    floor: int,
+) -> bool:
+    """Confirmed itself, or by a sibling in its either/or group — one answer satisfies the pair.
+    Mirrors `_satisfied`, swapping in the authoritative-call rule."""
+    if is_call_confirmed(
+        status_by_path.get(path), authoritative_calls=authoritative_calls, floor=floor
+    ):
+        return True
+    return any(
+        is_call_confirmed(
+            status_by_path.get(other), authoritative_calls=authoritative_calls, floor=floor
+        )
+        for other in alternatives.get(path, ())
+    )
