@@ -233,7 +233,11 @@ class FakeSession:
             # the first is modeled by `field_answers` — a test wanting real status/
             # authoritative-call data monkeypatches those functions directly instead
             # (see test_focused_retry_includes_conditional_fields_when_gate_is_answered).
-            if len(stmt.column_descriptions) == 2:
+            # Routed by column NAME, not count (matching the SchemaVersion routing above a
+            # few lines up) — a count match on a query that later grows a column would
+            # silently misroute it into the wrong shape instead of failing loudly.
+            names = [c["name"] for c in stmt.column_descriptions]
+            if names == ["field_path", "value"]:
                 form_id = _bound_value(stmt, "form_id")
                 return _Result(rows=self.field_answers.get(form_id, []))
             return _Result(rows=[])
@@ -1176,10 +1180,15 @@ class TestCallPlanStaging:
         _stub_credentials: dict[str, dict[str, Any] | None],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """With no task-position heuristic keeping these fields, this holds only because
-        their leaves are `collected_per="call"` — `patient_verification` (introduction) and
-        `insurance_representative` (wrap_up) — which `focus_paths` always keeps via
-        `doc.collected_per_call_paths()`."""
+        """Every IBV `collected_per="call"` leaf — not just the reference number — is
+        authoritatively confirmed here: `is_insurance_active` (introduction) and `rep_name` +
+        `call_reference_number` (wrap_up) all drop out of the required-and-unconfirmed set, so
+        the only thing keeping either task alive is `focus_paths` unioning in
+        `doc.collected_per_call_paths()`. Confirming only the reference number (as an earlier
+        version of this test did) leaves the other two leaves required-and-unconfirmed, which
+        pulls them into the focus set through the ordinary required-fields path regardless of
+        the union — making the assertion pass even with the union deleted. That was verified by
+        mutation (see task-5-report.md) and is why every per-call leaf is confirmed below."""
         tenant = _tenant()
         sv = _schema_version(IBV_SCHEMA_JSON)
         pv = _prompt_version(sv)
@@ -1190,18 +1199,25 @@ class TestCallPlanStaging:
         livekit = FakeLiveKit()
         plans = FakeCallPlanService()
 
+        is_insurance_active = "sections.patient_verification.is_insurance_active"
+        rep_name = "sections.insurance_representative.rep_name"
         ref = "sections.insurance_representative.call_reference_number"
         call_id = uuid7()
 
+        def _confirmed() -> FieldStatus:
+            return FieldStatus(
+                source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+            )
+
         async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
             return {
-                ref: FieldStatus(
-                    source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
-                )
+                is_insurance_active: _confirmed(),
+                rep_name: _confirmed(),
+                ref: _confirmed(),
             }
 
         async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
-            return {ref: "ABC-123"}
+            return {is_insurance_active: "Yes", rep_name: "Jane Rep", ref: "ABC-123"}
 
         async def _authoritative(
             _session: Any, _form_id: Any, *, reference_field: str

@@ -1,6 +1,6 @@
 """Pure-logic tests for the IBV review/dispute helpers (no DB)."""
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from vera_core.forms.dsl import FormSchemaDoc, load_document
 from vera_core.forms.review import (
@@ -283,19 +283,26 @@ class TestBuildFieldViews:
         assert [v["field_path"] for v in views] == ["a.y", "b.x"]
 
 
-def _status(source: str = "ai_call") -> FieldStatus:
-    return FieldStatus(source=source, ai_supported=True, ai_confidence=90)
+def _status(source: str = "ai_call", *, call_id: UUID | None = None) -> FieldStatus:
+    return FieldStatus(source=source, ai_supported=True, ai_confidence=90, call_id=call_id)
 
 
 class TestHasCallReference:
-    """The retry-scope gate: a captured call reference number → FOCUSED retry."""
+    """The retry-scope gate: a reference number captured BY A CALL → FOCUSED retry."""
 
-    def test_true_when_reference_answer_present(self) -> None:
+    def test_true_when_a_call_captured_the_reference(self) -> None:
         ref = _IBV_DOC.rep_call_reference_number_field
-        assert has_call_reference({ref: _status()}, _IBV_DOC) is True
+        assert has_call_reference({ref: _status(call_id=uuid4())}, _IBV_DOC) is True
 
     def test_false_when_reference_answer_absent(self) -> None:
         assert has_call_reference({}, _IBV_DOC) is False
+
+    def test_false_when_a_human_typed_the_reference_without_a_call(self) -> None:
+        """An operator can type a reference number into the form for a form that was never
+        dialed (`source=human`, no `call_id`) — that must not open the focused (required-only)
+        set on what would otherwise be its first call (spec D8)."""
+        ref = _IBV_DOC.rep_call_reference_number_field
+        assert has_call_reference({ref: _status(source="human")}, _IBV_DOC) is False
 
 
 class TestExpandToGroups:
