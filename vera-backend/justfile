@@ -147,6 +147,16 @@ mfa-qr uri:
 
 # Verify a real call's cost actually landed in Langfuse: price entries present,
 # every generation priced, usage reconciling, control-plane spans in the call's
-# trace. Exits non-zero on a problem, so it works as a gate. Optional trace id.
-langfuse-verify *trace_id:
+# trace. Exits non-zero on a problem, so it works as a gate. Optional trace id
+# (a Langfuse trace id or the CALL id, which is what a human has to hand).
+#
+# Reads whatever VERA_LANGFUSE_* resolves to; pass the same per-environment file the
+# seeder takes to check ANOTHER environment instead — the pair is only useful together,
+# since a price entry seeded there is exactly what this proves is being applied:
+#
+#     just langfuse-verify <trace-or-call-id> langfuse-test.env
+langfuse-verify trace_id="" env_file="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{env_file}}" ]; then set -a; . "{{env_file}}"; set +a; fi
     uv run python -m scripts.verify_langfuse_traces {{trace_id}}
