@@ -18,8 +18,8 @@ import {
 import { modeBadgeClass } from "@/lib/patient-forms/display"
 import type { FieldProvenance } from "@/lib/patient-forms/types"
 
-/** ✓ apply (teal) → ↶ unapply (green) for a disputed field. */
-export function ApplyButton({
+/** ✓ apply → ↶ unapply for a disputed field. */
+function ApplyButton({
   applied,
   onClick,
 }: {
@@ -32,7 +32,7 @@ export function ApplyButton({
       onClick={onClick}
       title={applied ? "Unapply" : "Apply captured value"}
       className={cn(
-        "inline-flex size-5 shrink-0 items-center justify-center rounded-full text-white transition-colors",
+        "inline-flex size-[18px] shrink-0 items-center justify-center rounded text-white transition-colors",
         applied ? "bg-[#34B2B2] hover:bg-[#2c9a9a]" : "bg-[#003e64] hover:bg-[#002a45]"
       )}
     >
@@ -44,7 +44,7 @@ export function ApplyButton({
 /** ⇄ swap the input value with the prior value. Drawn disabled (never hidden) on an
  *  inapplicable field — swap would write a value the reviewer could not type back
  *  (VR2-166), but an invisible control reads as broken (VR2-162). */
-export function SwapButton({
+function SwapButton({
   swapped,
   disabled,
   onClick,
@@ -80,7 +80,7 @@ export function SwapButton({
 const BADGE_VALUE_MAX_CHARS = 24
 
 /** A small badge showing the alternative (prior/captured) value, with a tooltip. */
-export function DisputeBadge({
+function DisputeBadge({
   value,
   dispute,
   confidence,
@@ -133,13 +133,14 @@ type DisputeStripProps = {
   provenance: FieldProvenance | null
   flags: DisputeFlags
   onSwap: () => void
+  onApply: () => void
   /** false on a disabled input: Swap writes the value, which the reviewer could not type back (VR2-166) */
   canSwap: boolean
 }
 
 /**
  * The dispute row drawn on its own line under the value (VR2-162): the alternative-value
- * chip plus the ⇅ swap. Apply (✓) lives beside the VALUE line — it accepts that value.
+ * chip, the ⇅ swap, then the ✓ apply — in reviewer order: swap first, then accept.
  */
 export function DisputeStrip({
   dispute,
@@ -147,12 +148,14 @@ export function DisputeStrip({
   provenance,
   flags,
   onSwap,
+  onApply,
   canSwap,
 }: DisputeStripProps) {
   const label = flags.swapped ? "Captured" : "Prior"
   return (
     // flex-wrap: in the narrowest matrix cells (copay/coinsurance) the buttons drop to
-    // a second line instead of being crushed out of view.
+    // a second line instead of being crushed out of view. The swap+apply pair is one
+    // non-wrapping unit, so the two buttons never end up on different lines.
     <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-[3px] pb-1 pt-0.5">
       <DisputeBadge
         value={badgeValue(dispute, flags)}
@@ -161,7 +164,10 @@ export function DisputeStrip({
         provenance={provenance}
         label={label}
       />
-      <SwapButton swapped={flags.swapped} disabled={!canSwap} onClick={onSwap} />
+      <span className="flex shrink-0 items-center gap-1.5">
+        <SwapButton swapped={flags.swapped} disabled={!canSwap} onClick={onSwap} />
+        <ApplyButton applied={flags.applied} onClick={onApply} />
+      </span>
     </div>
   )
 }

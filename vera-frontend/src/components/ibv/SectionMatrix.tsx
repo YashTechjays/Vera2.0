@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { ApplyButton, DisputeStrip } from "./DisputeControls"
+import { DisputeStrip } from "./DisputeControls"
 import {
   confidenceHighlightClass,
   fieldConfidenceLevel,
@@ -81,12 +81,11 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
     >
       <div
         className={cn(
-          "flex flex-col justify-center",
+          "flex flex-col",
           isTextarea ? "min-h-[44px]" : "min-h-[24px]"
         )}
       >
-        {/* Apply (✓) sits beside the value it accepts; the strip below holds prior + swap. */}
-        <div className="flex min-w-0 items-center">
+        <div className="flex min-w-0 flex-1 items-stretch">
           <FieldRenderer
             field={field}
             path={path}
@@ -99,11 +98,6 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
             highlightClass="bg-transparent"
             borderless
           />
-          {openDispute && (
-            <span className="flex shrink-0 items-center px-1">
-              <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
-            </span>
-          )}
         </div>
         {openDispute && (
           <DisputeStrip
@@ -113,6 +107,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
             flags={flags}
             canSwap={applicable}
             onSwap={() => swapDispute(path)}
+            onApply={() => applyDispute(path)}
           />
         )}
       </div>

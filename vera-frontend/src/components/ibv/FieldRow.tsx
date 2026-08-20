@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { ApplyButton, DisputeStrip } from "./DisputeControls"
+import { DisputeStrip } from "./DisputeControls"
 import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { invalidSeverity } from "@/lib/ibv/validation"
@@ -84,7 +84,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
       <div className="flex min-w-0 flex-1 items-stretch">
         <div
           className={cn(
-            "flex min-w-0 flex-col justify-center",
+            "flex min-w-0 flex-col",
             capValue ? "w-[420px] shrink-0" : "flex-1",
             // Stacked (disputed) cells carry the cell chrome themselves so the value
             // line and the dispute strip below it read as ONE cell.
@@ -98,8 +98,9 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
             ]
           )}
         >
-          {/* Apply (✓) sits beside the value it accepts; the strip below holds prior + swap. */}
-          <div className="flex min-w-0 items-center">
+          {/* flex-1 + items-stretch: the input fills the row even when the label cell is
+              taller, so no sliver of the white section bg shows around it (VR2-162). */}
+          <div className="flex min-w-0 flex-1 items-stretch">
             <FieldRenderer
               field={field}
               path={path}
@@ -114,11 +115,6 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               noRightBorder={!capValue}
               countrySelect={schema !== null && phonePaths(schema).has(path)}
             />
-            {openDispute && (
-              <span className="flex shrink-0 items-center px-1">
-                <ApplyButton applied={flags.applied} onClick={() => applyDispute(path)} />
-              </span>
-            )}
           </div>
           {openDispute && (
             <DisputeStrip
@@ -128,6 +124,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               flags={flags}
               canSwap={applicable}
               onSwap={() => swapDispute(path)}
+              onApply={() => applyDispute(path)}
             />
           )}
         </div>

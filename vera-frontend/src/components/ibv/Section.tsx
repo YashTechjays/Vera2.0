@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, ChevronDown } from "lucide-react"
+import { CheckCheck, ChevronDown } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -138,17 +138,19 @@ export function Section({
         {pendingPaths.length > 0 && (
           <Tooltip>
             <TooltipTrigger asChild>
+              {/* Verb-first label + double-check: a bare ✓+count read as "N values
+                  are correct" instead of an action (VR2-162). */}
               <button
                 type="button"
                 onClick={() => resolveOpenDisputes(pendingPaths)}
-                aria-label={`Resolve ${pendingLabel} in ${section.title}`}
-                className="absolute right-8 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-full bg-[#003e64] px-1.5 py-0.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#002a45]"
+                aria-label={`Apply all ${pendingLabel} in ${section.title}`}
+                className="absolute right-8 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full bg-[#003e64] px-2 py-0.5 text-[11px] font-semibold text-white transition-colors hover:bg-[#002a45]"
               >
-                <Check className="size-3" />
-                {pendingPaths.length}
+                <CheckCheck className="size-3" />
+                Apply all · {pendingPaths.length}
               </button>
             </TooltipTrigger>
-            <TooltipContent>Resolve {pendingLabel} in this section</TooltipContent>
+            <TooltipContent>Apply all {pendingLabel} in this section</TooltipContent>
           </Tooltip>
         )}
       </div>

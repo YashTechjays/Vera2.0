@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 
 import { DisputeStrip, DisputeTooltipBody } from "./DisputeControls"
 import { defaultFlags, resolveConfidence, type Dispute } from "@/lib/ibv/disputes"
@@ -212,13 +212,15 @@ describe("DisputeStrip", () => {
         flags={defaultFlags()}
         canSwap
         onSwap={vi.fn()}
+        onApply={vi.fn()}
       />
     )
     expect(screen.getByRole("button", { name: /dispute details/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Prior: BCBS TX/ })).toBeInTheDocument()
   })
 
-  it("keeps swap beside the chip on its own line (apply lives on the value line)", () => {
+  it("orders the controls chip → swap → apply (reviewers swap first, then accept)", () => {
+    const onApply = vi.fn()
     render(
       <DisputeStrip
         dispute={dispute()}
@@ -227,9 +229,13 @@ describe("DisputeStrip", () => {
         flags={defaultFlags()}
         canSwap
         onSwap={vi.fn()}
+        onApply={onApply}
       />
     )
-    expect(screen.getByTitle("Swap with prior value")).toBeInTheDocument()
-    expect(screen.queryByTitle("Apply captured value")).toBeNull()
+    const swap = screen.getByTitle("Swap with prior value")
+    const apply = screen.getByTitle("Apply captured value")
+    expect(swap.compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(apply)
+    expect(onApply).toHaveBeenCalledOnce()
   })
 })
