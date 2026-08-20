@@ -1,6 +1,6 @@
 """`is_call_confirmed` — did an AUTHORITATIVE call collect this, judge-supported?"""
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from vera_core.forms.review import FieldStatus, is_call_confirmed, is_field_satisfied
 
@@ -8,7 +8,13 @@ AUTH, OTHER = uuid4(), uuid4()
 CALLS = frozenset({AUTH})
 
 
-def _status(source: str, *, supported=True, confidence=95, call_id=AUTH) -> FieldStatus:
+def _status(
+    source: str,
+    *,
+    supported: bool | None = True,
+    confidence: int = 95,
+    call_id: UUID = AUTH,
+) -> FieldStatus:
     return FieldStatus(
         source=source, ai_supported=supported, ai_confidence=confidence, call_id=call_id
     )
