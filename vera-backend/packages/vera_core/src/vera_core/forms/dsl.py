@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from datetime import date
 from typing import Annotated, Literal
 
@@ -355,8 +355,6 @@ class Group(_Model):
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
     description: str | None = None
-    # BEFORE `fields`, so the compiled artifact reads with the marker next to `title`/`description`
-    # rather than stranded after the block it governs.
     collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
@@ -405,8 +403,8 @@ class Section(_Model):
     ask_groups: list[AskGroup] | None = None
     alternatives: list[Alternatives] | None = None
     ui: Ui | None = None
-    # BEFORE `fields`, so the compiled artifact reads with the marker next to `title`/`description`
-    # rather than stranded after a 73-leaf block.
+    # Before `fields` so the compiled artifact reads with the marker beside `title`, not
+    # stranded after a 73-leaf block — declaration order is the artifact's key order.
     collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
@@ -575,29 +573,25 @@ class FormSchemaDoc(_Model):
         prefills) and every other role is never spoken, so a section marker on a mixed section
         reaches its ask leaves and leaves the rest alone.
         """
-        nodes = dict(self._iter_fields())
+
+        def walk(
+            prefix: str, fields: dict[str, FormField], inherited: CollectedPer
+        ) -> Iterator[str]:
+            for key, field in fields.items():
+                path = f"{prefix}.{key}"
+                effective = field.collected_per or inherited
+                if isinstance(field, Group):
+                    yield from walk(path, field.fields, effective)
+                elif field.role == "ask" and effective == "call":
+                    yield path
+
         return frozenset(
             path
-            for path, leaf in self.leaf_items()
-            if leaf.role == "ask" and self._effective_collected_per(path, leaf, nodes) == "call"
+            for section_key, section in self.sections.items()
+            for path in walk(
+                f"{PATH_PREFIX}{section_key}", section.fields, section.collected_per or "form"
+            )
         )
-
-    def _effective_collected_per(
-        self, path: str, leaf: Leaf, nodes: Mapping[str, FormField]
-    ) -> CollectedPer:
-        """`leaf`'s marker resolved outward through its groups and section."""
-        if leaf.collected_per is not None:
-            return leaf.collected_per
-        parts = path.split(".")
-        # Enclosing groups, nearest first. parts[0:2] is `sections.<key>`, so stop above it.
-        for cut in range(len(parts) - 1, 2, -1):
-            parent = nodes.get(".".join(parts[:cut]))
-            if isinstance(parent, Group) and parent.collected_per is not None:
-                return parent.collected_per
-        section = self.sections.get(parts[1])
-        if section is not None and section.collected_per is not None:
-            return section.collected_per
-        return "form"
 
     # -- cross-document validation -------------------------------------------------
 
