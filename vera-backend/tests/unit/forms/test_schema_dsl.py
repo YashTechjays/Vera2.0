@@ -12,6 +12,7 @@ from vera_core.forms.catalog.disease_only import build_disease_only
 from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
+    COLLECTED_ROLES,
     FieldPrompt,
     FormSchemaDoc,
     Leaf,
@@ -936,3 +937,80 @@ class TestCollectedPer:
         sections["basics"]["fields"]["policy_number"]["collected_per"] = "call"
         with pytest.raises(ValidationError, match='requires role="ask"'):
             FormSchemaDoc.model_validate(minimal_doc(sections=sections))
+
+
+def test_every_catalog_marks_its_reference_number_leaf() -> None:
+    """A retry that never logs its OWN reference number breaks the next retry's focus gate
+    (`has_call_reference`), and the wrap-up task survives a focused retry only because it holds
+    a call-scoped leaf. Nothing else in the system can infer that from the document.
+
+    Enforced here rather than in a `FormSchemaDoc` validator: that runs on every dispatch
+    against the PINNED schema version, and rows published before this marker existed have no
+    declaration to find.
+    """
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        assert doc.rep_call_reference_number_field in doc.collected_per_call_paths(), (
+            f"{doc.insurance_type}: rep_call_reference_number_field is not collected_per=call"
+        )
+
+
+def test_every_catalog_marks_the_rep_name_beside_it() -> None:
+    """The rep's name is as per-call as the reference number: a retry that keeps the prior rep's
+    name attributes this call's answers to someone who was never on it."""
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        section = doc.rep_call_reference_number_field.rsplit(".", 1)[0]
+        call_scoped = doc.collected_per_call_paths()
+        rep_names = [
+            path
+            for path, _leaf in doc.leaf_items()
+            if path.startswith(f"{section}.") and path.endswith(".rep_name")
+        ]
+        assert rep_names, f"{doc.insurance_type}: no rep_name leaf beside the reference number"
+        for path in rep_names:
+            assert path in call_scoped, f"{path} is not collected_per=call"
+
+
+def _always_run_task_keys(doc: FormSchemaDoc) -> list[str]:
+    """Tasks a focused retry must keep, derived per spec D2: it has a `collected_per="call"`
+    descendant, or it collects nothing at all."""
+    call_scoped = doc.collected_per_call_paths()
+    keys: list[str] = []
+    for task in doc.tasks:
+        collects = [
+            path
+            for path, leaf in doc.leaf_items()
+            if path.split(".")[1] in task.sections and leaf.role in COLLECTED_ROLES
+        ]
+        if not collects or call_scoped.intersection(collects):
+            keys.append(task.task_key)
+    return keys
+
+
+def test_a_task_carrying_the_calls_opening_is_always_retained() -> None:
+    """`opening_line` speaks the FIRST-ENTERED task's `intro`, so a schema that puts its greeting
+    and recording/identity disclosure there loses both entirely if a focused retry drops that task.
+    The task survives only because it happens to hold a call-scoped leaf — nothing in the code
+    connects those two facts, so pin it here.
+
+    Vacuous for a schema whose opening task has no `intro` (`disease_only` starts straight into
+    questions): nothing rides on it, and dropping it when it owes nothing is correct.
+    """
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        if doc.tasks[0].intro is None:
+            continue
+        assert doc.tasks[0].task_key in _always_run_task_keys(doc), (
+            f"{doc.insurance_type}: the opening task carries an intro but is not retained by a "
+            "focused retry — its greeting and recording disclosure would be dropped"
+        )
+
+
+def test_the_closing_task_is_always_retained() -> None:
+    """`_closing_task_index` is `len(plan.tasks) - 1` and the gap pass stops before it, so the
+    closer is where the reference number and the goodbye happen. Dropping it would break the NEXT
+    retry's focus gate as well as this call's sign-off."""
+    for build in (build_ibv_standard, build_disease_only):
+        doc = build()
+        assert doc.tasks[-1].task_key in _always_run_task_keys(doc), doc.insurance_type
