@@ -85,12 +85,14 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
         <div
           className={cn(
             "flex min-w-0 flex-col",
-            capValue ? "w-[420px] shrink-0" : "flex-1",
+            // A disputed capped row keeps the CONTROL at 420px (below) but lets the
+            // tinted cell span the full row — a capped tint next to the filler read
+            // as a half-filled cell (VR2-162).
+            capValue && !openDispute ? "w-[420px] shrink-0" : "flex-1",
             // Stacked (disputed) cells carry the cell chrome themselves so the value
             // line and the dispute strip below it read as ONE cell.
             openDispute && [
               "border-b border-ibv-input-border",
-              capValue && "border-r",
               highlightClass ?? "bg-ibv-input-bg",
               // One common style for the ENTIRE cell while editing — no white patch
               // inside a tinted cell (VR2-162).
@@ -100,7 +102,12 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
         >
           {/* flex-1 + items-stretch: the input fills the row even when the label cell is
               taller, so no sliver of the white section bg shows around it (VR2-162). */}
-          <div className="flex min-w-0 flex-1 items-stretch">
+          <div
+            className={cn(
+              "flex min-w-0 flex-1 items-stretch",
+              capValue && "w-[420px] shrink-0"
+            )}
+          >
             <FieldRenderer
               field={field}
               path={path}
@@ -128,7 +135,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
             />
           )}
         </div>
-        {capValue && (
+        {capValue && !openDispute && (
           <div className="flex-1 border-b border-ibv-input-border bg-ibv-label-bg/40" />
         )}
       </div>
