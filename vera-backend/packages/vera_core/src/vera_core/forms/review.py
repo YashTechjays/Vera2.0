@@ -224,12 +224,16 @@ def build_field_views(
 
 @dataclass(frozen=True)
 class FieldStatus:
-    """Immutable snapshot of a filled field's satisfaction state: source and AI
-    confidence. An unfilled field has no status at all (absent from the map)."""
+    """Immutable snapshot of a filled field's satisfaction state: source, AI confidence, and the
+    call that produced it. An unfilled field has no status at all (absent from the map).
+
+    `call_id` is NULL for intake/human answers. It is what lets `is_call_confirmed` ask whether an
+    AUTHORITATIVE call produced this value — see spec D8."""
 
     source: str | None
     ai_supported: bool | None
     ai_confidence: int | None
+    call_id: UUID | None = None
 
 
 def is_field_satisfied(status: FieldStatus | None, *, floor: int) -> bool:

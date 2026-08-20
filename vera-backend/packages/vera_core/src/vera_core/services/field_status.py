@@ -32,10 +32,10 @@ def latest_eval_subquery() -> Any:
 async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, FieldStatus]:
     """Return one FieldStatus per current field answer for *form_id*.
 
-    Selects only field_path, source, confidences, and the latest eval's supported
-    flag — no value or evidence columns, so this query is PHI-free. An answer with
-    no evaluation yields ai_supported=None; ai_confidence is the judge's score
-    when an evaluation exists (the satisfaction gate's input), else the extractor's.
+    Selects only field_path, source, confidences, the latest eval's supported flag, and the
+    originating call id — no value or evidence columns, so this query is PHI-free. An answer with
+    no evaluation yields ai_supported=None; ai_confidence is the judge's score when an evaluation
+    exists (the satisfaction gate's input), else the extractor's.
 
     The latest evaluation per answer is resolved in-DB via latest_eval_subquery().
     """
@@ -46,6 +46,7 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
                 FieldAnswer.field_path,
                 FieldAnswer.source,
                 FieldAnswer.confidence,
+                FieldAnswer.call_id,
                 FieldEvaluation.supported,
                 FieldEvaluation.confidence.label("eval_confidence"),
             )
@@ -70,6 +71,31 @@ async def load_field_status(session: AsyncSession, form_id: UUID) -> dict[str, F
             source=source,
             ai_supported=supported,
             ai_confidence=eval_confidence if eval_confidence is not None else confidence,
+            call_id=call_id,
         )
-        for path, source, confidence, supported, eval_confidence in rows
+        for path, source, confidence, call_id, supported, eval_confidence in rows
     }
+
+
+async def load_authoritative_call_ids(
+    session: AsyncSession, form_id: UUID, *, reference_field: str
+) -> frozenset[UUID]:
+    """The form's calls that captured a rep call reference number — ids only, so PHI-free.
+
+    A call without one is not authoritative: nothing ties the conversation to a payer-side record,
+    so the answers it collected carry no proof and a retry still owes those fields (spec D8).
+
+    Deliberately NOT filtered on `is_current`: attempt 2's reference supersedes attempt 1's, but
+    attempt 1 was still authoritative — filtering would demote it and re-ask what it collected.
+
+    `Call.call_reference_no` is not consulted: nothing in the pipeline writes that column, which is
+    why `has_call_reference` reads `field_answer` too.
+    """
+    rows = await session.execute(
+        select(FieldAnswer.call_id).where(
+            FieldAnswer.form_id == form_id,
+            FieldAnswer.field_path == reference_field,
+            FieldAnswer.call_id.is_not(None),
+        )
+    )
+    return frozenset(call_id for call_id in rows.scalars() if call_id is not None)
