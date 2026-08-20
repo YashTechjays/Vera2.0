@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { render, screen } from "@testing-library/react"
 
-import { DisputeTooltipBody, InlineDisputeControls } from "./DisputeControls"
+import { DisputeStrip, DisputeTooltipBody } from "./DisputeControls"
 import { defaultFlags, resolveConfidence, type Dispute } from "@/lib/ibv/disputes"
 import { modeBadgeClass } from "@/lib/patient-forms/display"
 
@@ -198,19 +198,18 @@ describe("attempt attribution in the tooltip", () => {
   })
 })
 
-describe("InlineDisputeControls", () => {
+describe("DisputeStrip", () => {
   it("exposes the chip as a button whose name carries the value", () => {
     // Two guards on one element. The chip must be a <button>: it is the only keyboard
     // path to the tooltip now that the label-cell (i) is gone, and a <span> trigger
     // would silently make the evidence mouse-only. And its aria-label REPLACES that
     // text, so the value has to be in the label or a screen reader never hears it.
     render(
-      <InlineDisputeControls
+      <DisputeStrip
         dispute={dispute()}
         confidence={resolveConfidence(90, null)}
         provenance={null}
         flags={defaultFlags()}
-        className=""
         canSwap
         onSwap={vi.fn()}
         onApply={vi.fn()}
@@ -218,5 +217,21 @@ describe("InlineDisputeControls", () => {
     )
     expect(screen.getByRole("button", { name: /dispute details/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Prior: BCBS TX/ })).toBeInTheDocument()
+  })
+
+  it("keeps swap and apply beside the chip on their own line", () => {
+    render(
+      <DisputeStrip
+        dispute={dispute()}
+        confidence={resolveConfidence(90, null)}
+        provenance={null}
+        flags={defaultFlags()}
+        canSwap
+        onSwap={vi.fn()}
+        onApply={vi.fn()}
+      />
+    )
+    expect(screen.getByTitle("Swap with prior value")).toBeInTheDocument()
+    expect(screen.getByTitle("Apply captured value")).toBeInTheDocument()
   })
 })

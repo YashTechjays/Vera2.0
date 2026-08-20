@@ -1,93 +1,36 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { InlineDisputeControls } from "./DisputeControls"
+import { DisputeStrip } from "./DisputeControls"
 import {
   confidenceHighlightClass,
   fieldConfidenceLevel,
   type Dispute,
   type DisputeFlags,
-  type DisputeMap,
 } from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
+import { invalidSeverity } from "@/lib/ibv/validation"
 import type { SectionTable, TableCell } from "@/lib/ibv/schema"
-import type { LeafField } from "@/lib/ibv/types"
 
 const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold"
 
-// ICD-10 / CPT cells are static text (never disputed), so they keep one width in
-// both flavours instead of widening with the dispute chips. min-w (not w): a plain
-// width gets squeezed once the disputed columns' min-widths overflow the container.
+// ICD-10 / CPT cells are static text. min-w (not w): a plain width gets squeezed
+// once the value columns' min-widths overflow the container.
 const ICD_WIDTH = "min-w-[90px]"
 const CPT_WIDTH = "min-w-[110px]"
+const VALUE_WIDTH = "min-w-[100px]"
 
-/** Short values (Yes/No, money, percent, count) read fine as a bare blue chip, so
- *  their cells reserve less room than a labeled "Prior:" chip needs. */
-function usesBareBadge(field: LeafField): boolean {
-  return ["enum", "currency", "percent", "integer"].includes(field.type)
+/** The dispute a cell still draws UI for — gate-failed cells included: the backend
+ *  still counts their disputes against completion (VR2-166). */
+function unresolvedDispute(
+  dispute: Dispute | undefined,
+  flags: DisputeFlags
+): Dispute | null {
+  return dispute !== undefined && !flags.applied ? dispute : null
 }
 
-/** Height of the strip a disputed textarea keeps clear above its text. */
-const TEXTAREA_STRIP = "28px"
-
-/** Room reserved inside the input so the dispute cluster never covers the value. */
-function disputeGutter(field: LeafField): string {
-  return usesBareBadge(field) ? "95px" : "150px"
-}
-
-/** Bare-chip columns stay narrow; a labeled chip needs the wider value column. */
-function isBareBadgeColumn(table: SectionTable, key: string): boolean {
-  return table.groups.some((g) =>
-    g.rows.some((r) => {
-      const field = r.cells[key]?.field
-      return field !== undefined && usesBareBadge(field)
-    })
-  )
-}
-
-// Two width flavours. The wide one only exists to fit the inline Prior chip, which
-// renders solely on disputed cells — applying it always would make every form scroll
-// sideways to reserve room for chips it never draws, so it is gated on dispute presence.
-const COMPACT_WIDTHS = {
-  value: "min-w-[100px]",
-  bareValue: "min-w-[100px]",
-  extra: "",
-} as const
-const WIDE_WIDTHS = {
-  value: "min-w-[210px]",
-  bareValue: "min-w-[150px]",
-  extra: "min-w-[210px]",
-} as const
-
-/** A field draws its dispute UI while the dispute is unresolved — gate-failed cells
- *  included: the backend still counts their disputes against completion (VR2-166). */
-function showsDispute(dispute: Dispute | undefined, flags: DisputeFlags): boolean {
-  return dispute !== undefined && !flags.applied
-}
-
-/** What hasDispute reads out of the IBV context. */
-type MatrixDisputeContext = {
-  disputes: DisputeMap
-  flagsFor: (path: string) => DisputeFlags
-}
-
-/** Does any cell in this table still draw dispute UI, so the table narrows back as
- *  disputes get resolved? */
-// eslint-disable-next-line react-refresh/only-export-components -- pure predicate, unit-tested
-export function hasDispute(
-  table: SectionTable,
-  { disputes, flagsFor }: MatrixDisputeContext
-): boolean {
-  const disputed = (cell?: TableCell) =>
-    cell !== undefined && showsDispute(disputes[cell.path], flagsFor(cell.path))
-  return table.groups.some(
-    (g) =>
-      Object.values(g.extras).some(disputed) ||
-      g.rows.some((r) => Object.values(r.cells).some(disputed))
-  )
-}
-
-/** One editable matrix cell with inline dispute UI and applicability graying. */
+/** One editable matrix cell; a disputed cell grows a second line for the dispute
+ *  strip instead of overlaying the value (VR2-162). */
 function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const {
     schema,
@@ -117,22 +60,25 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
-  const showDispute = showsDispute(dispute, flags)
-  const highlightClass = showDispute
+  const openDispute = unresolvedDispute(dispute, flags)
+  const highlightClass = openDispute
     ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
   const isTextarea = field.ui?.widget === "textarea"
 
   return (
-    // The control fills the cell from out of flow, so the spacer carries the row height:
-    // the h-px td + h-full child fill trick renders 0-height in Firefox (VR2-115).
     <td
-      className="relative border border-ibv-input-border p-0"
+      className="border border-ibv-input-border p-0 align-middle"
       rowSpan={rowSpan}
       data-field-path={path}
     >
-      <div className={isTextarea ? "min-h-[44px]" : "min-h-[24px]"} />
-      <div className="absolute inset-0">
+      <div
+        className={cn(
+          "flex flex-col justify-center",
+          isTextarea ? "min-h-[44px]" : "min-h-[24px]",
+          openDispute && (highlightClass ?? "bg-ibv-input-bg")
+        )}
+      >
         <FieldRenderer
           field={field}
           path={path}
@@ -141,22 +87,16 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
           disabled={!applicable}
           placeholder={!applicable ? field.inapplicable_value : undefined}
           title={disabledReason ?? invalidReason}
-          invalid={!!invalidReason}
-          highlightClass={highlightClass}
-          // a right gutter would indent EVERY line of a textarea, so long-text cells
-          // reserve a strip above the text and put the controls there instead
-          inputPaddingRight={showDispute && !isTextarea ? disputeGutter(field) : undefined}
-          inputPaddingTop={showDispute && isTextarea ? TEXTAREA_STRIP : undefined}
+          invalid={invalidSeverity(invalidReason, value)}
+          highlightClass={openDispute ? "bg-transparent" : highlightClass}
           borderless
         />
-        {showDispute && (
-          <InlineDisputeControls
-            dispute={dispute!}
+        {openDispute && (
+          <DisputeStrip
+            dispute={openDispute}
             confidence={confidence}
             provenance={provenance}
             flags={flags}
-            className={isTextarea ? "top-1 right-1" : "top-1/2 right-1 -translate-y-1/2"}
-            bareBadge={usesBareBadge(field)}
             canSwap={applicable}
             onSwap={() => swapDispute(path)}
             onApply={() => applyDispute(path)}
@@ -174,10 +114,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
  * per-group rowspan cells.
  */
 export function SectionMatrix({ table }: { table: SectionTable }) {
-  const { schema, values, disputes, flagsFor } = useIbv()
-  // Wide columns keep value + controls + chip on one row (the wrapper scrolls);
-  // an undisputed table keeps its natural width.
-  const w = hasDispute(table, { disputes, flagsFor }) ? WIDE_WIDTHS : COMPACT_WIDTHS
+  const { schema, values } = useIbv()
   return (
     <div className="overflow-x-auto">
       <table className="w-full border-collapse font-ibv text-[13.3px] text-black">
@@ -187,15 +124,12 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
             {table.hasIcd && <th className={cn(ICD_WIDTH, TH)}>ICD-10</th>}
             <th className={cn(CPT_WIDTH, TH)}>CPT Code</th>
             {table.columns.map((c) => (
-              <th
-                key={c.key}
-                className={cn(isBareBadgeColumn(table, c.key) ? w.bareValue : w.value, TH)}
-              >
+              <th key={c.key} className={cn(VALUE_WIDTH, TH)}>
                 {c.title}
               </th>
             ))}
             {table.extraColumns.map((c) => (
-              <th key={c.key} className={cn(w.extra, TH)}>
+              <th key={c.key} className={TH}>
                 {c.title}
               </th>
             ))}
@@ -215,7 +149,7 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                   <td
                     title={groupDisabledReason ?? undefined}
                     className={cn(
-                      "w-[170px] border border-ibv-input-border bg-white px-2 py-0.5 align-top font-semibold text-ibv-label-border",
+                      "w-[170px] border border-ibv-input-border bg-white px-2 py-0.5 align-middle font-semibold text-ibv-label-border",
                       !groupApplicable && "opacity-60"
                     )}
                     rowSpan={group.rows.length}
@@ -226,7 +160,7 @@ export function SectionMatrix({ table }: { table: SectionTable }) {
                 {table.hasIcd && rowIdx === 0 && (
                   <td
                     className={cn(
-                      "border border-ibv-input-border bg-white px-2 py-0.5 align-top text-ibv-label-border",
+                      "border border-ibv-input-border bg-white px-2 py-0.5 align-middle text-ibv-label-border",
                       ICD_WIDTH,
                       "break-words"
                     )}

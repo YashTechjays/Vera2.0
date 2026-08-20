@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { optionsOf, suggestionsOf } from "@/lib/ibv/schema"
 import { PhoneCell } from "./PhoneCell"
+import type { InvalidSeverity } from "@/lib/ibv/validation"
 import type { LeafField } from "@/lib/ibv/types"
 
 type Props = {
@@ -17,13 +18,10 @@ type Props = {
   /** hover tooltip explaining why — the applicability reason when disabled, or the
    *  validation message when invalid (required/pattern/range/date_format) */
   title?: string
-  /** current value fails client-side validation (pattern/range/required) */
-  invalid?: boolean
+  /** "error": the typed value fails validation (red). "missing": required but
+   *  still empty — a calmer amber, so untouched fields don't scream (VR2-162). */
+  invalid?: InvalidSeverity
   highlightClass?: string
-  /** extra right padding so inline dispute controls don't overlap the text */
-  inputPaddingRight?: string
-  /** extra top padding — the strip a textarea keeps clear for dispute controls */
-  inputPaddingTop?: string
   /** drop the cell's right border (the section frame supplies that edge, so it
    *  would otherwise be a doubled line) — used by the single-column field rows */
   noRightBorder?: boolean
@@ -44,6 +42,8 @@ const CELL_LOOK_NO_R = "border-b border-ibv-input-border bg-ibv-input-bg"
 const CELL_LOOK_NONE = "bg-ibv-input-bg"
 const DISABLED_LOOK = "cursor-not-allowed opacity-60"
 export const INVALID_LOOK = "shadow-[inset_0_0_0_2px_rgba(239,68,68,0.45)]"
+/** Required-but-empty: amber edge + tint — quieter than the red error ring. */
+export const MISSING_LOOK = "bg-[#fdf3e0] shadow-[inset_3px_0_0_0_#d97706]"
 
 /** Base cell look when no dispute highlight overrides it. */
 function baseLook(borderless?: boolean, noRightBorder?: boolean): string {
@@ -99,8 +99,6 @@ export function FieldRenderer({
   title,
   invalid,
   highlightClass,
-  inputPaddingRight,
-  inputPaddingTop,
   noRightBorder,
   borderless,
   countrySelect,
@@ -108,15 +106,11 @@ export function FieldRenderer({
   const look = cn(
     highlightClass ?? baseLook(borderless, noRightBorder),
     disabled && DISABLED_LOOK,
-    invalid && !disabled && INVALID_LOOK
+    invalid === "error" && !disabled && INVALID_LOOK,
+    invalid === "missing" && !disabled && MISSING_LOOK
   )
   // Something worth explaining on hover: gated off, or failing validation.
-  const explainable = disabled || invalid
-  // stays undefined when neither pad is set, so the control renders with no style attr
-  const padStyle =
-    inputPaddingRight || inputPaddingTop
-      ? { paddingRight: inputPaddingRight, paddingTop: inputPaddingTop }
-      : undefined
+  const explainable = disabled || invalid !== undefined
   // `default` is the value the form assumes when nothing is recorded — surface
   // it (or the skip value for inapplicable fields) without writing a value.
   // For date fields, prefer the date_format pattern over a generic default like
@@ -146,7 +140,6 @@ export function FieldRenderer({
         onChange={onChange}
         disabled={disabled}
         placeholder={hint}
-        padStyle={padStyle}
         className={look}
       />,
       explainable,
@@ -161,7 +154,6 @@ export function FieldRenderer({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        style={padStyle}
         className={cn(CELL_BASE, look, value ? "" : "text-[#6b7280]")}
       >
         <option value="">{hint ?? "Select…"}</option>
@@ -185,7 +177,6 @@ export function FieldRenderer({
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         placeholder={hint}
-        style={padStyle}
         className={cn(
           "block h-full min-h-[44px] w-full resize-none rounded-none border-0 px-[3px] py-0.5 font-ibv text-[13.3px] font-bold leading-tight text-black outline-none focus:bg-white focus:shadow-[inset_0_0_0_2px_rgba(59,130,246,0.2)]",
           look
@@ -210,7 +201,6 @@ export function FieldRenderer({
         disabled={disabled}
         placeholder={hint}
         list={listId}
-        style={padStyle}
         // Chrome paints a picker arrow on any input carrying a datalist, which made a
         // filled cell read as an unselected dropdown (VR2-91). `no-picker-arrow`
         // (index.css) hides it; the suggestions still open on typing and on ArrowDown.

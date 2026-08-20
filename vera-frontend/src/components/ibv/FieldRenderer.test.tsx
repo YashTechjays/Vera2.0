@@ -57,7 +57,7 @@ describe("FieldRenderer text-field suggestions", () => {
     const ancestorTags = (html: string) =>
       [...html.slice(0, html.indexOf("<input")).matchAll(/<([a-zA-Z-]+)/g)].map((m) => m[1])
     const valid = render("No cycle limit")
-    const invalid = render("bad", { invalid: true, title: "Enter a valid value" })
+    const invalid = render("bad", { invalid: "error", title: "Enter a valid value" })
     expect(ancestorTags(invalid)).toEqual(ancestorTags(valid))
   })
 })

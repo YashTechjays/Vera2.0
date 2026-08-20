@@ -4,7 +4,8 @@ import { TriangleAlert } from "lucide-react"
 import { Section } from "./Section"
 import { UsageLegend } from "./UsageLegend"
 import { useIbv } from "./IbvProvider"
-import { contradictionWarnings, sectionEntriesOf } from "@/lib/ibv/schema"
+import { contradictionWarnings, flattenSection, sectionEntriesOf } from "@/lib/ibv/schema"
+import { packTwoColumns } from "@/lib/ibv/layout"
 import type { FormSchema, Section as SectionModel } from "@/lib/ibv/types"
 
 // Presentation-only placement hints (matches smart-caller-fe's wide form).
@@ -46,6 +47,35 @@ function chunkRest(rest: Entry[]): Chunk[] {
   }
   if (run.length > 0) out.push({ kind: "run", entries: run })
   return out
+}
+
+/** One column of stacked field-row sections. */
+function SectionColumn({ entries }: { entries: Entry[] }) {
+  return (
+    <div className="flex flex-1 flex-col gap-[15px]">
+      {entries.map(([key, section]) => (
+        <Section key={key} sectionKey={key} section={section} />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * A run of field-row sections rendered two-up, packed by section height (row count
+ * +2 ≈ header + frame) so a tall section gets the short ones stacked beside it
+ * instead of a blank hole (VR2-162).
+ */
+function TwoUpRun({ entries }: { entries: Entry[] }) {
+  const [left, right] = packTwoColumns(
+    entries,
+    ([key, section]) => flattenSection(key, section).length + 2
+  )
+  return (
+    <div className="flex gap-5">
+      <SectionColumn entries={left} />
+      <SectionColumn entries={right} />
+    </div>
+  )
 }
 
 /** Amber banner for contradiction rules currently violated by the values. */
@@ -109,14 +139,6 @@ export function SchemaForm() {
   const rest = sectionEntriesOf(schema).filter(([k]) => !placed.has(k))
   const chunks = chunkRest(rest)
 
-  const renderColumn = (entries: Entry[]) => (
-    <div className="flex flex-1 flex-col gap-[15px]">
-      {entries.map(([key, section]) => (
-        <Section key={key} sectionKey={key} section={section} />
-      ))}
-    </div>
-  )
-
   return (
     <div ref={rootRef} className="flex flex-col gap-[15px]">
       <ContradictionBanner schema={schema} />
@@ -124,13 +146,13 @@ export function SchemaForm() {
         {/* Two main columns fill the entire first view; the reference box sits
             beyond them, off-screen until you drag the bottom scrollbar L→R. */}
         <div className="flex min-w-full gap-5">
-          {renderColumn(leftTop)}
-          {renderColumn(rightTop)}
+          <SectionColumn entries={leftTop} />
+          <SectionColumn entries={rightTop} />
         </div>
         {rail.length > 0 && (
           <aside className="flex w-[420px] shrink-0 flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5">
             {rail.map(([key, section]) => (
-              <Section key={key} sectionKey={key} section={section} compact />
+              <Section key={key} sectionKey={key} section={section} />
             ))}
           </aside>
         )}
@@ -138,10 +160,7 @@ export function SchemaForm() {
 
       {chunks.map((chunk, i) =>
         chunk.kind === "run" ? (
-          <div key={`run-${i}`} className="flex gap-5">
-            {renderColumn(chunk.entries.filter((_, j) => j % 2 === 0))}
-            {renderColumn(chunk.entries.filter((_, j) => j % 2 === 1))}
-          </div>
+          <TwoUpRun key={`run-${i}`} entries={chunk.entries} />
         ) : (
           <Section
             key={chunk.entry[0]}

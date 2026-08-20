@@ -21,7 +21,7 @@ import {
 import type { FlatRow } from "@/lib/ibv/schema"
 import type { Section as SectionModel } from "@/lib/ibv/types"
 
-function Rows({ rows, compact }: { rows: FlatRow[]; compact?: boolean }) {
+function Rows({ rows, capValue }: { rows: FlatRow[]; capValue?: boolean }) {
   const { schema, values } = useIbv()
   return (
     <div>
@@ -34,7 +34,7 @@ function Rows({ rows, compact }: { rows: FlatRow[]; compact?: boolean }) {
               path={path}
               depth={depth}
               gates={gates}
-              compact={compact}
+              capValue={capValue}
             />
           )
         }
@@ -73,13 +73,10 @@ export function Section({
   sectionKey,
   section,
   defaultOpen = true,
-  compact,
 }: {
   sectionKey: string
   section: SectionModel
   defaultOpen?: boolean
-  /** narrow-column rendering — see FieldRow's compact prop */
-  compact?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const { disputes, flagsFor, resolveOpenDisputes } = useIbv()
@@ -163,10 +160,12 @@ export function Section({
           // leaves need their own wrapper for it. The matrix itself doesn't:
           // its <table> already owns a complete collapsed-border frame.
           <div className={cn("border-x", green ? "border-[#1f9d57]" : "border-ibv-input-border")}>
-            <Rows rows={rows} compact={compact} />
+            {/* These leaves span the full matrix width — cap the value cell so the
+                control doesn't stretch across the whole table (VR2-162). */}
+            <Rows rows={rows} capValue />
           </div>
         ) : (
-          <Rows rows={rows} compact={compact} />
+          <Rows rows={rows} />
         )}
         {table && <SectionMatrix table={table} />}
       </CollapsibleContent>

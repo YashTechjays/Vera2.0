@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react"
+import { useState } from "react"
 import { getCountries, getCountryCallingCode, parsePhoneNumber } from "react-phone-number-input"
 import type { Country } from "react-phone-number-input"
 
@@ -25,13 +25,12 @@ type Props = {
   onChange: (value: string) => void
   disabled?: boolean
   placeholder?: string
-  padStyle?: CSSProperties
   /** cell look from FieldRenderer (borders/background/disabled/invalid) */
   className?: string
 }
 
 /** Country-code dropdown + digits input composing one E.164 value (VR2-201). */
-export function PhoneCell({ value, onChange, disabled, placeholder, padStyle, className }: Props) {
+export function PhoneCell({ value, onChange, disabled, placeholder, className }: Props) {
   const parsedCountry = parsePhoneNumber(value)?.country
   const [country, setCountry] = useState<Country>(parsedCountry ?? DEFAULT_COUNTRY)
   const [seenCountry, setSeenCountry] = useState(parsedCountry)
@@ -72,7 +71,6 @@ export function PhoneCell({ value, onChange, disabled, placeholder, padStyle, cl
         onChange={(e) => onChange(composePhoneValue(country, e.target.value))}
         disabled={disabled}
         placeholder={placeholder}
-        style={padStyle}
         className="min-h-[24px] w-0 min-w-0 flex-1 truncate border-0 bg-transparent px-[3px] py-0 font-ibv text-[13.3px] font-bold text-black outline-none focus:bg-white focus:shadow-[inset_0_0_0_2px_rgba(59,130,246,0.2)]"
       />
     </span>
