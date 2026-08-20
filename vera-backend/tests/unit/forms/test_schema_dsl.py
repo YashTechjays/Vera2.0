@@ -845,3 +845,94 @@ def test_a_defaulted_confirm_leaf_that_gates_nothing_is_fine() -> None:
         },
     }
     assert validate_confirm_defaults(FormSchemaDoc.model_validate(doc)) == []
+
+
+def _sections(
+    *,
+    section_mark: str | None = None,
+    group_mark: str | None = None,
+    leaf_mark: str | None = None,
+    grouped: bool = False,
+    with_confirm: bool = False,
+) -> dict[str, Any]:
+    """`minimal_doc`'s `basics` section, reshaped for marker resolution.
+
+    `plan_type` always sits directly under the section (so it reads the SECTION marker);
+    `rep_name` moves under a group when `grouped`, so the group marker has something to govern.
+    """
+    rep_name: dict[str, Any] = {
+        "type": "text",
+        "title": "Representative Name",
+        "role": "ask",
+        "required": True,
+        "prompt": {"ask": "May I have your name?"},
+    }
+    if leaf_mark is not None:
+        rep_name["collected_per"] = leaf_mark
+    inner: dict[str, Any] = {"rep_name": rep_name}
+    if with_confirm:
+        inner["policy_number"] = {
+            "type": "text",
+            "title": "Policy Number",
+            "role": "confirm",
+            "prompt": {"ask": "What is the policy number?", "confirm": "I have {{value}}."},
+        }
+    plan_type: dict[str, Any] = {
+        "type": "text",
+        "title": "Plan Type",
+        "role": "ask",
+        "required": True,
+        "prompt": {"ask": "What type of plan is this?"},
+    }
+    if grouped:
+        group: dict[str, Any] = {"type": "group", "title": "Rep Block", "fields": inner}
+        if group_mark is not None:
+            group["collected_per"] = group_mark
+        fields: dict[str, Any] = {"plan_type": plan_type, "block": group}
+    else:
+        fields = {"plan_type": plan_type, **inner}
+    section: dict[str, Any] = {"title": "Basics", "fields": fields}
+    if section_mark is not None:
+        section["collected_per"] = section_mark
+    return {"basics": section}
+
+
+def _doc(**kwargs: Any) -> FormSchemaDoc:
+    return FormSchemaDoc.model_validate(minimal_doc(sections=_sections(**kwargs)))
+
+
+class TestCollectedPer:
+    """`collected_per` resolution: most specific wins, ask-role only."""
+
+    def test_defaults_to_form_so_nothing_is_call_scoped(self) -> None:
+        assert _doc().collected_per_call_paths() == frozenset()
+
+    def test_section_marker_reaches_its_ask_leaves(self) -> None:
+        assert _doc(section_mark="call").collected_per_call_paths() == frozenset(
+            {"sections.basics.plan_type", "sections.basics.rep_name"}
+        )
+
+    def test_section_marker_skips_a_confirm_leaf(self) -> None:
+        """A confirm leaf is on file precisely to be read back — `gating_seed` keeps confirm
+        prefills, so marking one call-scoped would recite last call's value, not collect one."""
+        paths = _doc(section_mark="call", with_confirm=True).collected_per_call_paths()
+        assert "sections.basics.policy_number" not in paths
+
+    def test_leaf_declaration_overrides_its_section(self) -> None:
+        assert _doc(section_mark="call", leaf_mark="form").collected_per_call_paths() == frozenset(
+            {"sections.basics.plan_type"}
+        )
+
+    def test_nearest_group_wins_over_the_section(self) -> None:
+        doc = _doc(section_mark="call", group_mark="form", grouped=True)
+        assert doc.collected_per_call_paths() == frozenset({"sections.basics.plan_type"})
+
+    def test_leaf_wins_over_its_group(self) -> None:
+        doc = _doc(group_mark="form", leaf_mark="call", grouped=True)
+        assert doc.collected_per_call_paths() == frozenset({"sections.basics.block.rep_name"})
+
+    def test_call_on_a_confirm_leaf_is_rejected(self) -> None:
+        sections = _sections(with_confirm=True)
+        sections["basics"]["fields"]["policy_number"]["collected_per"] = "call"
+        with pytest.raises(ValidationError, match='requires role="ask"'):
+            FormSchemaDoc.model_validate(minimal_doc(sections=sections))

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import date
 from typing import Annotated, Literal
 
@@ -60,6 +60,11 @@ SectionRole = Literal["collect", "context", "ui_only"]
 LeafRole = Literal["ask", "confirm", "context", "readonly", "input"]
 LeafType = Literal["text", "enum", "date", "currency", "percent", "integer", "phone"]
 ComparisonOp = Literal["eq", "ne", "in", "not_in"]
+# Whether an answer describes the FORM (a benefit fact — collect it once) or the CALL that
+# produced it (a rep's name, a call reference number — collect it on every call). `None` on a
+# node means "inherit"; the document-level default is "form". A leaf that defaulted to "form"
+# instead of None would silently override its section's declaration.
+CollectedPer = Literal["form", "call"]
 RANGE_TYPES: frozenset[str] = frozenset({"currency", "percent", "integer"})
 COLLECTED_ROLES: frozenset[str] = frozenset({"ask", "confirm"})
 
@@ -305,6 +310,7 @@ class Leaf(_Model):
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
     description: str | None = None
+    collected_per: CollectedPer | None = None
 
     @model_validator(mode="after")
     def _coherent(self) -> Leaf:
@@ -335,6 +341,8 @@ class Leaf(_Model):
             raise ValueError("confirm_in_task only valid on role=confirm")
         if self.tags is not None and not all(KEY_RE.match(t) for t in self.tags):
             raise ValueError("tags must be snake_case strings")
+        if self.collected_per == "call" and self.role != "ask":
+            raise ValueError('collected_per="call" requires role="ask"')
         return self
 
 
@@ -347,6 +355,9 @@ class Group(_Model):
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
     description: str | None = None
+    # BEFORE `fields`, so the compiled artifact reads with the marker next to `title`/`description`
+    # rather than stranded after the block it governs.
+    collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
     @model_validator(mode="after")
@@ -394,6 +405,9 @@ class Section(_Model):
     ask_groups: list[AskGroup] | None = None
     alternatives: list[Alternatives] | None = None
     ui: Ui | None = None
+    # BEFORE `fields`, so the compiled artifact reads with the marker next to `title`/`description`
+    # rather than stranded after a 73-leaf block.
+    collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
 
@@ -550,6 +564,40 @@ class FormSchemaDoc(_Model):
             if leaf.role in COLLECTED_ROLES:
                 out.append(path)
         return out
+
+    def collected_per_call_paths(self) -> frozenset[str]:
+        """Root-anchored paths of every `ask`-role leaf whose effective `collected_per` is
+        "call" — asked on every call, whatever is on file.
+
+        Most specific declaration wins: the leaf, then its enclosing groups nearest-first, then
+        its section, then the document default of "form". Restricted to `ask` because a
+        `confirm` leaf is on file precisely to be read back (`gating_seed` keeps confirm
+        prefills) and every other role is never spoken, so a section marker on a mixed section
+        reaches its ask leaves and leaves the rest alone.
+        """
+        nodes = dict(self._iter_fields())
+        return frozenset(
+            path
+            for path, leaf in self.leaf_items()
+            if leaf.role == "ask" and self._effective_collected_per(path, leaf, nodes) == "call"
+        )
+
+    def _effective_collected_per(
+        self, path: str, leaf: Leaf, nodes: Mapping[str, FormField]
+    ) -> CollectedPer:
+        """`leaf`'s marker resolved outward through its groups and section."""
+        if leaf.collected_per is not None:
+            return leaf.collected_per
+        parts = path.split(".")
+        # Enclosing groups, nearest first. parts[0:2] is `sections.<key>`, so stop above it.
+        for cut in range(len(parts) - 1, 2, -1):
+            parent = nodes.get(".".join(parts[:cut]))
+            if isinstance(parent, Group) and parent.collected_per is not None:
+                return parent.collected_per
+        section = self.sections.get(parts[1])
+        if section is not None and section.collected_per is not None:
+            return section.collected_per
+        return "form"
 
     # -- cross-document validation -------------------------------------------------
 
