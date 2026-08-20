@@ -874,25 +874,37 @@ class TestCallPlanStaging:
 
         ref = "sections.insurance_representative.call_reference_number"
         gate = "sections.pharmacy_benefit_manager.pbm_exists"
+        call_id = uuid7()
 
         async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
-            # Reference captured → the retry is FOCUSED; the PBM gate is answered.
+            # Reference captured BY A CALL → the retry is FOCUSED; the PBM gate is answered.
             return {
-                ref: FieldStatus(source="ai_call", ai_supported=True, ai_confidence=96),
+                ref: FieldStatus(
+                    source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+                ),
                 gate: FieldStatus(source="ai_call", ai_supported=None, ai_confidence=85),
             }
 
         async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
             return {ref: "ABC-123", gate: "Yes"}
 
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
         monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
         monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
 
         dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
 
         assert dispatched == 1
         _room, plan = plans.puts[0]
         staged = {f.path for t in plan.tasks for f in t.fields}
+        # Guard against silent vacuity (round-2 finding): these two assertions alone pass
+        # against the FULL plan too, so pin that focusing actually narrowed the set.
+        assert staged < _ALL_IBV_PATHS
         assert "sections.pharmacy_benefit_manager.pbm_name" in staged
         assert "sections.pharmacy_benefit_manager.pbm_phone" in staged
 
