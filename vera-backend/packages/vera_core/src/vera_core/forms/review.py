@@ -270,14 +270,21 @@ def is_call_confirmed(
 
 
 def _required_paths(
-    schema_json: Mapping[str, Any], values: Mapping[str, Any], *, askable_only: bool
+    schema_json: Mapping[str, Any],
+    values: Mapping[str, Any],
+    *,
+    askable_only: bool,
+    include_defaulted: bool = False,
 ) -> list[str]:
     """Paths of required, applicable leaves that could still owe an answer — optionally only
-    collectible (ask/confirm role) ones. v2: filters by role + applicability. v1: returns
-    all required paths (no role concept).
+    collectible (ask/confirm) ones. v2: filters by role + applicability. v1: returns all required
+    paths (no role concept).
 
-    A leaf declaring a `default` is excluded: `completion_pct_v2` counts it filled and the export
-    writes it, so leaving it here would block auto-completion on a field the form calls done."""
+    A leaf declaring a `default` is excluded by default: `completion_pct_v2` counts it filled and
+    the export writes it, so leaving it here would block auto-completion on a field the form calls
+    done. `include_defaulted=True` is the RETRY ASK SET only, which follows `owed_now` — a default
+    declares the value a field takes when not collected, never that the question need not be asked.
+    """
     if is_v2(schema_json):
         doc = FormSchemaDoc.model_validate(schema_json)
         shared = doc.shared_conditions or {}
@@ -285,7 +292,7 @@ def _required_paths(
             path
             for path, leaf, gates in leaf_gates(doc)
             if (not askable_only or leaf.role in COLLECTED_ROLES)
-            and leaf.default is None
+            and (include_defaulted or leaf.default is None)
             and is_applicable(gates, values, shared)
             and is_required(leaf, values, shared)
         ]
