@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -142,16 +142,21 @@ def is_within_working_hours(provider: InsuranceProvider) -> bool:
 class StagedCall:
     """One committed INITIATED call awaiting its outbound dial.
 
-    ``phone_number is None`` means browser-callee transport: the room waits for a
-    browser participant and no SIP leg is placed. The tenant's retry knobs are
-    snapshotted here so the dial-failure path needs no second tenant read.
+    ``browser_callee`` is the transport, carried explicitly rather than inferred from a
+    missing ``phone_number``: that column is nullable, and reading a NULL payer number
+    as "no dial needed" would report the call as dispatched without ever ringing anyone.
+    The tenant's retry knobs are snapshotted here so the dial-failure path needs no
+    second tenant read.
     """
 
     call_id: UUID
     form_id: UUID
-    phone_number: str | None
+    # repr=False: a payer number is PHI-tagged on patient_form, and a frozen dataclass
+    # renders every field, so a future `logger.error("…%s", call)` would leak it.
+    phone_number: str | None = field(repr=False)
     trunk_id: str | None
     mode: str
+    browser_callee: bool
     max_retries: int
     auto_retry_enabled: bool
 
@@ -576,6 +581,11 @@ async def stage_dispatch(
                     # Unlike the two calls above, this one never raises — a broken config-table
                     # read degrades to the hardcoded default instead of failing the dispatch.
                     await add_llm_model_override_metadata(session, metadata)
+                    # This also dispatches the agent, so its _SPEAKER_TIMEOUT_S answer
+                    # deadline starts here — not at the dial. A full pass stages every call
+                    # before place_dials rings the first, so the last call in a wide pass
+                    # spends part of that budget waiting on dial pacing. Moving the room
+                    # (and agent) into place_dials is the fix; see the PR discussion.
                     await livekit.create_call_room(room_name, metadata=metadata)
                     session.add(
                         CallEvent(
@@ -618,9 +628,10 @@ async def stage_dispatch(
             StagedCall(
                 call_id=call.id,
                 form_id=form.id,
-                phone_number=None if browser_callee else form.insurance_provider_phone_number,
+                phone_number=form.insurance_provider_phone_number,
                 trunk_id=trunk_id,
                 mode=call_mode.value,
+                browser_callee=browser_callee,
                 max_retries=tenant.max_retries,
                 auto_retry_enabled=tenant.auto_retry_enabled,
             )
@@ -642,14 +653,15 @@ async def place_dials(
     """Phase two: dial each staged call — see the module docstring for why it is separate.
 
     Returns the number of calls dialed; a rejected dial does not count, even though its
-    Call row survives as evidence. *dial_pacing_s* separates successive dial ATTEMPTS (a
-    failed dial still consumes carrier capacity), never applied before the first.
+    Call row survives as evidence. *dial_pacing_s* separates successive dial STEPS, never
+    applied before the first — a failed dial still consumes carrier capacity, and a step
+    the row lock skips is rare enough not to be worth distinguishing.
     """
     dispatched = 0
     dialed_once = False
     for call in staged:
         try:
-            if call.phone_number is not None:
+            if not call.browser_callee:
                 if dialed_once:
                     await asyncio.sleep(dial_pacing_s)
                 dialed_once = True

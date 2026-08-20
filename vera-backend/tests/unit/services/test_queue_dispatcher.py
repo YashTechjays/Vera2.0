@@ -653,6 +653,25 @@ async def test_browser_callee_dispatches_without_a_trunk_and_never_dials(
     assert metadata["browser_callee"] is True
 
 
+async def test_a_form_with_no_payer_number_is_dialed_and_fails_not_silently_skipped(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """insurance_provider_phone_number is nullable, so a missing number must not read as
+    browser-callee transport — that would report the call dispatched, start egress on a
+    room nobody joins, and audit a dial that never happened. The transport is carried
+    explicitly, so a NULL number still goes out and lands in the dial-failure path."""
+    tenant = _tenant()
+    form = _form(tenant.id, insurance_provider_phone_number=None)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.dial_error = OutboundDialError("no phone number to dial")
+
+    dispatched = await _dispatch(session, tenant.id, livekit, dial_pacing_s=0)
+
+    assert dispatched == 0
+    assert session.calls_added()[0].current_status == CallStatus.FAILED.value
+
+
 async def test_sip_transport_still_needs_a_trunk(
     _stub_credentials: dict[str, dict[str, Any] | None],
 ) -> None:
