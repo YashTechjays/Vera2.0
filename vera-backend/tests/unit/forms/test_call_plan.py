@@ -13,7 +13,6 @@ from vera_core.forms.call_plan import (
     PlanFieldDescriptor,
     PlanTask,
     _render_value,
-    bookend_paths,
     compile_call_plan,
     focus_call_plan,
     focus_questions,
@@ -373,27 +372,6 @@ class TestFocusCallPlan:
         before = len(self._all_paths(PLAN))
         focus_call_plan(PLAN, {self._all_paths(PLAN)[0]})
         assert len(self._all_paths(PLAN)) == before
-
-
-class TestBookendPaths:
-    """bookend_paths names the fields a FOCUSED retry must always keep so every call
-    still greets (opening task) and captures its own rep name + call reference number
-    (wrap-up task) — dropping those tasks was QA issues 3 and 4."""
-
-    def test_includes_opening_and_wrapup_fields(self) -> None:
-        paths = set(bookend_paths(PLAN, IBV.rep_call_reference_number_field))
-        assert "sections.patient_verification.is_insurance_active" in paths  # greeting task
-        assert "sections.insurance_representative.rep_name" in paths  # wrap-up task
-        assert IBV.rep_call_reference_number_field in paths  # every call logs its own ref
-
-    def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
-        """Even when the intro/wrap-up fields are already satisfied (excluded from the
-        retryable set), unioning bookends keeps both tasks in the focused plan."""
-        mid_field = next(f.path for t in PLAN.tasks[1:-1] for f in t.fields)
-        focus = [mid_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
-        keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
-        assert "introduction" in keys
-        assert "wrap_up" in keys
 
 
 SPOUSE_NAME = "sections.patient_information.spouse_partner_name"

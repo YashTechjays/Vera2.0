@@ -31,7 +31,6 @@ from vera_core.audit import AuditRecord
 from vera_core.forms.call_plan import (
     CallPlan,
     PrefillFuser,
-    bookend_paths,
     compile_call_plan,
     focus_call_plan,
 )
@@ -40,9 +39,8 @@ from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
 from vera_core.forms.review import (
     REVIEW_CONFIDENCE_FLOOR,
-    expand_to_groups,
+    focus_paths,
     has_call_reference,
-    retryable_required_paths,
 )
 from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
@@ -74,7 +72,7 @@ from vera_core.observability.correlation import (
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
@@ -390,11 +388,14 @@ async def try_dispatch(
         # snapshot below both need the form's current values.
         values = await current_values_by_path(session, form.id)
 
-        # Retry scope: with a call reference number captured, the retry is FOCUSED —
-        # stage a plan narrowed to the still-missing (group-expanded) fields so the
-        # agent asks ONLY those, never announcing a prior call. Without a reference
-        # number it retries FRESH (the full plan, a call from the top).
-        if call_mode == CallMode.RETRY and staged_plan is not None:
+        # Retry scope: with a call reference number captured, this is a FOCUSED retry — stage a
+        # plan narrowed to what no authoritative call has confirmed, so the agent asks ONLY those
+        # and never announces a prior call. Without a reference number it runs FRESH.
+        #
+        # Gated on the captured reference number, NOT on `call_mode`: the operator surface passes
+        # `manual=True`, which resets `retry_count`, so a form with 152 confirmed answers and a
+        # reference on file dispatched as FULL and re-asked everything (spec D4).
+        if staged_plan is not None:
             version = schema_versions.get(form.schema_version_id)
             if version is None:
                 version = (
@@ -407,19 +408,17 @@ async def try_dispatch(
             status_by_path = await load_field_status(session, form.id)
             if has_call_reference(status_by_path, doc):
                 plan, plan_prompt_version_id = staged_plan
-                # Pass the form's real values so eq/in gates evaluate exactly — without
-                # them a sentinel reads every value-gate as unmatched and silently drops
-                # its still-missing dependents from the retry (issue 6).
-                retryable = retryable_required_paths(
-                    status_by_path, version.schema_json, floor=retry_floor, values=values
+                authoritative = await load_authoritative_call_ids(
+                    session, form.id, reference_field=doc.rep_call_reference_number_field
                 )
-                focus = expand_to_groups(doc, retryable)
-                # Always keep the greeting + wrap-up tasks: a focused retry must still
-                # open with a greeting and capture its OWN rep name + call reference
-                # number (dropping those tasks was QA issues 3 and 4, and a retry that
-                # never logs a reference breaks the next retry's focus gate).
-                bookends = bookend_paths(plan, doc.rep_call_reference_number_field)
-                focus = [*focus, *bookends]  # focus_call_plan matches a path set — dupes are inert
+                focus = focus_paths(
+                    doc,
+                    status_by_path,
+                    version.schema_json,
+                    floor=retry_floor,
+                    values=values,
+                    authoritative_calls=authoritative,
+                )
                 if focus:
                     staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
 

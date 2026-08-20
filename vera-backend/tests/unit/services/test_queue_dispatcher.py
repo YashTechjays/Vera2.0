@@ -26,6 +26,7 @@ from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
 from vera_core.forms.call_plan import CallPlan
 from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import FACTORY_SESSION
 from vera_core.forms.review import FieldStatus
 from vera_core.models import (
@@ -51,6 +52,20 @@ IBV_SCHEMA_JSON: dict[str, Any] = json.loads(
     (
         Path(__file__).resolve().parents[3] / "data" / "form_schemas" / "ibv_form_standard_v2.json"
     ).read_text(encoding="utf-8")
+)
+
+# The compiled IBV plan's whole field set — the FULL plan a fresh (unfocused) dispatch
+# stages, and the superset a FOCUSED retry must narrow. Field paths don't depend on the
+# prompt document, so the factory-session fallback (prompt_doc=None) is fine here.
+_ALL_IBV_PATHS: frozenset[str] = frozenset(
+    field.path
+    for task in real_compile_call_plan(
+        FormSchemaDoc.model_validate(IBV_SCHEMA_JSON),
+        None,
+        schema_version_id=uuid7(),
+        prompt_version_id=None,
+    ).tasks
+    for field in task.fields
 )
 
 
@@ -118,6 +133,11 @@ class _Result:
 
     def all(self) -> list[Any]:
         return self._rows
+
+    def __iter__(self) -> Any:
+        # `load_authoritative_call_ids` iterates `.scalars()` directly (no `.all()`),
+        # mirroring real SQLAlchemy's `ScalarResult`.
+        return iter(self._rows)
 
 
 def _bound_value(stmt: Any, column_name: str) -> Any:
@@ -206,8 +226,17 @@ class FakeSession:
         if entity is PromptVersion:
             return _Result(scalar=self.prompt_version)
         if entity is FieldAnswer:
-            form_id = _bound_value(stmt, "form_id")
-            return _Result(rows=self.field_answers.get(form_id, []))
+            # Three different FieldAnswer queries land here now that the retry-focus
+            # block runs on every staged-plan dispatch, not just call_mode==RETRY:
+            # current_values_by_path's (field_path, value) pair, load_field_status's
+            # 6-column status row, and load_authoritative_call_ids' bare call_id. Only
+            # the first is modeled by `field_answers` — a test wanting real status/
+            # authoritative-call data monkeypatches those functions directly instead
+            # (see test_focused_retry_includes_conditional_fields_when_gate_is_answered).
+            if len(stmt.column_descriptions) == 2:
+                form_id = _bound_value(stmt, "form_id")
+                return _Result(rows=self.field_answers.get(form_id, []))
+            return _Result(rows=[])
         if entity is VoiceModelConfig:
             return _Result(scalar=self.voice_model)
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
@@ -1072,6 +1101,123 @@ class TestCallPlanStaging:
         # keeps OTel's exception defaults — but the denylist assertion still applies to it.
         assert_no_phi_values(compile_span, "Jane Doe")
         assert_no_phi_values(fuse_span, "Jane Doe")
+
+    async def test_a_form_with_a_captured_reference_dispatches_focused(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The defect this fixes: the operator surface (`PUT /patient-forms/{id}/status`)
+        resets `retry_count` to 0, so gating the focus decision on `call_mode` left a form
+        with a captured reference number — and everything else already confirmed — dispatch
+        as a FULL call that re-asked everything. The gate is the reference number alone."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)  # retry_count deliberately 0
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        ref = "sections.insurance_representative.call_reference_number"
+        call_id = uuid7()
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            return {
+                ref: FieldStatus(
+                    source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+                )
+            }
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return {ref: "ABC-123"}
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, plan = plans.puts[0]
+        staged = {f.path for t in plan.tasks for f in t.fields}
+        assert staged < _ALL_IBV_PATHS  # narrowed
+        assert form.retry_count == 0  # the gate is the reference number, not the counter
+
+    async def test_a_form_with_no_captured_reference_dispatches_the_full_plan(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, plan = plans.puts[0]
+        staged = {f.path for t in plan.tasks for f in t.fields}
+        assert staged == _ALL_IBV_PATHS
+
+    async def test_the_introduction_and_wrap_up_tasks_survive_the_narrowing(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With no task-position heuristic keeping these fields, this holds only because
+        their leaves are `collected_per="call"` — `patient_verification` (introduction) and
+        `insurance_representative` (wrap_up) — which `focus_paths` always keeps via
+        `doc.collected_per_call_paths()`."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        ref = "sections.insurance_representative.call_reference_number"
+        call_id = uuid7()
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            return {
+                ref: FieldStatus(
+                    source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+                )
+            }
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return {ref: "ABC-123"}
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, plan = plans.puts[0]
+        keys = {t.task_key for t in plan.tasks}
+        assert {"introduction", "wrap_up"} <= keys
 
 
 async def _noop_sleep(seconds: float) -> None:
