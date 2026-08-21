@@ -48,9 +48,8 @@ from vera_core.forms.intake import (
 )
 from vera_core.forms.review import (
     FieldStatus,
-    expand_to_groups,
+    focus_paths,
     has_call_reference,
-    retryable_required_paths,
     satisfied_required_fraction,
 )
 from vera_core.models import (
@@ -74,7 +73,7 @@ from vera_core.models.enums import (
     VersionStatus,
 )
 from vera_core.services.field_answers import current_values_by_path, recompute_form_projection
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 
 _TENANT_SLUG = os.environ.get("SEED_TENANT_SLUG", "vera-health-example")
@@ -250,13 +249,20 @@ def _report(
     values: Mapping[str, Any],
     schema_json: Mapping[str, Any],
     floor: int,
+    authoritative: frozenset[UUID],
 ) -> None:
     """Print the scope a correct focused retry would ask — the yardstick for the call."""
-    retryable = retryable_required_paths(status_by_path, schema_json, floor=floor, values=values)
-    focus = expand_to_groups(doc, retryable)
+    focus = focus_paths(
+        doc,
+        status_by_path,
+        schema_json,
+        floor=floor,
+        values=values,
+        authoritative_calls=authoritative,
+    )
     print(f"  focus gate (reference captured) : {has_call_reference(status_by_path, doc)}")
-    print(f"  still owed (required, askable)  : {len(retryable)}")
-    print(f"  after group expansion          : {len(focus)}")
+    print(f"  authoritative calls on file      : {len(authoritative)}")
+    print(f"  focused ask set (focus_paths)    : {len(focus)}")
     sections = sorted({path.split(".")[1] for path in focus})
     print(f"  sections a focused retry covers: {', '.join(sections)}")
 
@@ -380,7 +386,10 @@ async def seed(missing: tuple[str, ...]) -> None:
             f"  answers: {len(answers)} rows, {len(judged)} judged, sections left empty: "
             f"{', '.join(missing)}"
         )
-        _report(doc, status_by_path, values, schema_json, floor)
+        authoritative = await load_authoritative_call_ids(
+            session, form.id, reference_field=doc.rep_call_reference_number_field
+        )
+        _report(doc, status_by_path, values, schema_json, floor, authoritative)
         print("\nArm it when you are ready to take the call: just arm-retry-form")
 
 
