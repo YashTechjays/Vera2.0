@@ -36,7 +36,7 @@ router = APIRouter(tags=["analytics"])
 
 
 class QueueStatus(BaseModel):
-    """Tenant-wide mirror of the dispatcher's slot math (queue_dispatcher.try_dispatch)."""
+    """Tenant-wide mirror of the dispatcher's slot math (queue_dispatcher.stage_dispatch)."""
 
     limit: int
     active: int
