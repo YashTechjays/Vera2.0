@@ -435,7 +435,6 @@ def compile_call_plan(
 
 
 def focus_call_plan(
-    doc: FormSchemaDoc,
     plan: CallPlan,
     paths: Collection[str],
     *,

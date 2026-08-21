@@ -421,7 +421,7 @@ async def try_dispatch(
                 )
                 if focus:
                     staged_plan = (
-                        focus_call_plan(doc, plan, focus, answers=values),
+                        focus_call_plan(plan, focus, answers=values),
                         plan_prompt_version_id,
                     )
 
