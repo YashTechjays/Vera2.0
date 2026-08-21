@@ -147,17 +147,23 @@ def completion_pct(filled_paths: Collection[str], schema_json: Mapping[str, Any]
 
 
 def completion_pct_v2(values: Mapping[str, Any], schema_json: Mapping[str, Any]) -> float:
-    """DSL 2.x completion (0-100, 2 dp): required ∧ applicable leaves, evaluated
-    against the current answer values (`applicable_when` chains from the section
-    down, `required: bool | {when}`). A leaf with a declared `default` counts as
-    filled — display/export assume it (spec §4.4). Mirrors the frontend's
-    `completionPercent`."""
+    """DSL 2.x completion (0-100, 2 dp): required ∧ applicable ∧ COLLECTABLE leaves, evaluated
+    against the current answer values (`applicable_when` chains from the section down,
+    `required: bool | {when}`). A leaf with a declared `default` counts as filled — display/export
+    assume it (spec §4.4). Mirrors the frontend's `completionPercent`.
+
+    Restricted to `ask`/`confirm` because only those can be filled BY A CALL, and this number gates
+    the `low_fill` retry decision in `post_call.py`. Every non-askable required leaf is also a
+    `required_intake_fields` target, so it is always filled and contributed a constant offset that
+    no call could move — a brand-new form read as a third complete (spec D9)."""
     doc = FormSchemaDoc.model_validate(schema_json)
     shared = doc.shared_conditions or {}
     relevant = [
         (path, leaf)
         for path, leaf, gates in leaf_gates(doc)
-        if is_applicable(gates, values, shared) and is_required(leaf, values, shared)
+        if leaf.role in COLLECTED_ROLES
+        and is_applicable(gates, values, shared)
+        and is_required(leaf, values, shared)
     ]
     if not relevant:
         return 100.0

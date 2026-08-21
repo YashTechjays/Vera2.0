@@ -1,8 +1,11 @@
 """Pure-logic tests for the IBV review/dispute helpers (no DB)."""
 
+import json
+from typing import Any
 from uuid import UUID, uuid4
 
-from vera_core.forms.dsl import FormSchemaDoc, load_document
+from vera_core.forms.conditions import is_applicable, is_required, leaf_gates
+from vera_core.forms.dsl import COLLECTED_ROLES, FormSchemaDoc, load_document
 from vera_core.forms.review import (
     AnswerRow,
     FieldStatus,
@@ -10,6 +13,7 @@ from vera_core.forms.review import (
     all_required_paths,
     build_field_views,
     completion_pct,
+    completion_pct_v2,
     dispute_view,
     expand_to_groups,
     has_call_reference,
@@ -21,10 +25,28 @@ from vera_core.forms.review import (
 from vera_core.models.enums import DisputeActionType
 
 from .test_prompting import FORM_SCHEMA_DIR
+from .test_schema_dsl import minimal_doc
 
 _IBV_DOC: FormSchemaDoc = load_document(
     (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
 )
+
+
+def _ibv_raw() -> dict[str, Any]:
+    text = (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
+    raw: dict[str, Any] = json.loads(text)
+    return raw
+
+
+def _context_only_doc() -> dict[str, Any]:
+    """A minimal doc whose only required leaf has role="context" and no prompt — it can
+    never be filled BY A CALL, so a correct completion reading over it is vacuous."""
+    doc = minimal_doc()
+    doc["sections"]["basics"]["fields"] = {
+        "plan_type": {"type": "text", "title": "Plan Type", "role": "context", "required": True}
+    }
+    return doc
+
 
 SCHEMA = {
     "sections": [
@@ -203,6 +225,64 @@ class TestRequiredPathsAndCompletion:
 
     def test_completion_pct_no_required_is_zero(self) -> None:
         assert completion_pct({"a.b"}, {"sections": []}) == 0.0
+
+
+class TestCompletionCountsOnlyCollectableLeaves:
+    """A call can only fill `ask`/`confirm` leaves, so the rest do not measure a call's progress.
+
+    Worse than inert: every non-askable required leaf in `ibv_form_standard_v2` is also a
+    `required_intake_fields` target, so `missing_required` blocks form creation without them and
+    they are ALWAYS filled — a constant offset that no call could move. And `post_call.py:93`
+    gates a retry on this number.
+    """
+
+    def test_a_form_with_only_intake_context_reads_near_zero(self) -> None:
+        """Not literally 0.0: 5 of the 39 relevant askable leaves in ibv_form_standard_v2
+        declare a `default` ("N/A"), and `is_satisfied` counts a declared default as filled
+        regardless of the call (spec §4.4, same rule the export applies) — pre-existing
+        behavior this fix does not touch. The other 34 correctly read as unfilled."""
+        raw = _ibv_raw()
+        doc = FormSchemaDoc.model_validate(raw)
+        values = {path: "x" for path, leaf in doc.leaf_items() if leaf.role not in COLLECTED_ROLES}
+        shared = doc.shared_conditions or {}
+        relevant = [
+            leaf
+            for _path, leaf, gates in leaf_gates(doc)
+            if leaf.role in COLLECTED_ROLES
+            and is_applicable(gates, values, shared)
+            and is_required(leaf, values, shared)
+        ]
+        defaulted = sum(1 for leaf in relevant if leaf.default is not None)
+        assert completion_pct_v2(values, raw) == round(defaulted / len(relevant) * 100, 2)
+
+    def test_context_leaves_do_not_dilute_a_collected_answer(self) -> None:
+        """Filling one askable leaf moves completion by exactly 1/(askable denominator) —
+        isolated from the constant a declared default contributes (identical on both
+        sides), so this isolates the fix rather than that separate, pre-existing rule."""
+        raw = _ibv_raw()
+        doc = FormSchemaDoc.model_validate(raw)
+        context = {p: "x" for p, leaf in doc.leaf_items() if leaf.role not in COLLECTED_ROLES}
+        target = "sections.patient_verification.is_insurance_active"
+        without_target = completion_pct_v2(context, raw)
+        with_target = completion_pct_v2({**context, target: "Yes"}, raw)
+        shared = doc.shared_conditions or {}
+        askable_denominator = len(
+            [
+                p
+                for p, leaf, gates in leaf_gates(doc)
+                if leaf.role in COLLECTED_ROLES
+                and is_applicable(gates, {**context, target: "Yes"}, shared)
+                and is_required(leaf, {**context, target: "Yes"}, shared)
+            ]
+        )
+        assert round(with_target - without_target, 2) == round(1 / askable_denominator * 100, 2)
+
+    def test_a_schema_with_no_askable_required_leaves_is_complete(self) -> None:
+        """The `if not relevant: return 100.0` branch still holds when the filter empties it —
+        a real semantic change: a form whose only required leaf is context-only now reads
+        100% complete rather than 0%, because no call can ever move that leaf."""
+        raw = _context_only_doc()
+        assert completion_pct_v2({}, raw) == 100.0
 
 
 class TestAdjudicationAction:

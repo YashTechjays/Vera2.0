@@ -170,12 +170,13 @@ class TestCompletionPctV2:
     }
 
     def test_applicability_gates_the_denominator(self) -> None:
-        # {} → relevant {a, c}; only c (default) filled.
-        assert completion_pct_v2({}, self.SMALL) == 50.0
-        # a=No → b stays inapplicable; a and c filled.
+        # a, b, c are all role="input" — none is askable, so `relevant` is empty in every
+        # case regardless of applicability, and `completion_pct_v2` takes the `not relevant`
+        # branch every time (a real semantic change: a call can fill none of these, so the
+        # form reads as vacuously complete rather than partially filled).
+        assert completion_pct_v2({}, self.SMALL) == 100.0
         assert completion_pct_v2({"sections.s.a": "No"}, self.SMALL) == 100.0
-        # a=Yes → b becomes relevant and is unfilled.
-        assert completion_pct_v2({"sections.s.a": "Yes"}, self.SMALL) == 66.67
+        assert completion_pct_v2({"sections.s.a": "Yes"}, self.SMALL) == 100.0
 
 
 class TestIntakeV2:
