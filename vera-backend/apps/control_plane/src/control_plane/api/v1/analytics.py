@@ -5,7 +5,7 @@ which is what exempts it from the PHI display-path audit (precedent: calls.py::c
 """
 
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Response
@@ -205,6 +205,20 @@ class ReportFilterOptions(BaseModel):
     vas: list[FilterOption]
 
 
+def _utc_days(date_from: datetime, date_to: datetime) -> list[date]:
+    """Every UTC day the [date_from, date_to) window touches — the dense chart axis,
+    so a day with zero calls still plots as zero (VR2-282)."""
+
+    def as_utc(dt: datetime) -> datetime:
+        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+    start = as_utc(date_from).date()
+    # date_to is exclusive (created_at < date_to): an exact-midnight bound must
+    # not add a day past the window.
+    end = (as_utc(date_to) - timedelta(microseconds=1)).date()
+    return [start + timedelta(days=i) for i in range((end - start).days + 1)]
+
+
 def _call_window(
     date_from: datetime,
     date_to: datetime,
@@ -318,11 +332,19 @@ async def history_report(
     for d, t, n in type_day_rows:
         per_day.setdefault(d.date(), {})[t] = n
         type_totals[t] += n
+    # Dense axis: GROUP BY emits no row for a zero-call day, but the chart must
+    # plot it as zero (VR2-282). interventions_per_day stays sparse on purpose —
+    # the frontend unions it onto this axis, and its emptiness means "no
+    # interventions in this period".
+    counts_by_day = {d.date(): n for d, n in day_rows}
     return ok(
         HistoryReport(
             current=current,
             previous=previous,
-            calls_per_day=[DayCount(day=d.date(), calls=n) for d, n in day_rows],
+            calls_per_day=[
+                DayCount(day=d, calls=counts_by_day.get(d, 0))
+                for d in _utc_days(date_from, date_to)
+            ],
             interventions_by_type=[
                 InterventionTypeCount(type=t, count=n) for t, n in sorted(type_totals.items())
             ],
