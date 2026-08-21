@@ -1663,6 +1663,7 @@ def test_a_focused_retry_narrowing_never_raises_or_names_a_ghost(schema: Schema)
     plan lacks a descriptor for — checked directly against its own output, under every
     guard-state answer set, since `_exploded`'s open-path logic reads `answers`."""
     s = schema
+    checked = 0
     for keep_every in (2, 3):
         wanted = sorted(s.descriptors)[::keep_every]
         for case in _guard_states(s):
@@ -1670,5 +1671,10 @@ def test_a_focused_retry_narrowing_never_raises_or_names_a_ghost(schema: Schema)
             for task in focused.tasks:
                 titles = {f.owner_title for f in task.fields if f.owner_title is not None}
                 for question in iter_questions(task.panels):
+                    checked += len(question.still_needed)
                     ghosts = [name for name in question.still_needed if name not in titles]
                     assert not ghosts, f"{s}: {case.label}: still_needed names {ghosts}"
+    # disease_only has no partly-owed fan-out with an owner_title, so it legitimately stamps
+    # nothing; every other schema must exercise a real still_needed name or this check is vacuous.
+    if s.insurance_type != "disease_only":
+        assert checked, f"{s}: no still_needed name was ever checked"

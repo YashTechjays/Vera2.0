@@ -392,14 +392,16 @@ class TestFocusCallPlan:
 
     def test_fields_and_panels_narrow_to_the_same_set(self) -> None:
         """`owed_now` joins questions against `task.fields`; a question whose fields are missing is
-        invisible to the refusal and the gap pass."""
+        invisible to the refusal and the gap pass — so the two sets must be EQUAL, not just
+        `tracked <= spoken` (that direction holds trivially and misses a spoken-but-untracked
+        question, the actual defect)."""
         focused = focus_call_plan(PLAN, {"sections.deductibles.individual.total"}, answers={})
         for task in focused.tasks:
             if not task.panels:
                 continue
             spoken = {p for q in iter_questions(task.panels) for p in q.target_paths}
             tracked = {f.path for f in task.fields}
-            assert tracked <= spoken, task.task_key
+            assert spoken == tracked, task.task_key
 
     def test_explode_pulls_in_the_follow_ups_of_an_unanswered_gate_parent(self) -> None:
         """The failure `focus_questions(explode=True)` exists to prevent: the agent asks whether
@@ -434,9 +436,13 @@ class TestFocusCallPlan:
         assert focused.stt_key_terms == PLAN.stt_key_terms
 
     def test_original_plan_not_mutated(self) -> None:
-        before = len(self._all_paths(PLAN))
-        focus_call_plan(PLAN, {self._all_paths(PLAN)[0]}, answers={})
-        assert len(self._all_paths(PLAN)) == before
+        """A path count alone would miss a mutation of `panels` or `prompt` — the two things
+        this function now writes — so compare the whole plan's serialized bytes, on the FUSED
+        plan (`panels`/`prompt` carry hydrated token text only after fusing)."""
+        fused = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        before = fused.model_dump_json()
+        focus_call_plan(fused, {self._all_paths(fused)[0]}, answers={})
+        assert fused.model_dump_json() == before
 
 
 SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
