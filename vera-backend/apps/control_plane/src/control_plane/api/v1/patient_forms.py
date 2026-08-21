@@ -113,7 +113,7 @@ from vera_core.services.field_answers import (
     BASELINE_SOURCES,
     current_values_by_path,
 )
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
 
@@ -536,6 +536,9 @@ class ProvenanceView(BaseModel):
     attempt: int
     mode: str
     judge: JudgeView | None
+    # False when the call that produced this value never captured a rep call reference
+    # number — the value is kept and stays current, but carries no proof (spec D8).
+    authoritative: bool
 
 
 class FieldView(BaseModel):
@@ -563,7 +566,9 @@ def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
         if p.judge is not None
         else None
     )
-    return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
+    return ProvenanceView(
+        attempt=p.attempt, mode=p.mode, judge=judge, authoritative=p.authoritative
+    )
 
 
 def _field_evidence(view: dict[str, Any], p: FieldProvenance | None) -> str | None:
@@ -625,6 +630,9 @@ class CallAttemptView(BaseModel):
     # gate, and the caller holds recordings:read — the DTO must never
     # advertise a recording the playback endpoint would refuse.
     recording_available: bool
+    # False when this call captured no rep call reference number — nothing ties it to a
+    # payer-side record, so its answers are never treated as collected by the retry ask set.
+    authoritative: bool
 
 
 def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
@@ -643,6 +651,7 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
             user_id=caller_id,
             can_play=can_play,
         ),
+        authoritative=a.authoritative,
     )
 
 
@@ -678,6 +687,23 @@ async def _call_scoped_paths(session: TenantSession, form: PatientForm) -> froze
     ).scalar_one()
     doc = _v2_doc(version.schema_json)
     return doc.collected_per_call_paths() if doc is not None else frozenset()
+
+
+async def _authoritative_call_ids(session: TenantSession, form: PatientForm) -> frozenset[UUID]:
+    """The form's calls that captured its rep call reference number (see
+    `load_authoritative_call_ids`). Empty for a document predating the v2 marker — there is no
+    reference field to check, so nothing is authoritative either."""
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    if doc is None:
+        return frozenset()
+    return await load_authoritative_call_ids(
+        session, form.id, reference_field=doc.rep_call_reference_number_field
+    )
 
 
 async def _field_views(
@@ -750,11 +776,17 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         )
     ).scalar_one()
 
-    attempts = await load_call_attempts(session, form.id)
+    authoritative_calls = await _authoritative_call_ids(session, form)
+    attempts = await load_call_attempts(session, form.id, authoritative_calls=authoritative_calls)
     # No calls → no ai_call answers → nothing to join; skip the provenance query
     # (this runs on every form-detail GET, incl. intake-only forms).
     prov = (
-        await load_field_provenance(session, form.id, {a.id: (a.attempt, a.mode) for a in attempts})
+        await load_field_provenance(
+            session,
+            form.id,
+            {a.id: (a.attempt, a.mode) for a in attempts},
+            authoritative_calls=authoritative_calls,
+        )
         if attempts
         else {}
     )
@@ -1031,7 +1063,8 @@ async def list_form_calls(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    attempts = await load_call_attempts(session, form_id)
+    authoritative_calls = await _authoritative_call_ids(session, form)
+    attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     await emit_phi_read_audit(
         get_audit(request),
         request,

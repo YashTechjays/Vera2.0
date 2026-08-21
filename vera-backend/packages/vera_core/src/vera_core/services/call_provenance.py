@@ -11,7 +11,7 @@ never be logged, traced, or attached to a span.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -41,6 +41,12 @@ class FieldProvenance:
     attempt: int
     mode: str
     judge: JudgeInfo | None
+    # False when the call that produced this value captured no rep call reference number:
+    # nothing ties the conversation to a payer-side record, so the answer is never treated as
+    # collected by the retry ask set (spec D8) and contributes nothing to verified_pct (Plan D).
+    # Shown so a reviewer can tell an unproven value from a confirmed one — it is NOT hidden or
+    # demoted.
+    authoritative: bool = True
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,8 @@ class CallAttempt:
     initiated_by_id: UUID | None = None
     published: bool = False
     recording_available: bool = False
+    # Same meaning as `FieldProvenance.authoritative`, at the call level.
+    authoritative: bool = True
 
 
 def snapshot_changed_paths(
@@ -71,9 +79,13 @@ def snapshot_changed_paths(
     return sorted(p for p in set(b) | set(after) if b.get(p, _MISSING) != after.get(p, _MISSING))
 
 
-async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallAttempt]:
+async def load_call_attempts(
+    session: AsyncSession, form_id: UUID, *, authoritative_calls: Collection[UUID] = ()
+) -> list[CallAttempt]:
     """The form's calls as a 1-based attempt timeline, oldest first
-    (created_at, then id — UUIDv7 — as the deterministic tie-break)."""
+    (created_at, then id — UUIDv7 — as the deterministic tie-break). *authoritative_calls*
+    (from `load_authoritative_call_ids`) is the one definition of "authoritative" shared by
+    the ask set, the verified percentages, and this view."""
     calls = (
         await session.execute(
             select(
@@ -139,17 +151,23 @@ async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallA
                 initiated_by_id=c.initiated_by_id,
                 published=c.published,
                 recording_available=c.id in playable,
+                authoritative=c.id in authoritative_calls,
             )
         )
     return out
 
 
 async def load_field_provenance(
-    session: AsyncSession, form_id: UUID, attempt_by_call: Mapping[UUID, tuple[int, str]]
+    session: AsyncSession,
+    form_id: UUID,
+    attempt_by_call: Mapping[UUID, tuple[int, str]],
+    *,
+    authoritative_calls: Collection[UUID] = (),
 ) -> dict[str, FieldProvenance]:
     """Per-path provenance for the form's current ai_call answers: which attempt
     wrote it (via *attempt_by_call*, from load_call_attempts) + the latest judge
-    verdict (latest_eval_subquery, shared with load_field_status)."""
+    verdict (latest_eval_subquery, shared with load_field_status). *authoritative_calls*
+    is the same set `load_call_attempts` takes — see `FieldProvenance.authoritative`."""
     latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
@@ -184,5 +202,7 @@ async def load_field_provenance(
             if supported is not None
             else None
         )
-        out[path] = FieldProvenance(attempt=am[0], mode=am[1], judge=judge)
+        out[path] = FieldProvenance(
+            attempt=am[0], mode=am[1], judge=judge, authoritative=call_id in authoritative_calls
+        )
     return out
