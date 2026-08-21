@@ -580,3 +580,108 @@ wrong. Constants in a plan should be generated, not written.
 Langfuse is currently **stopped** — I took it down while diagnosing §9.1 and left it down, which is the
 hygiene `CLAUDE.md` recommends. `just langfuse-up` restores it, or use the `langfuse-adc` skill's
 command if you need the LLM playground. Note `just langfuse-down` is not scoped to the profile (§9.1).
+
+---
+
+## 14. Final whole-branch review — verdict and three cross-plan findings
+
+**Verdict: ready with follow-ups, gated on one live focused retry.**
+
+Independently verified against merge-base `afe7d059` (per-function md5, not signature checks):
+`is_field_satisfied`, `unsatisfied_required_paths`, `retryable_required_paths`, `_satisfied`,
+`_gate_values` and `_alternatives` are **byte-identical**. `bookend_paths` is gone with no positional
+`tasks[0]` / `tasks[-1]` assumption left in production code. No model or migration touched. PHI clean
+across the union of all six plans — no new log, print, span, URL, query-string or browser-storage
+carrier. Final gate on this tree: `2666 passed, 3 skipped, 21 deselected, 1 xfailed` in 176s.
+
+Recorded so nobody "fixes" it: the unguarded `FormSchemaDoc.model_validate` at
+`queue_dispatcher.py:407` now runs on every dispatch rather than only retries, but it sits behind
+`staged_plan is not None`, and `_resolve_call_plan` returns `None` for a non-v2 schema (form parked
+`CALL_FAILED`, loop continues). A legacy schema cannot reach it.
+
+### 14.1 CORRECTION TO §7.3 — my own analysis was wrong
+I compared "a never-called form reads 44.68% complete against 0% verified" as if those two numbers
+shared a denominator. **They do not**, and the review caught it. Measured on
+`ibv_form_standard_v2` with intake-only values:
+
+| number | denominator | why |
+| --- | --- | --- |
+| `completion_pct_v2` | **39** | keeps the 5 defaulted askable-required leaves and counts them filled |
+| `verified_pct` (`satisfied_required_fraction`) | **34** | routes through `_required_paths` with `include_defaulted` defaulting **False**, dropping those 5 |
+| `focus_paths` ask set | **39** | passes `include_defaulted=True` — the retry rule |
+
+The five are `telehealth_covered`, `enrollment_required`, `group_name`, `group_number`,
+`policy_situs`.
+
+**Consequence, and it is worse than the threshold question I raised:** a focused retry asks **39**
+leaves while `verified_pct` measures **34**, so **`verified_pct` can read 100% while a focused retry
+still has 5 questions to ask.** Neither function is wrong in isolation — `include_defaulted=True` is
+deliberately the retry rule and `False` is deliberately the completeness rule — but the two gates
+compared against the same `tenant.retry_fill_threshold` do not measure the same population, which is
+exactly the incoherence Plan D set out to remove.
+
+**So the `retry_fill_threshold` decision in §13.2 should wait on this.** Deciding a threshold against
+two different denominators is deciding it against nothing. My §7.3 numbers stand as measurements;
+the *comparison* I drew from them does not.
+
+### 14.2 `call_mode` still labels and links the call, but no longer describes it
+`queue_dispatcher.py:369, 447, 472`. The branch's whole premise is that a manual requeue resets
+`retry_count`, so `call_mode` comes out `FULL` — and the focus block now runs anyway, correctly. But
+`Call.mode` is still derived from `retry_count`, and the `CallLineage` insert is still guarded by
+`if call_mode == CallMode.RETRY:`.
+
+**So the exact scenario this branch exists to fix writes `Call.mode="full"` and no lineage row.** Plan
+E's new per-attempt view then reports a narrowed 16-question retry as a full call with
+`retry_of=None`. No single task review could see it: Plan B changed only the gate, Plan E only added
+the pills.
+
+**Tension to resolve, not a defect to patch blindly:** spec D4 *deliberately* kept `call.mode` on
+`retry_count` "for reporting and `CallLineage`", and that decision predates Plan E's view existing. The
+options are to derive mode and lineage from the same predicate the focus block uses, or to accept that
+`mode` means "was a retry budgeted" rather than "was this call focused" and relabel the UI. **That is
+the author's call.**
+
+### 14.3 The greeting/wrap-up guarantee is now data-declared with nothing validating the declaration
+`bookend_paths` used to guarantee in CODE that a focused retry keeps its greeting, recording
+disclosure and reference capture. That guarantee is now carried by the `collected_per="call"` marker —
+and `dsl.py:_validate_document` has no rule requiring any document to declare one.
+
+`_call_scoped_paths` (`patient_forms.py:697`) treats a pre-marker document as "nothing exempt", which
+is right for disputes and wrong for `focus_paths`: with an empty call-scoped union, a form pinned to a
+pre-marker `schema_version` would get a focused retry with **no greeting, no recording disclosure and
+no reference capture**, silently breaking the *next* retry's gate. That is QA issues 3 and 4 returning.
+
+Today nothing is exposed — Plan A's re-seed check confirmed no `patient_form` is pinned to a demoted
+version, and the two catalogs are pinned by `test_schema_dsl.py:991` and `:1010`. But those tests
+enumerate `build_ibv_standard` / `build_disease_only` **by hand**, so a third insurance type is
+unguarded, and the re-seed check was a one-time verification rather than an invariant.
+
+**Tension:** spec D1 explicitly rejected a document-level validator requiring the marker, because
+combined with the `role="ask"` restriction it makes ~12 existing fixtures unconstructible. A narrower
+rule — e.g. "a task that declares an `intro` must contain at least one call-scoped collectable leaf" —
+would likely avoid that collision, but it is a design decision rather than a cleanup.
+
+### 14.4 Minor, from the same review
+- **Inconsistent hardening.** `authoritative_calls` is *required* on `satisfied_required_fraction` and
+  `focus_paths` (so mypy catches a missed caller) but defaults on `build_field_views`,
+  `_open_dispute_paths`, `_unresolved_dispute_count`, `load_call_attempts` and
+  `load_field_provenance`. Every production caller is correct today; a future one silently gets
+  pre-branch behaviour.
+- `doc.collected_per_call_paths() if doc is not None else frozenset()` is written twice —
+  `patient_forms.py:698` and inline at `:1135`.
+- The **export** path is the last `authoritative_calls=None` caller. Nothing is misstated (the XLSX
+  renders neither flag) but the workbook a biller keeps now omits a distinction the UI makes.
+- `recompute_form_projection` rewrites `completion_pct` on every answer write and never `verified_pct`,
+  against `post_call_eval.py:459`'s "verified_pct must always mirror completion_pct". Pre-existing;
+  Plan D widened the gap.
+- "Authoritative" defaults **opposite ways by layer**: unknown ⇒ *trust* in `call_provenance.py:88`
+  (so a legacy form is not falsely marked unproven), unknown ⇒ *don't trust* in `is_call_confirmed`
+  (so a retry re-asks). Each is fail-safe for its own consumer and both are documented, but the word
+  now carries two defaults.
+
+### 14.5 On the frontend mirror's cross-check (specifically assessed)
+It would catch what Plan D changed: `mock.ts` imports the backend artifact directly rather than a copy,
+so both sides read one document; the frontend pins 39/5/13 while the backend derives its expectation,
+so removing the role filter fails on either side. What it cannot catch is divergence in a dimension
+neither number depends on — rounding (already known) and `isSatisfied`'s alternative-sibling rule,
+which is mirrored by hand with no fixture asserting the two implementations agree on one input.
