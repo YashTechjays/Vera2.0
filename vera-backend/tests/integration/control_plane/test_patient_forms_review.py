@@ -29,6 +29,9 @@ from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, Vers
 from vera_core.services.queue_dispatcher import _resolve_provider
 
 HEALTH_PLAN = "insurance_information.health_plan"
+# A real `collected_per: "call"` leaf on the seeded IBV schema (schema_version_id below) —
+# see FormSchemaDoc.collected_per_call_paths() and data/form_schemas/ibv_form_standard_v2.json.
+CALL_SCOPED_REP_NAME = "sections.insurance_representative.rep_name"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -945,6 +948,47 @@ async def test_no_baseline_ai_value_is_disputed(
         json={"status": "completed"},
     )
     assert block.status_code == 409, block.text
+
+
+async def test_call_scoped_path_never_disputed_at_the_detail_endpoint(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """End-to-end proof that call-scoped suppression is actually wired through
+    `_build_detail` -> `_call_scoped_paths` -> `_field_views`, not just exercised by the
+    pure `build_field_views` unit tests. A neutered `_call_scoped_paths` (e.g. hardcoded to
+    `frozenset()`) would make CALL_SCOPED_REP_NAME disputed here — this is that regression's
+    only production-level tripwire. One test carries both halves deliberately: the
+    call-scoped path with no baseline shows no dispute, while a form-scoped `ai_call`
+    answer with no baseline IN THE SAME RESPONSE still does — proving the exemption is
+    selective, not a global "AI answers are never disputed" bug.
+    """
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    for path, value in ((CALL_SCOPED_REP_NAME, "Priya Raman"), (HEALTH_PLAN, "Blue Cross")):
+        await _add_answer(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            form_id=form_id,
+            field_path=path,
+            value=value,
+            source=AnswerSource.AI_CALL.value,
+            confidence=90,
+        )
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert detail.status_code == 200, detail.text
+    fields = {f["field_path"]: f for f in detail.json()["data"]["fields"]}
+    assert fields[CALL_SCOPED_REP_NAME]["dispute"] is None
+    assert fields[HEALTH_PLAN]["dispute"] is not None
 
 
 async def test_resolve_baseline_edit_writes_no_dispute_action(

@@ -85,13 +85,22 @@ def snapshot_changed_paths(
     return sorted(p for p in set(b) | set(after) if b.get(p, _MISSING) != after.get(p, _MISSING))
 
 
+def _authoritative(call_id: UUID, authoritative_calls: Collection[UUID] | None) -> bool:
+    """`None` means "the caller never computed the set" (a v1/legacy form, or a caller — e.g.
+    the export endpoint — that has no use for the flag): the dataclass default (`True`) stands
+    rather than reading as "confirmed non-authoritative". A concrete set means every call not
+    in it is known, not merely unproven-by-omission, so it IS `False`."""
+    return True if authoritative_calls is None else call_id in authoritative_calls
+
+
 async def load_call_attempts(
-    session: AsyncSession, form_id: UUID, *, authoritative_calls: Collection[UUID] = ()
+    session: AsyncSession, form_id: UUID, *, authoritative_calls: Collection[UUID] | None = None
 ) -> list[CallAttempt]:
     """The form's calls as a 1-based attempt timeline, oldest first
     (created_at, then id — UUIDv7 — as the deterministic tie-break). *authoritative_calls*
     (from `load_authoritative_call_ids`) is the one definition of "authoritative" shared by
-    the ask set, the verified percentages, and this view."""
+    the ask set, the verified percentages, and this view. `None` (the default) leaves every
+    attempt at the dataclass's own default (`authoritative=True`) — see `_authoritative`."""
     calls = (
         await session.execute(
             select(
@@ -157,7 +166,7 @@ async def load_call_attempts(
                 initiated_by_id=c.initiated_by_id,
                 published=c.published,
                 recording_available=c.id in playable,
-                authoritative=c.id in authoritative_calls,
+                authoritative=_authoritative(c.id, authoritative_calls),
                 finalized=bool(after),
             )
         )
@@ -169,12 +178,13 @@ async def load_field_provenance(
     form_id: UUID,
     attempt_by_call: Mapping[UUID, tuple[int, str]],
     *,
-    authoritative_calls: Collection[UUID] = (),
+    authoritative_calls: Collection[UUID] | None = None,
 ) -> dict[str, FieldProvenance]:
     """Per-path provenance for the form's current ai_call answers: which attempt
     wrote it (via *attempt_by_call*, from load_call_attempts) + the latest judge
     verdict (latest_eval_subquery, shared with load_field_status). *authoritative_calls*
-    is the same set `load_call_attempts` takes — see `FieldProvenance.authoritative`."""
+    is the same set `load_call_attempts` takes, including the `None` default — see
+    `_authoritative` / `FieldProvenance.authoritative`."""
     latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
@@ -210,6 +220,9 @@ async def load_field_provenance(
             else None
         )
         out[path] = FieldProvenance(
-            attempt=am[0], mode=am[1], judge=judge, authoritative=call_id in authoritative_calls
+            attempt=am[0],
+            mode=am[1],
+            judge=judge,
+            authoritative=_authoritative(call_id, authoritative_calls),
         )
     return out

@@ -373,7 +373,7 @@ class TestBuildFieldViews:
 class TestCallScopedPathsAreNeverDisputed:
     """A call-scoped answer has no form-level baseline by definition, so it cannot diverge from
     one. Today the rep's name and the call reference number are flagged on EVERY call with
-    `previous_value: null` — 152 such views on the seeded form."""
+    `previous_value: null` — 151 such views on the seeded form before this fix (148 after)."""
 
     def _rows(self) -> list[AnswerRow]:
         return [

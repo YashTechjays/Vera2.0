@@ -693,10 +693,14 @@ async def _call_scoped_paths(session: TenantSession, form: PatientForm) -> froze
     return doc.collected_per_call_paths() if doc is not None else frozenset()
 
 
-async def _authoritative_call_ids(session: TenantSession, form: PatientForm) -> frozenset[UUID]:
+async def _authoritative_call_ids(
+    session: TenantSession, form: PatientForm
+) -> frozenset[UUID] | None:
     """The form's calls that captured its rep call reference number (see
-    `load_authoritative_call_ids`). Empty for a document predating the v2 marker — there is no
-    reference field to check, so nothing is authoritative either."""
+    `load_authoritative_call_ids`). `None` for a document predating the v2 marker: there is no
+    reference field to check, so "authoritative" is undefined for this form — not `False` on
+    every call. Threading `None` through to `load_call_attempts`/`load_field_provenance` leaves
+    their dataclass default (`authoritative=True`) in place instead."""
     version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
@@ -704,7 +708,7 @@ async def _authoritative_call_ids(session: TenantSession, form: PatientForm) -> 
     ).scalar_one()
     doc = _v2_doc(version.schema_json)
     if doc is None:
-        return frozenset()
+        return None
     return await load_authoritative_call_ids(
         session, form.id, reference_field=doc.rep_call_reference_number_field
     )

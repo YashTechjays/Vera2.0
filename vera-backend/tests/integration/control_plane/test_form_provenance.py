@@ -285,6 +285,31 @@ async def test_detail_carries_provenance_for_ai_fields(
 
 
 @pytest.mark.asyncio
+async def test_v1_form_is_not_flagged_unproven(
+    client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
+) -> None:
+    """provenance_form_id is seeded with `schema_json={}` — a v1/legacy document with no
+    `rep_call_reference_number_field` to check, so "authoritative" is undefined for this
+    form. It must render as `True` (the dataclass default — "unknown, not disproven"),
+    never `False` ("proven non-authoritative"), on both the calls timeline and the
+    detail's per-field provenance."""
+    calls_resp = await client.get(
+        f"/api/v1/patient-forms/{provenance_form_id}/calls",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert calls_resp.status_code == 200, calls_resp.text
+    assert all(c["authoritative"] is True for c in calls_resp.json()["data"])
+
+    detail_resp = await client.get(
+        f"/api/v1/patient-forms/{provenance_form_id}",
+        headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
+    )
+    assert detail_resp.status_code == 200, detail_resp.text
+    ai = {f["field_path"]: f for f in detail_resp.json()["data"]["fields"]}["cov.b"]
+    assert ai["provenance"]["authoritative"] is True
+
+
+@pytest.mark.asyncio
 async def test_field_evidence_prefers_the_judge_quote(
     client: httpx.AsyncClient, rbac_world: RBACWorld, provenance_form_id: UUID
 ) -> None:

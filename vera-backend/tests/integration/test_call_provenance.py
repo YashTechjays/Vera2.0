@@ -265,6 +265,12 @@ async def test_attempts_lineage_and_diffs(two_call_form_ctx: _TwoCallFormCtx) ->
     # Both calls' post-call eval ran (after_state is non-empty), so both are finalized.
     assert attempts[0].finalized is True
     assert attempts[1].finalized is True
+    # Neither call site here computed an authoritative set: `authoritative_calls` stays at
+    # its `None` default, which must leave the dataclass's own default (`True`) in place —
+    # NOT read as "confirmed non-authoritative" (that would be `authoritative=False` on
+    # every row, the exact opposite of the declared default).
+    assert attempts[0].authoritative is True
+    assert attempts[1].authoritative is True
 
     prov = await load_field_provenance(
         ctx.session, ctx.form_id, {a.id: (a.attempt, a.mode) for a in attempts}
@@ -272,6 +278,7 @@ async def test_attempts_lineage_and_diffs(two_call_form_ctx: _TwoCallFormCtx) ->
     assert prov["cov.b"].attempt == 2 and prov["cov.b"].mode == "retry"
     assert prov["cov.b"].judge is not None
     assert prov["cov.b"].judge.confidence == 88 and prov["cov.b"].judge.supported is True
+    assert prov["cov.b"].authoritative is True
 
 
 @pytest.fixture
