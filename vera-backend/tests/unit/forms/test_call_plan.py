@@ -56,7 +56,11 @@ PLAN: CallPlan = compile_call_plan(
     schema_version_id=SCHEMA_VERSION_ID,
     prompt_version_id=None,
 )
-DOC: FormSchemaDoc = build_ibv_standard()
+
+
+def spoken_paths(task: PlanTask) -> set[str]:
+    """Every path the task's rendered question tree actually asks for."""
+    return {p for q in iter_questions(task.panels) for p in q.target_paths}
 
 
 def plan_task(plan: CallPlan, key: str) -> PlanTask:
@@ -369,7 +373,7 @@ class TestFocusCallPlan:
         target = "sections.deductibles.individual.total"
         focused = focus_call_plan(PLAN, {target}, answers={})
         task = plan_task(focused, "financial")
-        spoken = {p for q in iter_questions(task.panels) for p in q.target_paths}
+        spoken = spoken_paths(task)
         assert target in spoken
         assert "sections.out_of_pocket.individual.total" not in spoken
 
@@ -399,7 +403,7 @@ class TestFocusCallPlan:
         for task in focused.tasks:
             if not task.panels:
                 continue
-            spoken = {p for q in iter_questions(task.panels) for p in q.target_paths}
+            spoken = spoken_paths(task)
             tracked = {f.path for f in task.fields}
             assert spoken == tracked, task.task_key
 
@@ -411,7 +415,7 @@ class TestFocusCallPlan:
         parent = "sections.infertility_treatment.infertility_tx_covered"
         focused = focus_call_plan(PLAN, {parent}, answers={})
         task = plan_task(focused, "infertility_coverage")
-        spoken = {p for q in iter_questions(task.panels) for p in q.target_paths}
+        spoken = spoken_paths(task)
         assert parent in spoken
         assert len(spoken) > 1, "the parent's dependents were not pre-loaded"
 
@@ -421,12 +425,12 @@ class TestFocusCallPlan:
         parent = "sections.infertility_treatment.infertility_tx_covered"
         answered = {
             p: "Yes"
-            for p, _leaf in DOC.leaf_items()
+            for p, _leaf in IBV.leaf_items()
             if p.startswith("sections.infertility_treatment.") and p != parent
         }
         focused = focus_call_plan(PLAN, {parent}, answers=answered)
         task = plan_task(focused, "infertility_coverage")
-        spoken = {p for q in iter_questions(task.panels) for p in q.target_paths}
+        spoken = spoken_paths(task)
         assert spoken == {parent}
 
     def test_still_clears_on_file_values_and_keeps_the_session(self) -> None:

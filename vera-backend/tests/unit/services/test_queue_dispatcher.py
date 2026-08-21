@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
-from vera_core.forms.call_plan import CallPlan, PrefillFuser
+from vera_core.forms.call_plan import CallPlan, fuse_prefill
 from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument, numbered_questions
@@ -1334,8 +1334,11 @@ class TestCallPlanStaging:
         full_template = real_compile_call_plan(
             doc, prompt_doc, schema_version_id=sv.id, prompt_version_id=pv.id
         )
-        full = PrefillFuser(doc, full_template).fuse(
-            values, current_year=datetime.now(ZoneInfo("America/New_York")).year
+        full = fuse_prefill(
+            doc,
+            full_template,
+            values,
+            current_year=datetime.now(ZoneInfo("America/New_York")).year,
         )
         assert staged is not full
         full_by_key = {t.task_key: t for t in full.tasks}

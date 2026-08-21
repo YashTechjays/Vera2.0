@@ -60,7 +60,11 @@ from vera_core.forms.dsl import (
     Validation,
     condition_field_paths,
 )
-from vera_core.forms.prompting import PromptDocument, render_panels, render_task_prompts
+from vera_core.forms.prompting import (
+    PromptDocument,
+    assemble_task_prompt,
+    render_task_prompts,
+)
 from vera_core.forms.question_plan import (
     PromptPanel,
     PromptQuestion,
@@ -440,55 +444,41 @@ def focus_call_plan(
     *,
     answers: Mapping[str, Any],
 ) -> CallPlan:
-    """Narrow a fused plan to a FOCUSED retry: keep only what `paths` asks for, in both the
-    tracked fields AND the spoken question tree. The agent then asks ONLY the still-missing
-    data points — with no announcement that this is a retry (the payer rep must never be told
+    """Narrow a fused plan to a FOCUSED retry, in both the tracked fields and the spoken
+    question tree, with no announcement that this is a retry (the payer rep must never be told
     a prior call happened).
-
-    `focus_questions(..., explode=True)` does the tree narrowing — the same primitive and flag
-    the gap pass uses — so a question whose gate reads a path being asked comes along carrying
-    its own "Ask only if …" prose. Without that, a retry whose only gap is a gate parent asks
-    one question and has nothing sanctioned to follow the answer with.
-
-    `fields` is derived from the kept questions rather than from `paths`, because `explode`
-    grows the set: `owed_now` joins questions against `task.fields`, so a rendered question with
-    no matching field is invisible to the `task_complete` refusal and the gap pass.
-
-    `prompt` is re-rendered from the narrowed tree using the same three-piece reassembly
-    `PlanTaskAgent._assembled_block` pins (`TestPanelsMatchThePrompt`). The completeness rule is
-    deliberately NOT rendered here — the worker inserts it at task entry from whatever panels it
-    holds, so it counts the narrowed list automatically.
-
-    Persona/goal/base_instructions and the ``known_information`` background block are preserved
-    (context the agent needs), but ``on_file_values`` is cleared — that block drives read-back
-    confirmations of already-known values, exactly the "re-verify everything" behavior a focused
-    retry must avoid. A confirm-role field kept in *paths* degrades to a plain ask, which is the
-    intended re-collect.
     """
     keep = set(paths)
     shared = plan.shared_conditions
     tasks: list[PlanTask] = []
     for task in plan.tasks:
         if not task.panels:
-            # The compiler shipped no tree for this task: it carries only speech, so there is
-            # nothing to narrow and nothing to count. Keep it whole.
+            # Speech-only task (its collectables are end-of-task confirms, which live in
+            # `trailing`): nothing to narrow, and the general path below would drop it.
             tasks.append(task)
             continue
+        # `explode` pulls in a question whose gate reads a path being asked, carrying its own
+        # "Ask only if …" prose — an agent holding an answer with no sanctioned next question
+        # invents one.
         panels = focus_questions(task, keep, answers, shared, explode=True)
         spoken = {path for question in iter_questions(panels) for path in question.target_paths}
+        # From the KEPT QUESTIONS, not from `paths`: `explode` grows the set, and `owed_now`
+        # joins questions against `task.fields`, so a rendered question with no matching field
+        # is invisible to the `task_complete` refusal and the gap pass.
         fields = [field for field in task.fields if field.path in spoken]
         if not fields:
             continue
-        parts = (task.lead_in, render_panels(panels), task.trailing)
         tasks.append(
             task.model_copy(
                 update={
                     "panels": panels,
                     "fields": fields,
-                    "prompt": "\n\n".join(part for part in parts if part),
+                    "prompt": assemble_task_prompt(task.lead_in, panels, task.trailing),
                 }
             )
         )
+    # `on_file_values` drives read-back confirmations of known values — exactly the
+    # "re-verify everything" a focused retry must avoid.
     return plan.model_copy(update={"tasks": tasks, "on_file_values": None})
 
 

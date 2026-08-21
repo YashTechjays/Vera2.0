@@ -536,6 +536,17 @@ def _numbered_question(
     return lines
 
 
+def assemble_task_prompt(lead_in: str, panels: list[PromptPanel], trailing: str) -> str:
+    """A task's three text pieces recombined into its `prompt`, empty pieces skipped.
+
+    The single definition of that shape: the compiler builds every `PlanTask.prompt` through
+    it and `focus_call_plan` re-renders a narrowed tree through it, so the two can never
+    disagree. `TestPanelsMatchThePrompt` pins the result and deliberately spells the join out
+    by hand rather than calling this — a test that reused the helper could not catch a bug in it.
+    """
+    return "\n\n".join(p for p in (lead_in, render_panels(panels), trailing) if p)
+
+
 class _TaskText(_Doc):
     lead_in: str
     panels: list[PromptPanel]
@@ -543,9 +554,7 @@ class _TaskText(_Doc):
 
     @property
     def prompt(self) -> str:
-        return "\n\n".join(
-            p for p in (self.lead_in, render_panels(self.panels), self.trailing) if p
-        )
+        return assemble_task_prompt(self.lead_in, self.panels, self.trailing)
 
 
 def _task_text(
