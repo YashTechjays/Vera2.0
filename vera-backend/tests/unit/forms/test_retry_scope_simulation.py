@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_gates
 from vera_core.forms.dsl import COLLECTED_ROLES, Condition, FormSchemaDoc
 from vera_core.forms.review import FieldStatus, focus_paths
@@ -245,3 +247,413 @@ def test_call_scoped_fields_confirmed_by_authoritative_call_are_still_asked() ->
     focus = _focus(scenario)
     assert_invariants(_DOC, _RAW, scenario, focus)
     assert _DOC.collected_per_call_paths() <= set(focus)
+
+
+def _scoped(focus: list[str], prefix: str) -> set[str]:
+    """The subset of `focus` under a dotted path prefix — what the scoped exact-set
+    assertions below compare against."""
+    return {path for path in focus if path.startswith(prefix)}
+
+
+# -- Step 1: coverage-type gating (spouse details) ----------------------------------------
+
+_SPOUSE_VALUES_NO_COVERAGE_TYPE: dict[str, Any] = {
+    "sections.patient_information.spouse_partner_name": "Test Spouse",
+    "sections.patient_information.spouse_partner_dob": "1990-01-01",
+}
+
+
+def test_individual_plan_has_no_spouse_leaves() -> None:
+    """Pins: the spouse leaves are `required when family_coverage` and gated on it too, so an
+    Individual plan's `coverage_type` rules the branch out — the `default="N/A"` on each leaf
+    never enters this decision."""
+    scenario = Scenario(
+        "individual plan, spouse leaves absent",
+        values={"sections.benefit_coverage.coverage_type": "Individual"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _SPOUSE_PATHS.isdisjoint(focus)
+
+
+def test_family_plan_spouse_leaves_unanswered_are_owed() -> None:
+    """Pins: on a Family plan both spouse leaves are owed although each carries
+    `default="N/A"` — the retry ask set includes defaulted leaves, so a default must not
+    excuse them."""
+    scenario = Scenario(
+        "family plan, spouse leaves unanswered",
+        values={"sections.benefit_coverage.coverage_type": "Family"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert set(focus) >= _SPOUSE_PATHS
+
+
+def test_coverage_type_unanswered_hides_spouse_leaves_even_with_values_on_file() -> None:
+    """Pins the gate-parent case: with `coverage_type` itself unanswered, `family_coverage` is
+    unsatisfied, so both spouse leaves stay ABSENT even though a value is already on file for
+    each — recovering the gate parent belongs to `focus_questions(explode=True)` in the
+    compiled plan, not to `focus_paths`."""
+    scenario = Scenario(
+        "coverage_type unanswered, spouse values already on file",
+        values=dict(_SPOUSE_VALUES_NO_COVERAGE_TYPE),
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _SPOUSE_PATHS.isdisjoint(focus)
+
+
+# -- Step 2: plan-type gating (PCP referral) ----------------------------------------------
+
+_PLAN_TYPE_PATH = "sections.insurance_information.plan_type"
+_PCP_REFERRAL_PATH = "sections.benefit_coverage.pcp_referral_required"
+
+
+def test_ppo_plan_has_no_pcp_referral_question() -> None:
+    """Pins: `pcp_referral_required` is gated on `plan_type == "HMO"`, so a PPO plan never
+    asks it, `default="N/A"` notwithstanding."""
+    scenario = Scenario(
+        "PPO plan", values={_PLAN_TYPE_PATH: "PPO"}, confirmed_by_authoritative=False
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _PCP_REFERRAL_PATH not in focus
+
+
+def test_hmo_plan_pcp_referral_unanswered_is_owed() -> None:
+    scenario = Scenario(
+        "HMO plan, PCP referral unanswered",
+        values={_PLAN_TYPE_PATH: "HMO"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _PCP_REFERRAL_PATH in focus
+
+
+def test_hmo_plan_pcp_referral_confirmed_by_authoritative_call_is_absent() -> None:
+    scenario = Scenario(
+        "HMO plan, PCP referral confirmed by an authoritative call",
+        values={_PLAN_TYPE_PATH: "HMO", _PCP_REFERRAL_PATH: "Yes"},
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _PCP_REFERRAL_PATH not in focus
+
+
+def test_hmo_plan_pcp_referral_confirmed_by_non_authoritative_call_is_still_owed() -> None:
+    """Spec D8: a non-authoritative call is not proof, so the retry still owes it."""
+    scenario = Scenario(
+        "HMO plan, PCP referral confirmed by a non-authoritative call",
+        values={_PLAN_TYPE_PATH: "HMO", _PCP_REFERRAL_PATH: "Yes"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _PCP_REFERRAL_PATH in focus
+
+
+# -- Step 3: two-level gating (male partner) ----------------------------------------------
+
+_COVERAGE_TYPE_PATH = "sections.benefit_coverage.coverage_type"
+_SPOUSE_GENDER_PATH = "sections.patient_information.spouse_gender"
+_MALE_PARTNER_PREFIX = "sections.male_partner_coverage."
+_MALE_PARTNER_COVERED_PATH = f"{_MALE_PARTNER_PREFIX}male_partner_covered"
+_SEMEN_ANALYSIS_GROUP = f"{_MALE_PARTNER_PREFIX}semen_analysis.cpt_89320"
+_SPERM_CRYO_GROUP = f"{_MALE_PARTNER_PREFIX}sperm_cryopreservation.cpt_89259"
+_CPT_GROUP_LEAVES = ("covered", "copay", "coinsurance", "prior_auth")
+_SEMEN_ANALYSIS_LEAVES = frozenset(f"{_SEMEN_ANALYSIS_GROUP}.{f}" for f in _CPT_GROUP_LEAVES)
+_SPERM_CRYO_LEAVES = frozenset(f"{_SPERM_CRYO_GROUP}.{f}" for f in _CPT_GROUP_LEAVES)
+
+
+def test_individual_plan_hides_whole_male_partner_subtree() -> None:
+    """Pins level one of the two-level gate: `male_partner_in_scope` needs `family_coverage`
+    first, so an Individual plan rules out the whole `male_partner_coverage` section
+    regardless of the spouse's gender."""
+    scenario = Scenario(
+        "individual plan, spouse marked male",
+        values={_COVERAGE_TYPE_PATH: "Individual", _SPOUSE_GENDER_PATH: "Male"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _MALE_PARTNER_PREFIX) == set()
+
+
+def test_family_plan_female_spouse_hides_whole_male_partner_subtree() -> None:
+    """Pins level two: `family_coverage` alone is not enough — the ref also needs
+    `spouse_gender == "Male"`, so a Family plan with a female spouse still rules the whole
+    section out."""
+    scenario = Scenario(
+        "family plan, spouse marked female",
+        values={_COVERAGE_TYPE_PATH: "Family", _SPOUSE_GENDER_PATH: "Female"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _MALE_PARTNER_PREFIX) == set()
+
+
+def test_male_partner_in_scope_asks_only_the_gate_leaf() -> None:
+    """With both levels of the gate open and `male_partner_covered` itself unanswered, the
+    panels behind it (each gated on `male_partner_covered == "Yes"`) are not yet applicable —
+    nothing owed drags them into focus via group closure, so only the gate leaf is asked."""
+    scenario = Scenario(
+        "family plan, male spouse, male_partner_covered unanswered",
+        values={_COVERAGE_TYPE_PATH: "Family", _SPOUSE_GENDER_PATH: "Male"},
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _MALE_PARTNER_PREFIX) == {_MALE_PARTNER_COVERED_PATH}
+
+
+def test_male_partner_covered_confirmed_yes_opens_both_panels_in_full() -> None:
+    """With `male_partner_covered` authoritatively confirmed "Yes", both the `semen_analysis`
+    and `sperm_cryopreservation` CPT panels become applicable and their `covered` leaf is
+    owed, so group closure opens each panel whole (all four leaves, including `copay`/
+    `coinsurance` which are not yet individually applicable — expected, see module docstring's
+    corrected I1). The gate leaf itself, now confirmed, drops out."""
+    scenario = Scenario(
+        "family plan, male spouse, male_partner_covered confirmed Yes",
+        values={
+            _COVERAGE_TYPE_PATH: "Family",
+            _SPOUSE_GENDER_PATH: "Male",
+            _MALE_PARTNER_COVERED_PATH: "Yes",
+        },
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _MALE_PARTNER_PREFIX) == _SEMEN_ANALYSIS_LEAVES | _SPERM_CRYO_LEAVES
+
+
+# -- Step 4: existence-flag gating (TPA, PBM, ISP, enrollment) ----------------------------
+
+
+@dataclass(frozen=True)
+class _ExistenceFlagCase:
+    """One existence-flag section: the ungated flag and the leaf(ves) gated on it.
+
+    `third_party_administrator` has no `tpa_phone` counterpart to `tpa_name` in this schema
+    (verified against the compiled JSON), so its `detail_paths` is a singleton unlike its three
+    siblings."""
+
+    label: str
+    flag: str
+    section_prefix: str
+    detail_paths: frozenset[str]
+    always_owed: frozenset[str] = frozenset()
+
+
+_EXISTENCE_FLAG_CASES = [
+    _ExistenceFlagCase(
+        "third_party_administrator",
+        "sections.third_party_administrator.tpa_exists",
+        "sections.third_party_administrator.",
+        frozenset({"sections.third_party_administrator.tpa_name"}),
+    ),
+    _ExistenceFlagCase(
+        "pharmacy_benefit_manager",
+        "sections.pharmacy_benefit_manager.pbm_exists",
+        "sections.pharmacy_benefit_manager.",
+        frozenset(
+            {
+                "sections.pharmacy_benefit_manager.pbm_name",
+                "sections.pharmacy_benefit_manager.pbm_phone",
+            }
+        ),
+    ),
+    _ExistenceFlagCase(
+        "infertility_specialty_pharmacy",
+        "sections.infertility_specialty_pharmacy.isp_exists",
+        "sections.infertility_specialty_pharmacy.",
+        frozenset(
+            {
+                "sections.infertility_specialty_pharmacy.isp_name",
+                "sections.infertility_specialty_pharmacy.isp_phone",
+            }
+        ),
+    ),
+    _ExistenceFlagCase(
+        "enrollment",
+        "sections.enrollment.enrollment_required",
+        "sections.enrollment.",
+        frozenset(
+            {
+                "sections.enrollment.enrollment_provider_name",
+                "sections.enrollment.enrollment_provider_phone",
+            }
+        ),
+        always_owed=frozenset({"sections.enrollment.center_of_excellence_required"}),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case", _EXISTENCE_FLAG_CASES, ids=[c.label for c in _EXISTENCE_FLAG_CASES]
+)
+def test_existence_flag_gating(case: _ExistenceFlagCase) -> None:
+    """Pins the four identically-shaped existence-flag sections: unanswered asks only the
+    flag; a flag authoritatively confirmed "No" asks nothing; confirmed "Yes" asks only the
+    detail leaf(ves). `enrollment` additionally carries `center_of_excellence_required`,
+    ungated and never answered here, so it is owed in all three sub-cases — `always_owed`
+    accounts for it rather than letting it read as a surprise."""
+    unanswered = Scenario(
+        f"{case.label}, flag unanswered", values={}, confirmed_by_authoritative=False
+    )
+    focus = _focus(unanswered)
+    assert_invariants(_DOC, _RAW, unanswered, focus)
+    assert _scoped(focus, case.section_prefix) == {case.flag} | case.always_owed
+
+    confirmed_no = Scenario(
+        f"{case.label}, flag confirmed No",
+        values={case.flag: "No"},
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(confirmed_no)
+    assert_invariants(_DOC, _RAW, confirmed_no, focus)
+    assert _scoped(focus, case.section_prefix) == case.always_owed
+
+    confirmed_yes = Scenario(
+        f"{case.label}, flag confirmed Yes",
+        values={case.flag: "Yes"},
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(confirmed_yes)
+    assert_invariants(_DOC, _RAW, confirmed_yes, focus)
+    assert _scoped(focus, case.section_prefix) == case.detail_paths | case.always_owed
+
+
+# -- Step 5: the 27-way prior-auth rollup -------------------------------------------------
+
+_AUTH_DEPT_PREFIX = "sections.authorization_department."
+_AUTH_DEPT_PATHS = frozenset(
+    {
+        "sections.authorization_department.auth_department_name",
+        "sections.authorization_department.auth_department_phone",
+    }
+)
+
+
+def test_no_service_requiring_prior_auth_hides_authorization_department() -> None:
+    scenario = Scenario(
+        "no service requires prior auth", values={}, confirmed_by_authoritative=False
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _AUTH_DEPT_PREFIX) == set()
+
+
+@dataclass(frozen=True)
+class _PriorAuthDisjunct:
+    label: str
+    values: dict[str, Any]
+
+
+_PRIOR_AUTH_DISJUNCTS = [
+    _PriorAuthDisjunct(
+        "diagnostic labs/xray/ultrasound CPT 58340",
+        {
+            "sections.diagnostic_testing.diagnostic_testing_covered": "Yes",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered": "Yes",
+            "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.prior_auth": "Yes",
+        },
+    ),
+    _PriorAuthDisjunct(
+        "male partner semen analysis CPT 89320",
+        {
+            _COVERAGE_TYPE_PATH: "Family",
+            _SPOUSE_GENDER_PATH: "Male",
+            _MALE_PARTNER_COVERED_PATH: "Yes",
+            f"{_SEMEN_ANALYSIS_GROUP}.covered": "Yes",
+            f"{_SEMEN_ANALYSIS_GROUP}.prior_auth": "Yes",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case", _PRIOR_AUTH_DISJUNCTS, ids=[c.label for c in _PRIOR_AUTH_DISJUNCTS]
+)
+def test_single_service_prior_auth_opens_authorization_department(
+    case: _PriorAuthDisjunct,
+) -> None:
+    """Pins that `any_service_requires_prior_auth` is a real 27-way `any`: two unrelated
+    disjuncts, each with its own deeper gate chain satisfied, both open the authorization
+    department leaves — proving the rollup isn't keyed to one hardcoded field."""
+    scenario = Scenario(case.label, values=dict(case.values), confirmed_by_authoritative=True)
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _AUTH_DEPT_PREFIX) == _AUTH_DEPT_PATHS
+
+
+# -- Step 6: money sentinel gating ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _MoneyTripletCase:
+    label: str
+    total_path: str
+    met_path: str
+    remaining_path: str
+    sentinel: str
+    real_amount: str
+
+
+_MONEY_TRIPLET_CASES = [
+    _MoneyTripletCase(
+        "deductibles.individual",
+        "sections.deductibles.individual.total",
+        "sections.deductibles.individual.met_amount",
+        "sections.deductibles.individual.remaining",
+        sentinel="No Deductible",
+        real_amount="$500",
+    ),
+    _MoneyTripletCase(
+        "out_of_pocket.individual",
+        "sections.out_of_pocket.individual.total",
+        "sections.out_of_pocket.individual.met_amount",
+        "sections.out_of_pocket.individual.remaining",
+        sentinel="$0",
+        real_amount="$1000",
+    ),
+    _MoneyTripletCase(
+        "lifetime_maximum",
+        "sections.lifetime_maximum.total",
+        "sections.lifetime_maximum.met_amount",
+        "sections.lifetime_maximum.remaining",
+        sentinel="No Limit",
+        real_amount="$5000",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _MONEY_TRIPLET_CASES, ids=[c.label for c in _MONEY_TRIPLET_CASES])
+def test_money_sentinel_gating(case: _MoneyTripletCase) -> None:
+    """Pins each triplet's OWN sentinel list gating `met_amount`/`remaining`: a sentinel total
+    (unique to that triplet's list, e.g. "No Deductible" only appears in `deductibles`) closes
+    both; a real, authoritatively confirmed total leaves both owed."""
+    sentinel_scenario = Scenario(
+        f"{case.label}, total is a sentinel",
+        values={case.total_path: case.sentinel},
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(sentinel_scenario)
+    assert_invariants(_DOC, _RAW, sentinel_scenario, focus)
+    assert case.met_path not in focus
+    assert case.remaining_path not in focus
+
+    real_amount_scenario = Scenario(
+        f"{case.label}, total is a real amount",
+        values={case.total_path: case.real_amount},
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(real_amount_scenario)
+    assert_invariants(_DOC, _RAW, real_amount_scenario, focus)
+    assert case.met_path in focus
+    assert case.remaining_path in focus
