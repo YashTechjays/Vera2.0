@@ -239,7 +239,10 @@ export function HistoryReport() {
       )}
       {report && (
         <div className="grid gap-4 lg:grid-cols-2">
-          <ChartCard title="Calls per day">
+          <ChartCard
+            title="Calls per day"
+            empty={report.current.call_volume === 0 ? "No calls in this period" : undefined}
+          >
             <BarChart data={report.calls_per_day}>
               <CartesianGrid vertical={false} strokeOpacity={0.3} />
               <XAxis {...DAY_AXIS} />

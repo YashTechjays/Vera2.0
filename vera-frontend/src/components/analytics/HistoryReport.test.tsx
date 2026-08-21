@@ -68,6 +68,29 @@ describe("HistoryReport", () => {
     )
   })
 
+  it("both charts show an empty state when the range has zero calls (VR2-284)", async () => {
+    mockedReport.mockResolvedValue({
+      ...REPORT,
+      current: { ...REPORT.current, call_volume: 0, intervened_calls: 0, intervention_rate: null },
+      // The backend zero-fills days (VR2-282), so an empty window still carries rows.
+      calls_per_day: [
+        { day: "2026-08-01", calls: 0 },
+        { day: "2026-08-02", calls: 0 },
+      ],
+      interventions_by_type: [],
+      interventions_per_day: [],
+    })
+    render(<HistoryReport />)
+    await waitFor(() => expect(screen.getByText("No calls in this period")).toBeInTheDocument())
+    expect(screen.getByText("No interventions in this period")).toBeInTheDocument()
+  })
+
+  it("calls chart shows no empty state while the range has calls", async () => {
+    render(<HistoryReport />)
+    await waitFor(() => expect(screen.getByText("Calls per day")).toBeInTheDocument())
+    expect(screen.queryByText("No calls in this period")).not.toBeInTheDocument()
+  })
+
   it("refetches when the provider filter changes", async () => {
     render(<HistoryReport />)
     await waitFor(() => expect(mockedReport).toHaveBeenCalledTimes(1))
