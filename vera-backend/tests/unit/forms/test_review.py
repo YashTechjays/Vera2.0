@@ -31,6 +31,13 @@ _IBV_DOC: FormSchemaDoc = load_document(
     (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
 )
 
+# Real IBV paths for the call-scoped-dispute tests below: REP_NAME/REF sit in the
+# `insurance_representative` section (`collected_per: "call"`); COPAY is an ordinary
+# form-scoped leaf.
+REP_NAME = "sections.insurance_representative.rep_name"
+REF = _IBV_DOC.rep_call_reference_number_field
+COPAY = "sections.infertility_treatment.ovulation_induction.copay"
+
 
 def _ibv_raw() -> dict[str, Any]:
     text = (FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8")
@@ -361,6 +368,49 @@ class TestBuildFieldViews:
         b = self._answer("a.y", "2")
         views = build_field_views([a, b], {})
         assert [v["field_path"] for v in views] == ["a.y", "b.x"]
+
+
+class TestCallScopedPathsAreNeverDisputed:
+    """A call-scoped answer has no form-level baseline by definition, so it cannot diverge from
+    one. Today the rep's name and the call reference number are flagged on EVERY call with
+    `previous_value: null` — 152 such views on the seeded form."""
+
+    def _rows(self) -> list[AnswerRow]:
+        return [
+            AnswerRow(uuid4(), REP_NAME, {"value": "Priya Raman"}, "ai_call", 90, None),
+            AnswerRow(uuid4(), REF, {"value": "9310-KT-04"}, "ai_call", 90, None),
+            AnswerRow(uuid4(), COPAY, {"value": "$25"}, "ai_call", 90, None),
+        ]
+
+    def test_a_call_scoped_path_is_not_disputed(self) -> None:
+        views = {
+            v["field_path"]: v
+            for v in build_field_views(self._rows(), {}, call_scoped_paths={REP_NAME, REF})
+        }
+        assert views[REP_NAME]["dispute"] is None
+        assert views[REF]["dispute"] is None
+
+    def test_a_form_scoped_path_is_still_disputed(self) -> None:
+        """The global rule is untouched — only the declared paths are exempt."""
+        views = {
+            v["field_path"]: v
+            for v in build_field_views(self._rows(), {}, call_scoped_paths={REP_NAME, REF})
+        }
+        assert views[COPAY]["dispute"] is not None
+        assert views[COPAY]["dispute"]["previous_value"] is None
+
+    def test_evidence_survives_suppression(self) -> None:
+        """`evidence` is top-level precisely because an answer with no dispute still has evidence
+        worth reviewing — suppressing the dispute must not hide it."""
+        rows = [AnswerRow(uuid4(), REF, {"value": "R"}, "ai_call", 90, "the rep read it back")]
+        [view] = build_field_views(rows, {}, call_scoped_paths={REF})
+        assert view["dispute"] is None
+        assert view["evidence"] == "the rep read it back"
+
+    def test_default_is_unchanged_behaviour(self) -> None:
+        """Callers that pass nothing keep today's semantics exactly."""
+        views = build_field_views(self._rows(), {})
+        assert all(v["dispute"] is not None for v in views)
 
 
 def _status(source: str = "ai_call", *, call_id: UUID | None = None) -> FieldStatus:

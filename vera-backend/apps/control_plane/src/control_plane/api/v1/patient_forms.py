@@ -16,7 +16,7 @@ Every PHI response audits field **names** only (never values).
 
 import asyncio
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, NoReturn
@@ -668,11 +668,26 @@ def _baseline_query(form_id: UUID) -> Any:
     )
 
 
-async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, Any]]:
+async def _call_scoped_paths(session: TenantSession, form: PatientForm) -> frozenset[str]:
+    """The form's pinned schema's `collected_per="call"` leaves. Empty for a document predating
+    the marker, which simply means nothing is exempt — today's behaviour."""
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    doc = _v2_doc(version.schema_json)
+    return doc.collected_per_call_paths() if doc is not None else frozenset()
+
+
+async def _field_views(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str]
+) -> list[dict[str, Any]]:
     """The dispute-annotated field views for one form — the single source of truth for
     "is this a dispute". Both the detail view and the dispute gate go through here, so the
     count and the detail can never disagree. The dispute decision (incl. value
-    normalization and null handling) lives once, in `build_field_views`/`is_disputed`."""
+    normalization, null handling, and the call-scoped exemption) lives once, in
+    `build_field_views`/`is_disputed`."""
     current = (
         (
             await session.execute(
@@ -700,26 +715,32 @@ async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, 
             for a in current
         ],
         baseline_by_path,
+        call_scoped_paths=call_scoped_paths,
     )
 
 
-async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
+async def _open_dispute_paths(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str] = ()
+) -> set[str]:
     """The set of field paths with an open dispute on this form — used to gate which
     resolutions emit a `dispute_action` (audit record)."""
-    return {
-        v["field_path"] for v in await _field_views(session, form_id) if v["dispute"] is not None
-    }
+    views = await _field_views(session, form_id, call_scoped_paths=call_scoped_paths)
+    return {v["field_path"] for v in views if v["dispute"] is not None}
 
 
-async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
+async def _unresolved_dispute_count(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str] = ()
+) -> int:
     """The number of fields on this form with an open dispute (derived from the same
     Python rule the detail view uses)."""
-    return len(await _open_dispute_paths(session, form_id))
+    paths = await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths)
+    return len(paths)
 
 
 async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
     """Assemble the full review detail for one form (current answers + disputes)."""
-    views = await _field_views(session, form.id)
+    call_scoped_paths = await _call_scoped_paths(session, form)
+    views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
 
     form_schema = (
         await session.execute(
@@ -1070,10 +1091,11 @@ async def resolve_disputes(
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
     date_paths = date_leaf_paths(doc) if doc is not None else {}
     literals = leaf_literals(doc) if doc is not None else {}
+    call_scoped_paths = doc.collected_per_call_paths() if doc is not None else frozenset()
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
-    open_paths = await _open_dispute_paths(session, form_id)
+    open_paths = await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths)
 
     current_by_path = {
         a.field_path: a
@@ -1498,7 +1520,10 @@ async def update_patient_form_status(
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
-        remaining = await _unresolved_dispute_count(session, form_id)
+        call_scoped_paths = await _call_scoped_paths(session, form)
+        remaining = await _unresolved_dispute_count(
+            session, form_id, call_scoped_paths=call_scoped_paths
+        )
         if remaining:
             raise CustomAPIException(
                 DefaultExceptionCode.CONFLICT,

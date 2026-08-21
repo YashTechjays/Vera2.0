@@ -195,6 +195,8 @@ def adjudication_action(new_value: Any, current_value: Any, prior_values: Collec
 def build_field_views(
     current_answers: Iterable[AnswerRow],
     baseline_value_by_path: Mapping[str, Any],
+    *,
+    call_scoped_paths: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Assemble the flat, dotted-path field views the detail endpoint returns. Each
     item is `{field_path, value, source, confidence, evidence, dispute}`; `dispute` is
@@ -205,15 +207,25 @@ def build_field_views(
     evidence worth reviewing.
 
     `baseline_value_by_path` maps a field path to its most recent intake/human stored
-    value (`{"value": ...}`); a missing entry means no baseline (treated as `None`)."""
+    value (`{"value": ...}`); a missing entry means no baseline (treated as `None`).
+
+    `call_scoped_paths` (the schema's `collected_per="call"` leaves) are never disputed: their
+    value describes ONE CALL, so there is no form-level baseline for it to diverge from and never
+    will be. Without this, the rep's name and the call reference number are flagged on every call
+    with `previous_value: null` forever. `evidence` still rides on the view — an answer with no
+    dispute can still have evidence worth reading."""
+    exempt = set(call_scoped_paths)
     views: list[dict[str, Any]] = []
     for answer in sorted(current_answers, key=lambda a: a.field_path):
-        baseline = baseline_value_by_path.get(answer.field_path)
-        dispute = dispute_view(
-            source=answer.source,
-            value=answer.value,
-            confidence=answer.confidence,
-            baseline_value=baseline,
+        dispute = (
+            None
+            if answer.field_path in exempt
+            else dispute_view(
+                source=answer.source,
+                value=answer.value,
+                confidence=answer.confidence,
+                baseline_value=baseline_value_by_path.get(answer.field_path),
+            )
         )
         views.append(
             {
