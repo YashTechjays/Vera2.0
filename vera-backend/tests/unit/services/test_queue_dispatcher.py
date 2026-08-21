@@ -14,20 +14,21 @@ order — this survives try_dispatch's queries being reordered.
 import json
 import logging
 from collections import deque
-from datetime import time
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
-from vera_core.forms.call_plan import CallPlan
+from vera_core.forms.call_plan import CallPlan, PrefillFuser
 from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
 from vera_core.forms.dsl import FormSchemaDoc
-from vera_core.forms.prompting import FACTORY_SESSION
+from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument, numbered_questions
 from vera_core.forms.review import FieldStatus
 from vera_core.models import (
     Call,
@@ -1246,6 +1247,108 @@ class TestCallPlanStaging:
         _room, plan = plans.puts[0]
         keys = {t.task_key for t in plan.tasks}
         assert {"introduction", "wrap_up"} <= keys
+
+    async def test_the_staged_retry_prompt_is_narrowed_not_just_its_fields(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A defect this branch already shipped once: narrowing the tracked FIELD set left the
+        SPOKEN question tree — what the rep actually hears — byte-identical to an unfocused call.
+        This proves the plan the dispatcher actually stages is narrower where `focus_paths` says
+        it should be, on two tasks chosen because this scenario is built to narrow them:
+        `diagnostic_coverage`'s top coverage gate stays open while every per-code follow-up
+        already has a value on file (so `focus_call_plan`'s gate-closure explosion has nothing
+        left to pull back in), and `financial`'s deductible/out-of-pocket groups are FULLY
+        confirmed (so group-expansion can't re-admit them) while its lifetime-maximum leaves are
+        only PARTLY confirmed. The comparison plan is an independent compile+fuse of the same
+        schema/prompt/values — never the staged plan itself — so `staged is full` can never hold
+        and the assertions can't go vacuous by construction."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        doc = FormSchemaDoc.model_validate(IBV_SCHEMA_JSON)
+        ref = doc.rep_call_reference_number_field
+        codes = ["58340", "82670", "83001", "83002", "84146", "84443", "84144", "76830"]
+
+        values: dict[str, Any] = {ref: "ABC-123", "sections.lifetime_maximum.total": "$50,000"}
+        for code in codes:
+            base = f"sections.diagnostic_testing.labs_xray_ultrasound.cpt_{code}"
+            values[f"{base}.covered"] = "No"
+            values[f"{base}.copay"] = "$0"
+            values[f"{base}.coinsurance"] = "0%"
+            values[f"{base}.prior_auth"] = "N/A"
+
+        call_id = uuid7()
+
+        def confirmed() -> FieldStatus:
+            return FieldStatus(
+                source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+            )
+
+        status: dict[str, FieldStatus] = {ref: confirmed()}
+        for path in (
+            "sections.deductibles.individual.total",
+            "sections.deductibles.individual.met_amount",
+            "sections.deductibles.individual.remaining",
+            "sections.out_of_pocket.individual.total",
+            "sections.out_of_pocket.individual.met_amount",
+            "sections.out_of_pocket.individual.remaining",
+            "sections.lifetime_maximum.total",
+            "sections.lifetime_maximum.met_amount",
+        ):
+            status[path] = confirmed()
+        for code in codes:
+            status[f"sections.diagnostic_testing.labs_xray_ultrasound.cpt_{code}.covered"] = (
+                confirmed()
+            )
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            return status
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return values
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        _room, staged = plans.puts[0]
+
+        prompt_doc = PromptDocument.model_validate(pv.composite_json)
+        full_template = real_compile_call_plan(
+            doc, prompt_doc, schema_version_id=sv.id, prompt_version_id=pv.id
+        )
+        full = PrefillFuser(doc, full_template).fuse(
+            values, current_year=datetime.now(ZoneInfo("America/New_York")).year
+        )
+        assert staged is not full
+        full_by_key = {t.task_key: t for t in full.tasks}
+
+        # Strict `<`, never `<=`: a question-count or byte-identical row on either of these two
+        # tasks IS the regression this test exists to catch, not something to relax the check for.
+        for task_key in ("financial", "diagnostic_coverage"):
+            staged_task = next(t for t in staged.tasks if t.task_key == task_key)
+            full_task = full_by_key[task_key]
+            assert numbered_questions(staged_task.panels) < numbered_questions(full_task.panels), (
+                task_key
+            )
+            assert len(staged_task.prompt) < len(full_task.prompt), task_key
 
 
 async def _noop_sleep(seconds: float) -> None:
