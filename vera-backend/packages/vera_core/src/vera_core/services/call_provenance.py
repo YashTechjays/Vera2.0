@@ -65,6 +65,12 @@ class CallAttempt:
     recording_available: bool = False
     # Same meaning as `FieldProvenance.authoritative`, at the call level.
     authoritative: bool = True
+    # False until the post-call eval fills `after_state` (the same sentinel
+    # `snapshot_changed_paths` checks). `changed_paths == []` is ambiguous on its own —
+    # it means either "changed nothing" (finalized=True) or "outcome unknown"
+    # (finalized=False) — so callers must check this before reading an empty list as
+    # "nothing changed".
+    finalized: bool = True
 
 
 def snapshot_changed_paths(
@@ -152,6 +158,7 @@ async def load_call_attempts(
                 published=c.published,
                 recording_available=c.id in playable,
                 authoritative=c.id in authoritative_calls,
+                finalized=bool(after),
             )
         )
     return out

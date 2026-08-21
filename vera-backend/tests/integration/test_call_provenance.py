@@ -262,6 +262,9 @@ async def test_attempts_lineage_and_diffs(two_call_form_ctx: _TwoCallFormCtx) ->
     assert attempts[1].recording_available is True
     assert attempts[0].published is False
     assert attempts[0].initiated_by_id is None
+    # Both calls' post-call eval ran (after_state is non-empty), so both are finalized.
+    assert attempts[0].finalized is True
+    assert attempts[1].finalized is True
 
     prov = await load_field_provenance(
         ctx.session, ctx.form_id, {a.id: (a.attempt, a.mode) for a in attempts}
@@ -269,3 +272,147 @@ async def test_attempts_lineage_and_diffs(two_call_form_ctx: _TwoCallFormCtx) ->
     assert prov["cov.b"].attempt == 2 and prov["cov.b"].mode == "retry"
     assert prov["cov.b"].judge is not None
     assert prov["cov.b"].judge.confidence == 88 and prov["cov.b"].judge.supported is True
+
+
+@pytest.fixture
+async def unfinalized_call_ctx(database_url: str) -> AsyncGenerator[_TwoCallFormCtx]:
+    """Seed: Tenant → FormSchema (find-or-create) → SchemaVersion(version=997) →
+    PatientForm → call_unfinalized (never got a `CallFormSnapshot` row — the observer
+    never ran) → call_no_diff (`CallFormSnapshot` before == after, both non-empty, so
+    its eval ran and found nothing changed).
+
+    Both attempts have `changed_paths == []`; only `finalized` tells them apart."""
+    tenant_id = uuid7()
+    form_id = uuid7()
+    call_unfinalized_id = uuid7()
+    call_no_diff_id = uuid7()
+    schema_version_id = uuid7()
+
+    engine = create_async_engine(database_url)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
+    schema_id_to_delete: UUID | None = None
+    schema_id: UUID
+
+    async with sm() as session, session.begin():
+        session.add(
+            Tenant(
+                id=tenant_id,
+                slug=str(tenant_id),
+                name="CallProvenance Unfinalized Test Tenant",
+                status="active",
+            )
+        )
+        existing = (
+            await session.execute(
+                select(FormSchema).where(
+                    FormSchema.insurance_type == InsuranceType.DISEASE_ONLY.value
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            fs = FormSchema(
+                id=uuid7(),
+                insurance_type=InsuranceType.DISEASE_ONLY.value,
+                name="CallProvenance Test Schema",
+            )
+            session.add(fs)
+            await session.flush()
+            schema_id = fs.id
+            schema_id_to_delete = fs.id
+        else:
+            schema_id = existing.id
+
+        session.add(
+            SchemaVersion(
+                id=schema_version_id,
+                schema_id=schema_id,
+                version=997,
+                schema_json={},
+            )
+        )
+        session.add(
+            PatientForm(
+                id=form_id,
+                tenant_id=tenant_id,
+                schema_version_id=schema_version_id,
+                patient_name="Unfinalized Test Patient",
+                status=FormStatus.AI_PROCESSING.value,
+            )
+        )
+        await session.flush()
+
+        session.add(
+            Call(
+                id=call_unfinalized_id,
+                tenant_id=tenant_id,
+                form_id=form_id,
+                current_status=CallStatus.COMPLETED.value,
+                mode="full",
+            )
+        )
+        session.add(
+            Call(
+                id=call_no_diff_id,
+                tenant_id=tenant_id,
+                form_id=form_id,
+                current_status=CallStatus.COMPLETED.value,
+                mode="retry",
+            )
+        )
+        await session.flush()
+
+        # call_unfinalized gets NO CallFormSnapshot row at all — the observer never ran.
+        session.add(
+            CallFormSnapshot(
+                tenant_id=tenant_id,
+                call_id=call_no_diff_id,
+                before_state={"cov.a": "x"},
+                after_state={"cov.a": "x"},
+            )
+        )
+
+    async with tenant_session(sm, tenant_id) as test_session:
+        yield _TwoCallFormCtx(tenant_id=tenant_id, form_id=form_id, session=test_session)
+
+    try:
+        async with sm() as session, session.begin():
+            for table in (
+                "field_evaluation",
+                "field_answer",
+                "call_form_snapshot",
+                "call",
+                "patient_form",
+            ):
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id = :tid").bindparams(tid=tenant_id)
+                )
+            await session.execute(
+                text("DELETE FROM schema_version WHERE id = :sid").bindparams(sid=schema_version_id)
+            )
+            if schema_id_to_delete is not None:
+                await session.execute(
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(
+                        fsid=schema_id_to_delete
+                    )
+                )
+            await session.execute(
+                text("DELETE FROM tenant WHERE id = :tid").bindparams(tid=tenant_id)
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unfinalized_attempt_distinguished_from_no_diff(
+    unfinalized_call_ctx: _TwoCallFormCtx,
+) -> None:
+    """`changed_paths == []` for both attempts here, for different reasons: one never
+    got a snapshot (observer never ran — outcome unknown), the other's snapshot shows
+    before == after (observer ran, genuinely nothing changed). Only `finalized`
+    distinguishes them."""
+    ctx = unfinalized_call_ctx
+    attempts = await load_call_attempts(ctx.session, ctx.form_id)
+    assert [a.changed_paths for a in attempts] == [[], []]
+    unfinalized, no_diff = attempts
+    assert unfinalized.finalized is False
+    assert no_diff.finalized is True

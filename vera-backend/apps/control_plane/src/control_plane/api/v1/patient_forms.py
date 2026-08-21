@@ -633,6 +633,9 @@ class CallAttemptView(BaseModel):
     # False when this call captured no rep call reference number — nothing ties it to a
     # payer-side record, so its answers are never treated as collected by the retry ask set.
     authoritative: bool
+    # False when the post-call eval never ran (after_state == {}): `changed_paths` is then
+    # unknown, not "empty" — the UI must say the outcome is unknown, never "changed nothing".
+    finalized: bool
 
 
 def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
@@ -652,6 +655,7 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
             can_play=can_play,
         ),
         authoritative=a.authoritative,
+        finalized=a.finalized,
     )
 
 
