@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from vera_core.forms.conditions import is_applicable, is_required, is_v2, leaf_gates
-from vera_core.forms.dsl import COLLECTED_ROLES, Condition, FormSchemaDoc
+from vera_core.forms.dsl import COLLECTED_ROLES, Condition, FormSchemaDoc, Leaf
 from vera_core.forms.review import FieldStatus, focus_paths
 
 AUTH, OTHER = uuid4(), uuid4()
@@ -253,6 +253,35 @@ def _scoped(focus: list[str], prefix: str) -> set[str]:
     """The subset of `focus` under a dotted path prefix — what the scoped exact-set
     assertions below compare against."""
     return {path for path in focus if path.startswith(prefix)}
+
+
+def _fill_value(leaf: Leaf) -> str:
+    """One syntactically plausible answer for `leaf`, drawn from ITS OWN declared vocabulary
+    where one exists (enum) — never a value the schema didn't already sanction."""
+    if leaf.type == "enum":
+        values = leaf.values or []
+        return "Yes" if "Yes" in values else values[0]
+    filler_by_type = {
+        "currency": "$100",
+        "percent": "10%",
+        "integer": "1",
+        "phone": "555-555-5555",
+        "date": "1990-01-01",
+    }
+    return filler_by_type.get(leaf.type, "Test value")
+
+
+def _fill_collectable_leaves(doc: FormSchemaDoc, *, prefix: str = "") -> dict[str, Any]:
+    """Every ask/confirm leaf under `prefix` (the whole document by default), answered.
+    Filling every leaf regardless of its own gate — rather than hand-picking one
+    gate-opening path through the schema — silences group closure everywhere it's applied,
+    so a test built by deleting a few keys from the result can isolate exactly those keys'
+    own behaviour without a stray unconfirmed sibling elsewhere dragging in extra groups."""
+    return {
+        path: _fill_value(leaf)
+        for path, leaf in doc.leaf_items()
+        if leaf.role in COLLECTED_ROLES and path.startswith(prefix)
+    }
 
 
 # -- Step 1: coverage-type gating (spouse details) ----------------------------------------
@@ -657,3 +686,202 @@ def test_money_sentinel_gating(case: _MoneyTripletCase) -> None:
     assert_invariants(_DOC, _RAW, real_amount_scenario, focus)
     assert case.met_path in focus
     assert case.remaining_path in focus
+
+
+# -- Task 3 step 1: group closure ----------------------------------------------------------
+
+_DIAGNOSTIC_COVERED_PATH = "sections.diagnostic_testing.diagnostic_testing_covered"
+_LABS_PREFIX = "sections.diagnostic_testing.labs_xray_ultrasound."
+_LABS_CPT_CODES = (
+    "cpt_58340",
+    "cpt_82670",
+    "cpt_83001",
+    "cpt_83002",
+    "cpt_84146",
+    "cpt_84443",
+    "cpt_84144",
+    "cpt_76830",
+)
+
+
+def _labs_panel_values() -> dict[str, Any]:
+    """Every collectable leaf of the 32-member `labs_xray_ultrasound` panel, answered — the
+    baseline the group-closure tests below poke one hole in."""
+    values: dict[str, Any] = {_DIAGNOSTIC_COVERED_PATH: "Yes"}
+    for code in _LABS_CPT_CODES:
+        values[f"{_LABS_PREFIX}{code}.covered"] = "Yes"
+        values[f"{_LABS_PREFIX}{code}.copay"] = "$25"
+        values[f"{_LABS_PREFIX}{code}.coinsurance"] = "10%"
+        values[f"{_LABS_PREFIX}{code}.prior_auth"] = "No"
+    return values
+
+
+def test_one_missing_leaf_in_the_32_member_labs_panel_pulls_the_whole_panel() -> None:
+    """The product owner's headline case, at the schema's largest panel: `expand_to_groups`
+    matches every ancestor group whose subtree contains a wanted path, so one unconfirmed leaf
+    inside `cpt_58340` reopens the whole 32-member `labs_xray_ultrasound` panel, not just
+    `cpt_58340`'s own 4.
+
+    `prior_auth`, not the brief's `copay`: the compiled schema's `alternatives` block flattens
+    `copay`/`coinsurance` into one 16-member either/or set across all 8 CPT codes in this
+    panel (one pair per code), so leaving `copay` alone unconfirmed while `coinsurance` stays
+    confirmed would not make it owed on its own account — see the either/or tests below — and
+    would not have exercised group closure at all. `prior_auth` carries no such partner."""
+    values = _labs_panel_values()
+    missing = f"{_LABS_PREFIX}cpt_58340.prior_auth"
+    del values[missing]
+    scenario = Scenario(
+        "labs_xray_ultrasound panel, cpt_58340.prior_auth unconfirmed",
+        values=values,
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    panel = {p for p in _DOC.collection_paths() if p.startswith(_LABS_PREFIX)}
+    assert len(panel) == 32
+    assert _scoped(focus, _LABS_PREFIX) == panel
+
+
+def test_labs_panel_fully_confirmed_contributes_nothing_to_focus() -> None:
+    """The converse: with every path in the panel authoritatively confirmed, no member is
+    owed, so group closure has nothing to expand and the panel is silent."""
+    scenario = Scenario(
+        "labs_xray_ultrasound panel, fully confirmed",
+        values=_labs_panel_values(),
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _scoped(focus, _LABS_PREFIX) == set()
+
+
+_ASC_FACILITY_PREFIX = "sections.general_coverage.asc_facility.cpt_58555."
+
+
+def test_one_missing_leaf_in_a_different_small_group_also_pulls_the_whole_group() -> None:
+    """Pins that group closure isn't a property of the one freak 32-member panel: the same
+    single-missing-leaf rule reopens a plain 4-member CPT group too, so the first test isn't
+    one lucky panel."""
+    values: dict[str, Any] = {
+        f"{_ASC_FACILITY_PREFIX}covered": "Yes",
+        f"{_ASC_FACILITY_PREFIX}copay": "$25",
+        f"{_ASC_FACILITY_PREFIX}coinsurance": "10%",
+    }
+    scenario = Scenario(
+        "asc_facility.cpt_58555, prior_auth unconfirmed",
+        values=values,
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    group = {p for p in _DOC.collection_paths() if p.startswith(_ASC_FACILITY_PREFIX)}
+    assert len(group) == 4
+    assert _scoped(focus, _ASC_FACILITY_PREFIX) == group
+
+
+# -- Task 3 step 2: either/or sets ----------------------------------------------------------
+
+_INFERTILITY_PREFIX = "sections.infertility_treatment."
+_OVULATION_PREFIX = f"{_INFERTILITY_PREFIX}ovulation_induction."
+_OVULATION_COPAY_PATH = f"{_OVULATION_PREFIX}copay"
+_OVULATION_COINSURANCE_PATH = f"{_OVULATION_PREFIX}coinsurance"
+_OVULATION_PRIOR_AUTH_PATH = f"{_OVULATION_PREFIX}prior_auth"
+
+# `infertility_tx_covered` gates EIGHT sibling panels (ovulation_induction is only one), so
+# every either/or scenario below starts from a full-section fill and deletes only the leaf(ves)
+# under test — otherwise an untouched sibling panel's own unconfirmed leaves would drag their
+# groups into focus too, via the very ancestor-group closure `_assert_soundness` already
+# expects (see its docstring), just for a panel this test never meant to exercise.
+_INFERTILITY_SECTION_FILLED = _fill_collectable_leaves(_DOC, prefix=_INFERTILITY_PREFIX)
+
+
+def test_ovulation_induction_neither_copay_nor_coinsurance_answered_both_owed() -> None:
+    """Neither side of the either/or pair has an answer, so both are genuinely owed — the
+    baseline the two `copay`-confirmed cases below contrast against."""
+    values = dict(_INFERTILITY_SECTION_FILLED)
+    del values[_OVULATION_COPAY_PATH]
+    del values[_OVULATION_COINSURANCE_PATH]
+    scenario = Scenario(
+        "ovulation induction, neither copay nor coinsurance answered",
+        values=values,
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _OVULATION_COPAY_PATH in focus
+    assert _OVULATION_COINSURANCE_PATH in focus
+
+
+def test_ovulation_induction_copay_confirmed_coinsurance_reappears_via_group_closure() -> None:
+    """`copay` and `coinsurance` are one either/or pair (the schema's `alternatives` block):
+    one answer satisfies the pair, so `coinsurance` is NOT owed on its OWN account here. It
+    still shows up in `focus` below — but via `expand_to_groups`, because `prior_auth` (unrelated
+    to the pair) is also left unanswered and pulls the whole group back open. This documents
+    that interaction rather than hiding it: `prior_auth`'s presence is the actual reason
+    `coinsurance` is back, not the either/or rule."""
+    values = dict(_INFERTILITY_SECTION_FILLED)
+    del values[_OVULATION_COINSURANCE_PATH]
+    del values[_OVULATION_PRIOR_AUTH_PATH]
+    scenario = Scenario(
+        "ovulation induction, copay confirmed, coinsurance and prior_auth unanswered",
+        values=values,
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert _OVULATION_PRIOR_AUTH_PATH in focus  # owed on its own account: pulls the group open
+    assert _OVULATION_COINSURANCE_PATH in focus  # present only because the group reopened
+
+
+# -- Task 3 step 3: the two whole-set extremes -----------------------------------------------
+
+_ALL_LEAVES_FILLED = _fill_collectable_leaves(_DOC)
+
+
+def test_everything_confirmed_by_an_authoritative_call_leaves_only_call_scoped_paths() -> None:
+    """The decisive extreme: every collectable leaf in the document (182 of them) is answered
+    AND authoritatively confirmed, so nothing is owed anywhere and group closure has nothing to
+    expand. `focus` shrinks to exactly the three `collected_per="call"` paths (I4)."""
+    scenario = Scenario(
+        "every collectable leaf confirmed by an authoritative call",
+        values=_ALL_LEAVES_FILLED,
+        confirmed_by_authoritative=True,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    assert set(focus) == _DOC.collected_per_call_paths()
+    assert len(focus) == 3
+
+
+def test_everything_answered_by_a_non_authoritative_call_nothing_is_skipped() -> None:
+    """Spec D8's whole point at whole-document scale: every leaf has an answer on file, but
+    from a call that isn't authoritative — not proof, so the retry still owes every
+    required-applicable-collectable path, exactly as if nothing were on file, plus the three
+    call-scoped paths. (Group closure adds a further handful of non-required siblings on top
+    of that set, so `<=` containment — not equality — is the honest claim here.)"""
+    scenario = Scenario(
+        "every collectable leaf answered by a non-authoritative call",
+        values=_ALL_LEAVES_FILLED,
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    expected = _owed_now(_DOC, scenario) | _DOC.collected_per_call_paths()
+    assert expected <= set(focus)
+
+
+def test_everything_supplied_by_intake_nothing_is_skipped() -> None:
+    """Spec D8's headline case at whole-document scale: an intake value was never put to the
+    payer, so it carries no more trust than nothing on file at all — the same owed set as the
+    non-authoritative-call extreme above, reached through a different `AnswerSource`."""
+    scenario = Scenario(
+        "every collectable leaf supplied by intake",
+        values=_ALL_LEAVES_FILLED,
+        confirmed_by_authoritative=False,
+    )
+    focus = _focus(scenario, intake=True)
+    assert_invariants(_DOC, _RAW, scenario, focus)
+    expected = _owed_now(_DOC, scenario) | _DOC.collected_per_call_paths()
+    assert expected <= set(focus)
+    non_authoritative_focus = _focus(scenario)
+    assert set(focus) == set(non_authoritative_focus)
