@@ -420,7 +420,10 @@ async def try_dispatch(
                     authoritative_calls=authoritative,
                 )
                 if focus:
-                    staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
+                    staged_plan = (
+                        focus_call_plan(doc, plan, focus, answers=values),
+                        plan_prompt_version_id,
+                    )
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
