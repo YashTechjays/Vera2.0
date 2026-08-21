@@ -348,8 +348,17 @@ async def test_report_matches_hand_computed_numbers(
 
         assert data["previous"]["call_volume"] == 1
 
-        days = {row["day"]: row["calls"] for row in data["calls_per_day"]}
-        assert days == {"2026-01-08": 4, "2026-01-09": 1}
+        # Dense axis (VR2-282): every UTC day of [from, to) in order, zero-filled —
+        # the exclusive midnight date_to must NOT add Jan 15.
+        assert data["calls_per_day"] == [
+            {"day": "2026-01-08", "calls": 4},
+            {"day": "2026-01-09", "calls": 1},
+            {"day": "2026-01-10", "calls": 0},
+            {"day": "2026-01-11", "calls": 0},
+            {"day": "2026-01-12", "calls": 0},
+            {"day": "2026-01-13", "calls": 0},
+            {"day": "2026-01-14", "calls": 0},
+        ]
         assert data["interventions_by_type"] == [
             {"type": "coach", "count": 1},
             {"type": "whisper", "count": 2},
