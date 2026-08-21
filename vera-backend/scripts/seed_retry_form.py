@@ -55,6 +55,7 @@ from vera_core.forms.review import (
 from vera_core.models import (
     AppUser,
     Call,
+    CallFormSnapshot,
     ExportArtifact,
     FieldAnswer,
     FieldEvaluation,
@@ -371,6 +372,17 @@ async def seed(missing: tuple[str, ...]) -> None:
         await recompute_form_projection(session, form, schema_json)
         status_by_path = await load_field_status(session, form.id)
         values = await current_values_by_path(session, form.id)
+        # Mirrors the real before_state (dispatch, pre-call)/after_state (post_call_eval,
+        # post-call) writes so the per-attempt view's changed_paths diff has something to
+        # show — without this row the call reads as unfinalized (see CallAttempt.finalized).
+        session.add(
+            CallFormSnapshot(
+                tenant_id=tenant.id,
+                call_id=call.id,
+                before_state=dict(_intake_values()),
+                after_state=dict(values),
+            )
+        )
         # The seeded call captures the reference number (below), so it is authoritative and
         # `verified_pct` stays close to `completion_pct` rather than collapsing to 0%.
         authoritative = await load_authoritative_call_ids(

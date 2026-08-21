@@ -53,6 +53,10 @@ export type CallAttempt = {
   /** Same meaning as `FieldProvenance.authoritative`, at the call level: false when
    *  this call captured no rep call reference number. */
   authoritative: boolean
+  /** False when the post-call eval never ran: `changed_paths` is then unknown, not
+   *  empty — never read an empty list as "this call collected nothing" when this is
+   *  false. Absent reads as finalized (older backend contract), same as `authoritative`. */
+  finalized: boolean
 }
 
 /** JSONB field value — the backend stores/returns `Any`. */

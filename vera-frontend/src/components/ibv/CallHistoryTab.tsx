@@ -2,6 +2,8 @@ import { useEffect, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { leafByPath } from "@/lib/ibv/schema"
+import type { FormSchema } from "@/lib/ibv/types"
 import { getPatientFormCalls } from "@/lib/patient-forms/api"
 import type { CallAttempt } from "@/lib/patient-forms/types"
 import {
@@ -14,6 +16,13 @@ import { usePermission } from "@/lib/auth/permissions"
 import { useIbv } from "./IbvProvider"
 import { RecordingPlayer } from "./RecordingPlayer"
 
+/** The leaf's schema-authored title for `path`, falling back to a humanized path
+ *  segment (never a raw dotted path) when the schema hasn't loaded or lacks the leaf. */
+function fieldTitle(schema: FormSchema | null, path: string): string {
+  const leaf = schema ? leafByPath(schema).get(path) : undefined
+  return leaf ? leaf.field.title : fieldLabel(path)
+}
+
 /** One attempt row. Props-driven (no hooks) so the play-control gating is unit-
  *  testable: the control renders only when the DTO advertises a playable
  *  recording AND the caller holds recordings:read. */
@@ -25,6 +34,7 @@ export function AttemptCard({
   canPlay,
   playerOpen,
   onTogglePlayer,
+  schema,
 }: {
   attempt: CallAttempt
   retriedAttempt: number | undefined
@@ -33,7 +43,11 @@ export function AttemptCard({
   canPlay: boolean
   playerOpen: boolean
   onTogglePlayer: () => void
+  schema: FormSchema | null
 }) {
+  // false only on an explicit false — an older backend contract omitting the field
+  // reads as finalized, same idiom as `authoritative` above.
+  const notFinalized = a.finalized === false
   return (
     <div className="rounded-md border border-border bg-white p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -60,21 +74,37 @@ export function AttemptCard({
             No call reference — unverified
           </span>
         )}
+        {notFinalized && (
+          <span
+            className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+            title="The post-call review never finished, so what this attempt collected is unknown — that is not the same as it having collected nothing."
+          >
+            Not finalized
+          </span>
+        )}
       </div>
-      <button
-        type="button"
-        className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-        disabled={a.changed_paths.length === 0}
-        onClick={onToggleFields}
-      >
-        {a.changed_paths.length} field{a.changed_paths.length === 1 ? "" : "s"} updated
-      </button>
-      {expanded && (
-        <ul className="mt-1 list-inside list-disc text-xs text-muted-foreground">
-          {a.changed_paths.map((p) => (
-            <li key={p}>{fieldLabel(p)}</li>
-          ))}
-        </ul>
+      {notFinalized ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Outcome unknown — this attempt was never finalized
+        </p>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+            disabled={a.changed_paths.length === 0}
+            onClick={onToggleFields}
+          >
+            {a.changed_paths.length} field{a.changed_paths.length === 1 ? "" : "s"} updated
+          </button>
+          {expanded && (
+            <ul className="mt-1 list-inside list-disc text-xs text-muted-foreground">
+              {a.changed_paths.map((p) => (
+                <li key={p}>{fieldTitle(schema, p)}</li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
       {canPlay && a.recording_available && (
         <button
@@ -92,7 +122,7 @@ export function AttemptCard({
 
 /** The form's call-attempt timeline — fetched once per modal open. */
 export function CallHistoryTab() {
-  const { formId } = useIbv()
+  const { formId, schema } = useIbv()
   const canPlayRecordings = usePermission("recordings:read")
   const [attempts, setAttempts] = useState<CallAttempt[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -143,6 +173,7 @@ export function CallHistoryTab() {
           canPlay={canPlayRecordings}
           playerOpen={openPlayerId === a.id}
           onTogglePlayer={() => setOpenPlayerId((id) => (id === a.id ? null : a.id))}
+          schema={schema}
         />
       ))}
     </div>

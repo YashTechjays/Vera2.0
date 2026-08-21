@@ -3,7 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server"
 
 import { AttemptCard } from "./CallHistoryTab"
 import { cachePlayback, clearPlaybackCache } from "@/lib/recordings/playbackCache"
+import { parseSchema } from "@/lib/ibv/schema"
+import type { FormSchema } from "@/lib/ibv/types"
 import type { CallAttempt } from "@/lib/patient-forms/types"
+// The backend's compiled artifact — same fixture src/lib/ibv/schema.test.ts uses — so a
+// title-resolution test exercises a real leaf, not a hand-authored stand-in.
+import rawSchema from "../../../../vera-backend/data/form_schemas/ibv_form_standard_v2.json"
+
+const schema = parseSchema(rawSchema)
+const DEDUCTIBLE = "sections.deductibles.individual.total" // leaf title: "Total"
 
 const attempt = (over: Partial<CallAttempt>): CallAttempt => ({
   id: "c1",
@@ -15,21 +23,29 @@ const attempt = (over: Partial<CallAttempt>): CallAttempt => ({
   changed_paths: [],
   recording_available: false,
   authoritative: true,
+  finalized: true,
   ...over,
 })
 
 const noop = () => undefined
 
-function card(a: CallAttempt, canPlay: boolean, playerOpen = false): string {
+function card(
+  a: CallAttempt,
+  canPlay: boolean,
+  playerOpen = false,
+  expanded = false,
+  formSchema: FormSchema | null = null,
+): string {
   return renderToStaticMarkup(
     <AttemptCard
       attempt={a}
       retriedAttempt={undefined}
-      expanded={false}
+      expanded={expanded}
       onToggleFields={noop}
       canPlay={canPlay}
       playerOpen={playerOpen}
       onTogglePlayer={noop}
+      schema={formSchema}
     />,
   )
 }
@@ -70,5 +86,47 @@ describe("AttemptCard authoritative marker", () => {
     const legacy: Partial<CallAttempt> = attempt({ authoritative: false })
     delete legacy.authoritative
     expect(card(legacy as CallAttempt, true)).not.toContain("No call reference")
+  })
+})
+
+describe("AttemptCard changed-field titles", () => {
+  it("lists what an attempt changed by schema title, never a raw dotted path", () => {
+    const html = card(attempt({ changed_paths: [DEDUCTIBLE] }), true, false, true, schema)
+    expect(html).toContain("Total") // the leaf's schema-authored title
+    expect(html).not.toContain(DEDUCTIBLE)
+  })
+
+  it("falls back to a humanized path segment when the schema hasn't loaded", () => {
+    const html = card(attempt({ changed_paths: [DEDUCTIBLE] }), true, false, true, null)
+    expect(html).not.toContain(DEDUCTIBLE) // never a raw path, schema or not
+  })
+
+  it("never renders field values, only the count and the field names", () => {
+    const html = card(attempt({ changed_paths: [DEDUCTIBLE] }), true, false, true, schema)
+    expect(html).toContain("1 field updated")
+  })
+})
+
+describe("AttemptCard finalized marker", () => {
+  it("says the outcome is unknown when the post-call eval never ran", () => {
+    const html = card(attempt({ changed_paths: [], finalized: false }), true)
+    expect(html).toMatch(/not finalized/i)
+  })
+
+  it("never claims an unfinalized attempt changed nothing", () => {
+    const html = card(attempt({ changed_paths: [], finalized: false }), true)
+    expect(html).not.toContain("0 fields updated")
+  })
+
+  it("says an attempt genuinely changed nothing once it is finalized", () => {
+    const html = card(attempt({ changed_paths: [], finalized: true }), true)
+    expect(html).toContain("0 fields updated")
+    expect(html).not.toMatch(/not finalized/i)
+  })
+
+  it("treats a payload missing the flag as finalized (older backend contract)", () => {
+    const legacy: Partial<CallAttempt> = attempt({ changed_paths: [] })
+    delete legacy.finalized
+    expect(card(legacy as CallAttempt, true)).not.toMatch(/not finalized/i)
   })
 })
