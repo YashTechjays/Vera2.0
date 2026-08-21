@@ -312,10 +312,18 @@ function isFilled(leaf: FlatLeaf, values: FormValues): boolean {
   return (values[leaf.path] ?? "").trim() !== "" || leaf.field.default !== undefined
 }
 
-/** 0–100 completion over required ∧ applicable leaves (defaults count filled). */
+/**
+ * 0–100 completion over required ∧ applicable ∧ collectable leaves (defaults count filled).
+ * Mirrors the backend's `completion_pct_v2`, the authority here: only `ask`/`confirm` leaves
+ * can be filled by a call, and every other required leaf is an intake target that is always
+ * present, so counting them added a constant offset no call could move.
+ */
 export function completionPercent(schema: FormSchema, values: FormValues): number {
   const relevant = allLeaves(schema).filter(
-    (l) => isApplicable(schema, l.gates, values) && isRequired(schema, l.field, values)
+    (l) =>
+      (l.field.role === "ask" || l.field.role === "confirm") &&
+      isApplicable(schema, l.gates, values) &&
+      isRequired(schema, l.field, values)
   )
   if (relevant.length === 0) return 100
   const filled = relevant.filter((l) => isSatisfied(schema, l, values)).length
