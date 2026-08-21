@@ -783,6 +783,8 @@ async def test_call_events_hidden_for_private_call_non_owner(
     seeded_form_id: UUID,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A LIVE private call's events stay 404 for a non-owner; once the call is
+    terminal its content is tenant-visible (VR2-177) and the stream serves."""
     call_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -793,6 +795,18 @@ async def test_call_events_hidden_for_private_call_non_owner(
         f"/api/v1/calls/{call_id}/events", headers=_auth(rbac_world.supervisor_token)
     )
     assert resp.status_code == 404, resp.text
+
+    finished = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status="completed",  # terminal → snapshot replay, so the 200 stream closes
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{finished}/events", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.asyncio
@@ -1806,30 +1820,31 @@ async def test_call_history_transcript_available_gated_by_visibility(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """A stored Transcript alone isn't enough: the row must also pass the same
-    owner-or-published visibility check `/calls/{id}/events` enforces, otherwise
-    'View transcript' is advertised for a call whose events the caller can't fetch."""
-    visible = await seed_call(
+    visibility check `/calls/{id}/events` enforces — a FINISHED call's transcript
+    is tenant-visible (VR2-177), while a LIVE call's stays owner-or-published —
+    otherwise 'View transcript' is advertised for a call whose events the caller
+    can't fetch, or hidden from one who can."""
+    finished = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
         seeded_form_id,
         initiated_by_id=rbac_world.admin_id,
         status="completed",
     )
-    # A real, different app_user (FK-satisfying) — not the admin caller — and unpublished,
-    # so it's terminal + owned-by-someone-else: hidden per `call_authz.visible_to`.
-    hidden = await seed_call(
+    # Live (non-terminal), unpublished, owned by a different real app_user: still private.
+    live = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
         seeded_form_id,
-        initiated_by_id=rbac_world.listener_id,
-        status="completed",
+        initiated_by_id=rbac_world.admin_id,
+        status="active",
     )
     async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
         session.add_all(
             [
                 Transcript(
                     tenant_id=rbac_world.tenant_id,
-                    call_id=visible,
+                    call_id=finished,
                     seq=0,
                     source=TranscriptSource.BOT.value,
                     role="assistant",
@@ -1837,7 +1852,7 @@ async def test_call_history_transcript_available_gated_by_visibility(
                 ),
                 Transcript(
                     tenant_id=rbac_world.tenant_id,
-                    call_id=hidden,
+                    call_id=live,
                     seq=0,
                     source=TranscriptSource.BOT.value,
                     role="assistant",
@@ -1846,11 +1861,20 @@ async def test_call_history_transcript_available_gated_by_visibility(
             ]
         )
 
+    # The listener (calls:read only) is NOT the owner: the finished call's
+    # transcript is visible, the live one's is not.
+    resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.listener_token))
+    assert resp.status_code == 200, resp.text
+    by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
+    assert by_id[str(finished)]["transcript_available"] is True
+    assert by_id[str(live)]["transcript_available"] is False
+
+    # The owner sees both.
     resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
     assert resp.status_code == 200, resp.text
     by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
-    assert by_id[str(visible)]["transcript_available"] is True
-    assert by_id[str(hidden)]["transcript_available"] is False
+    assert by_id[str(finished)]["transcript_available"] is True
+    assert by_id[str(live)]["transcript_available"] is True
 
 
 @pytest.mark.asyncio
@@ -1864,7 +1888,8 @@ async def test_call_history_ownerless_terminal_call_does_not_500(
     dispatcher-initiated), unpublished, terminal call makes `call_authz.visible_to`
     evaluate to SQL NULL (NULL OR FALSE OR FALSE), not FALSE. Selected as a plain
     column that must land in a non-optional bool, that NULL must not crash the
-    whole page — the row is simply not visible."""
+    whole page — and since the call is terminal, its transcript is tenant-visible
+    (VR2-177) regardless of that NULL."""
     ownerless = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -1887,7 +1912,7 @@ async def test_call_history_ownerless_terminal_call_does_not_500(
     resp = await client.get("/api/v1/call-history", headers=_auth(rbac_world.admin_token))
     assert resp.status_code == 200, resp.text
     by_id = {r["id"]: r for r in resp.json()["data"]["items"]}
-    assert by_id[str(ownerless)]["transcript_available"] is False
+    assert by_id[str(ownerless)]["transcript_available"] is True
 
 
 @pytest.mark.asyncio

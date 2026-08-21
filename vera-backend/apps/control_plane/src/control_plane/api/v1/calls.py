@@ -407,7 +407,8 @@ async def _authorize_call_read(
     resource_type: str,
 ) -> Call:
     """Shared read gate for the live-monitoring surfaces (event stream, summary):
-    tenant caller + calls:read + owner-or-published visibility, with the folded
+    tenant caller + calls:read + content visibility (a finished call is
+    tenant-visible per VR2-177; a live one owner-or-published), with the folded
     authz+PHI audit record both endpoints must emit. Raises the same 404/403
     shapes as stream_call_events."""
     if identity.account_type is not AccountType.TENANT or identity.tenant_id is None:
@@ -422,7 +423,9 @@ async def _authorize_call_read(
         ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
-    if _call_hidden_from(call, user_id):
+    # A finished call's content is tenant-visible (VR2-177); only a LIVE call
+    # stays owner-or-published.
+    if call.current_status not in TERMINAL_VALUES and _call_hidden_from(call, user_id):
         raise NotFoundError(message="call not found")  # don't reveal a private call
     allowed = "calls:read" in permissions
     await audit.emit(
@@ -1168,8 +1171,10 @@ async def list_call_history(
                 published=r.published,
                 user_id=caller.user_id,
                 can_play=can_play,
+                is_terminal=r.current_status in TERMINAL_VALUES,
             ),
-            transcript_available=r.has_transcript and r.caller_visible,
+            transcript_available=r.has_transcript
+            and (r.current_status in TERMINAL_VALUES or r.caller_visible),
         )
         for r in rows
     ]
@@ -1198,15 +1203,18 @@ async def get_recording_playback(
 ) -> ResponseModel[RecordingPlayback]:
     """Mint a TTL-bounded signed URL for the call's recording.
 
-    Authorization is permission AND call visibility (spec decision 6): the
-    recording is never more visible than the call itself. Every issuance is a
-    PHI disclosure → RECORDING_ACCESSED on the append-only audit trail.
+    Authorization is permission AND content visibility (spec decision 6, amended
+    VR2-177): a finished call's recording is tenant-visible; a live call's is
+    owner-or-published. Every issuance is a PHI disclosure → RECORDING_ACCESSED
+    on the append-only audit trail.
     """
     response.headers["Cache-Control"] = "no-store"
     call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
-    if _call_hidden_from(call, caller.user_id):
+    # A finished call's recording is tenant-visible (VR2-177); only a LIVE call
+    # stays owner-or-published.
+    if call.current_status not in TERMINAL_VALUES and _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # don't reveal a private call
 
     storage = request.app.state.recording_storage

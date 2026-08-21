@@ -40,6 +40,7 @@ from control_plane.api.v1.common import (
 from control_plane.auth.api_key import ApiKeyPrincipal, require_scope
 from control_plane.auth.identity import VerifiedIdentity
 from control_plane.auth.rbac import PermissionResolver, get_resolver, require
+from control_plane.call_closeout import TERMINAL_VALUES
 from control_plane.deps import get_audit, get_idempotency_store, get_sessionmaker
 from control_plane.dispatch import schedule_dispatch_pass
 from control_plane.exceptions import (
@@ -620,10 +621,9 @@ class CallAttemptView(BaseModel):
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
-    # True only when THIS caller may actually fetch the recording: it is
-    # AVAILABLE, the call passes the playback endpoint's owner-or-published
-    # gate, and the caller holds recordings:read — the DTO must never
-    # advertise a recording the playback endpoint would refuse.
+    # True only when THIS caller may actually fetch the recording (see
+    # `recording_playable`, the single source of this flag) — the DTO must
+    # never advertise a recording the playback endpoint would refuse.
     recording_available: bool
 
 
@@ -642,6 +642,7 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
             published=a.published,
             user_id=caller_id,
             can_play=can_play,
+            is_terminal=a.status in TERMINAL_VALUES,
         ),
     )
 
