@@ -47,7 +47,7 @@ describe("HistoryReport", () => {
   it("loads and renders the metric cards", async () => {
     render(<HistoryReport />)
     await waitFor(() => expect(screen.getByText("40")).toBeInTheDocument())
-    expect(screen.getByText("Completion %")).toBeInTheDocument()
+    expect(screen.getByText("Data Capture %")).toBeInTheDocument()
     expect(screen.getByText("53.3%")).toBeInTheDocument()
     expect(screen.getByText("Intervention Rate")).toBeInTheDocument()
     expect(screen.getByText("25.0%")).toBeInTheDocument()

@@ -220,7 +220,7 @@ export function HistoryReport() {
             deltaPct={deltaPct(cur.call_volume, prev.call_volume)}
           />
           <MetricCard
-            label="Completion %"
+            label="Data Capture %"
             value={formatPct(cur.avg_completion_pct)}
             deltaPct={deltaPct(cur.avg_completion_pct, prev.avg_completion_pct)}
           />
