@@ -58,6 +58,8 @@ describe("HistoryReport", () => {
     render(<HistoryReport />)
     await waitFor(() => expect(screen.getByText("Interventions per day")).toBeInTheDocument())
     expect(screen.queryByText("No interventions in this period")).not.toBeInTheDocument()
+    // "Flag" is not a shipped feature — it must not appear as a series/legend entry (VR2-286).
+    expect(screen.queryByText("Flag")).not.toBeInTheDocument()
   })
 
   it("shows an empty state when the range has no interventions", async () => {

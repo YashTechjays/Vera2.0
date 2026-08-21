@@ -46,8 +46,8 @@ const BAR_COLOR = "#34B2B2" // brand teal, same literal Live Monitoring uses
 
 // Stack order = array order; colors CVD-validated as adjacent pairs on white
 // (dataviz six-checks validator) — change order and colors together.
+// "flag" exists in the API shape but is not a shipped feature — not charted (VR2-286).
 const INTERVENTION_SERIES = [
-  { key: "flag", label: "Flag", color: "#2a78d6" },
   { key: "coach", label: "Coach", color: "#eb6834" },
   { key: "whisper", label: "Whisper", color: "#0f9b9b" },
   { key: "takeover", label: "Takeover", color: "#c98500" },
