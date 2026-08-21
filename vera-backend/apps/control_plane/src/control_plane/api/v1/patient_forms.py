@@ -681,36 +681,32 @@ def _baseline_query(form_id: UUID) -> Any:
     )
 
 
-async def _call_scoped_paths(session: TenantSession, form: PatientForm) -> frozenset[str]:
-    """The form's pinned schema's `collected_per="call"` leaves. Empty for a document predating
-    the marker, which simply means nothing is exempt — today's behaviour."""
+async def _v2_doc_for(session: TenantSession, form: PatientForm) -> FormSchemaDoc | None:
+    """The form's pinned schema document, fetched and parsed once — the shared resolution
+    point behind `_call_scoped_paths` and `_authoritative_call_ids`."""
     version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
-    doc = _v2_doc(version.schema_json)
+    return _v2_doc(version.schema_json)
+
+
+def _call_scoped_paths(doc: FormSchemaDoc | None) -> frozenset[str]:
+    """The form's pinned schema's `collected_per="call"` leaves. Empty for a document predating
+    the marker, which simply means nothing is exempt — today's behaviour."""
     return doc.collected_per_call_paths() if doc is not None else frozenset()
 
 
 async def _authoritative_call_ids(
-    session: TenantSession, form: PatientForm
+    session: TenantSession, form_id: UUID, doc: FormSchemaDoc | None
 ) -> frozenset[UUID] | None:
-    """The form's calls that captured its rep call reference number (see
-    `load_authoritative_call_ids`). `None` for a document predating the v2 marker: there is no
-    reference field to check, so "authoritative" is undefined for this form — not `False` on
-    every call. Threading `None` through to `load_call_attempts`/`load_field_provenance` leaves
-    their dataclass default (`authoritative=True`) in place instead."""
-    version = (
-        await session.execute(
-            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
-        )
-    ).scalar_one()
-    doc = _v2_doc(version.schema_json)
+    """The form's authoritative call ids, or `None` when the schema predates the v2 marker —
+    see `_authoritative`."""
     if doc is None:
         return None
     return await load_authoritative_call_ids(
-        session, form.id, reference_field=doc.rep_call_reference_number_field
+        session, form_id, reference_field=doc.rep_call_reference_number_field
     )
 
 
@@ -767,24 +763,27 @@ async def _unresolved_dispute_count(
 ) -> int:
     """The number of fields on this form with an open dispute (derived from the same
     Python rule the detail view uses)."""
-    paths = await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths)
-    return len(paths)
+    return len(await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths))
 
 
 async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
     """Assemble the full review detail for one form (current answers + disputes)."""
-    call_scoped_paths = await _call_scoped_paths(session, form)
-    views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
-
-    form_schema = (
+    # One round trip for both the schema row (insurance_type) and its document (doc) — the
+    # v2-or-None parse happens once here, shared by the call-scoped and authoritative lookups
+    # below instead of each re-fetching and re-parsing the same SchemaVersion.
+    form_schema, version = (
         await session.execute(
-            select(FormSchema)
+            select(FormSchema, SchemaVersion)
             .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
             .where(SchemaVersion.id == form.schema_version_id)
         )
-    ).scalar_one()
+    ).one()
+    doc = _v2_doc(version.schema_json)
 
-    authoritative_calls = await _authoritative_call_ids(session, form)
+    call_scoped_paths = _call_scoped_paths(doc)
+    views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
+
+    authoritative_calls = await _authoritative_call_ids(session, form.id, doc)
     attempts = await load_call_attempts(session, form.id, authoritative_calls=authoritative_calls)
     # No calls → no ai_call answers → nothing to join; skip the provenance query
     # (this runs on every form-detail GET, incl. intake-only forms).
@@ -1071,7 +1070,8 @@ async def list_form_calls(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    authoritative_calls = await _authoritative_call_ids(session, form)
+    doc = await _v2_doc_for(session, form)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, doc)
     attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     await emit_phi_read_audit(
         get_audit(request),
@@ -1561,7 +1561,7 @@ async def update_patient_form_status(
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
-        call_scoped_paths = await _call_scoped_paths(session, form)
+        call_scoped_paths = _call_scoped_paths(await _v2_doc_for(session, form))
         remaining = await _unresolved_dispute_count(
             session, form_id, call_scoped_paths=call_scoped_paths
         )

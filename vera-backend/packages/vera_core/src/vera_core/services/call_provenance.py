@@ -73,16 +73,23 @@ class CallAttempt:
     finalized: bool = True
 
 
+def _eval_finalized(after: Mapping[str, Any] | None) -> bool:
+    """Whether the post-call eval has filled `after_state` — `{}`/`None` means it never ran,
+    which is NOT the same as "changed nothing" (see `CallAttempt.finalized`)."""
+    return bool(after)
+
+
 def snapshot_changed_paths(
     before: Mapping[str, Any] | None, after: Mapping[str, Any] | None
 ) -> list[str]:
     """Field paths whose value differs between a call's before/after snapshots.
     Paths only — values never leave. Tolerates None/partial snapshots."""
     # after_state stays {} until the post-call eval fills it — no diff until then.
-    if not after:
+    if not _eval_finalized(after):
         return []
     b = before or {}
-    return sorted(p for p in set(b) | set(after) if b.get(p, _MISSING) != after.get(p, _MISSING))
+    a = after or {}
+    return sorted(p for p in set(b) | set(a) if b.get(p, _MISSING) != a.get(p, _MISSING))
 
 
 def _authoritative(call_id: UUID, authoritative_calls: Collection[UUID] | None) -> bool:
@@ -90,7 +97,7 @@ def _authoritative(call_id: UUID, authoritative_calls: Collection[UUID] | None) 
     the export endpoint — that has no use for the flag): the dataclass default (`True`) stands
     rather than reading as "confirmed non-authoritative". A concrete set means every call not
     in it is known, not merely unproven-by-omission, so it IS `False`."""
-    return True if authoritative_calls is None else call_id in authoritative_calls
+    return authoritative_calls is None or call_id in authoritative_calls
 
 
 async def load_call_attempts(
@@ -167,7 +174,7 @@ async def load_call_attempts(
                 published=c.published,
                 recording_available=c.id in playable,
                 authoritative=_authoritative(c.id, authoritative_calls),
-                finalized=bool(after),
+                finalized=_eval_finalized(after),
             )
         )
     return out
