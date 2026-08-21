@@ -20,7 +20,7 @@ from agent_worker.observer import (
     _Turn,
 )
 from vera_core.call_stream import TYPE_CALL_STATUS, TYPE_TRANSCRIPT, CallStreamEvent
-from vera_core.events.worker import CallAnswerRecordedEvent
+from vera_core.events.worker import CallRuleTerminatedEvent
 from vera_core.forms.call_plan import CallPlan, PlanFieldDescriptor, PlanSession, PlanTask
 from vera_core.forms.dsl import Comparison, FlowRule, NumericConsistency
 from vera_core.llm import LLMUnavailableError
@@ -154,7 +154,7 @@ class FakeRunState:
 
 class FakeBus:
     def __init__(self) -> None:
-        self.events: list[CallAnswerRecordedEvent] = []
+        self.events: list[Any] = []
 
     async def emit(self, event: Any) -> None:
         self.events.append(event)
@@ -165,12 +165,18 @@ class FakeController:
         self.active_task_index: int | None = 0
         self.answers: dict[str, Any] = {}
         self.applied: list[Any] = []
+        # Mirrors PlanRunController's receipt semantics; tests flip `accepts` to
+        # model the takeover fence declining a directive.
+        self.accepts = True
+        self.ended_by_flow_rule = False
 
     def update_answers(self, answers: dict[str, Any]) -> None:
         self.answers = dict(answers)
 
     async def apply_directive_now(self, directive: Any) -> None:
         self.applied.append(directive)
+        if self.accepts and not isinstance(directive, ReAsk):
+            self.ended_by_flow_rule = True
 
 
 def _manager(
@@ -552,6 +558,36 @@ class TestRuleIntervention:
         assert controller.applied == [Terminate(rule_key="stop")]
 
     @pytest.mark.asyncio
+    async def test_fired_rule_emits_the_durable_rule_terminated_event(self) -> None:
+        """The fact must land on the bus at directive time — a worker crash before
+        call.ended would otherwise lose it (VR2-188)."""
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, bus, _ = _manager(_plan(flow_rules=[flow]), extractor)
+        await _feed(manager, _rep("the answer is no"))
+        terminated = [e for e in bus.events if isinstance(e, CallRuleTerminatedEvent)]
+        assert [e.rule_key for e in terminated] == ["stop"]
+        assert terminated[0].room_name == ROOM
+
+    @pytest.mark.asyncio
+    async def test_no_rule_terminated_event_when_the_controller_declines(self) -> None:
+        """A directive the takeover fence discards must not stamp the call."""
+        flow = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.x", op="eq", value="No"),
+            action="terminate_call",
+        )
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "No", 90)])
+        manager, _, bus, controller = _manager(_plan(flow_rules=[flow]), extractor)
+        controller.accepts = False  # supervisor owns the call
+        await _feed(manager, _rep("the answer is no"))
+        assert not any(isinstance(e, CallRuleTerminatedEvent) for e in bus.events)
+
+    @pytest.mark.asyncio
     async def test_fired_rule_tags_the_evaluate_span(self, otel_spans: Any) -> None:
         flow = FlowRule(
             rule_key="stop",
@@ -894,6 +930,24 @@ def test_the_exact_value_rule_is_omitted_when_no_field_names_one() -> None:
     with_special = _field("sections.s.total", type="currency", special_values=["No Limit"])
     named = _extraction_instructions(_plan(fields=[with_special]).tasks[0])
     assert marker in named
+
+
+def test_a_coverage_task_is_told_valid_is_not_a_coverage_answer() -> None:
+    """Told only `(one of: Yes, No, N/A)`, the extractor wrote `Yes` from a rep saying the code
+    was valid — a coverage claim nobody made, which then retired the question from the owed set
+    so the completion guard had nothing left to refuse."""
+    marker = "has described the CODE"
+    covered = _field("sections.s.cpt_58340.covered", type="enum", values=["Yes", "No", "N/A"])
+    assert marker in _extraction_instructions(_plan(fields=[covered]).tasks[0])
+
+    gate = _field("sections.s.diagnostic_testing_covered", type="enum", values=["Yes", "No"])
+    assert marker in _extraction_instructions(_plan(fields=[gate]).tasks[0])
+
+    plain = _extraction_instructions(_plan(fields=[_field("sections.s.plain")]).tasks[0])
+    assert marker not in plain
+    # "coverage" is not "covered": this leaf records a network rule, not a benefit status.
+    oon = _field("sections.s.out_of_network_coverage", type="enum", values=["Yes", "No"])
+    assert marker not in _extraction_instructions(_plan(fields=[oon]).tasks[0])
 
 
 def test_an_enums_special_values_join_its_existing_vocabulary_clause() -> None:

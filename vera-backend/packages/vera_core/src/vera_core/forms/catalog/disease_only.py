@@ -10,6 +10,7 @@ the dynamic renderer can be validated against something other than the IBV form.
 from __future__ import annotations
 
 from vera_core.forms.authoring import (
+    COVERAGE_CONFIRMATION_RULE,
     DATE_VALIDATION,
     YES_NO,
     ask,
@@ -433,7 +434,7 @@ def build_disease_only() -> FormSchemaDoc:
                 title="Disease Coverage",
                 prompt=(
                     "Go disease by disease: establish coverage first, then benefits for each "
-                    "covered condition."
+                    "covered condition. " + COVERAGE_CONFIRMATION_RULE
                 ),
                 intro="Now I'd like to verify the covered disease benefits.",
                 outro="Thank you, that covers the disease benefits. Just a moment.",

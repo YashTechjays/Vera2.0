@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from vera_core.forms.authoring import COVERAGE_CONFIRMATION_RULE
 from vera_core.forms.call_plan import (
     CONFIRM_SLOT_RE,
     CallPlan,
@@ -14,6 +15,7 @@ from vera_core.forms.call_plan import (
     compile_call_plan,
     fuse_prefill,
 )
+from vera_core.forms.catalog import SCHEMAS
 from vera_core.forms.dsl import Codes, FormSchemaDoc, load_document
 from vera_core.forms.prompting import (
     FACTORY_SESSION,
@@ -146,6 +148,23 @@ class TestTaskText:
         firing = {t.task_key for t in RENDERED.tasks if "TERMINATION RULE" in t.prompt}
         assert firing == {"introduction", "insurance_basics"}
 
+    @pytest.mark.parametrize("insurance_type", sorted(SCHEMAS))
+    def test_closing_details_are_asked_only_by_the_task_that_owns_them(
+        self, insurance_type: str
+    ) -> None:
+        """A flow-rule note and a contradiction reason render into the task owning the LAST
+        field of their condition, so closing-detail language in one makes an early task ask
+        for the representative's name mid-verification."""
+        filename, _build = SCHEMAS[insurance_type]
+        doc = load_document((FORM_SCHEMA_DIR / filename).read_text(encoding="utf-8"))
+        owner = doc.section_to_task()[doc.rep_call_reference_number_field.split(".")[1]]
+        phrases = ("representative name", "representative's name", "reference number", "rep name")
+        for rendered in render_task_prompts(doc).tasks:
+            if rendered.task_key == owner:
+                continue
+            lowered = rendered.prompt.lower()
+            assert not any(p in lowered for p in phrases), (insurance_type, rendered.task_key)
+
     def test_contradictions_attach_to_last_field_task(self) -> None:
         assert (
             "CONSISTENCY CHECK — small_group_self_insured_conflict"
@@ -198,6 +217,27 @@ class TestTaskText:
             for t in rendered.tasks:
                 assert "vary how you" not in t.prompt.lower()
                 assert "That is wording only" not in t.prompt
+
+    def test_coverage_tasks_reject_valid_as_a_coverage_confirmation(self) -> None:
+        """A live call took "that code is valid" for a Yes and advanced. "Valid"/"billable"
+        describe the code, not the plan's benefit, so every task collecting a covered/not-covered
+        answer says so — in both catalog schemas."""
+        for key in (
+            "infertility_coverage",
+            "diagnostic_coverage",
+            "general_office_coverage",
+            "male_partner",
+        ):
+            assert COVERAGE_CONFIRMATION_RULE in task(key).prompt, key
+
+        disease = next(t for t in disease_only_prompts().tasks if t.task_key == "disease_coverage")
+        assert COVERAGE_CONFIRMATION_RULE in disease.prompt
+
+    def test_the_coverage_rule_stays_off_the_active_coverage_question(self) -> None:
+        """`policy_basics` asks whether coverage is "active" — the one place that word IS the
+        answer, so the rule listing it as a non-answer must not land there and contradict it."""
+        basics = next(t for t in disease_only_prompts().tasks if t.task_key == "policy_basics")
+        assert COVERAGE_CONFIRMATION_RULE not in basics.prompt
 
     def test_cpt_questions_carry_no_answer_instruction(self) -> None:
         # The rendered "- Answers: Yes | No | N/A" line already states the vocabulary.

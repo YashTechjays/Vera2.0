@@ -73,7 +73,7 @@ export function Login() {
       }
     } catch (err) {
       setError(apiErrorHttpStatus(err) === 401
-        ? "Invalid credentials."
+        ? "Invalid workspace, email, or password."
         : apiErrorMessage(err, "Something went wrong."))
     } finally {
       setBusy(false)

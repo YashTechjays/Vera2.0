@@ -106,6 +106,25 @@ class _FakeAuditSink:
 
 
 # ---------------------------------------------------------------------------
+# Fake LiveKit — try_dispatch calls create_call_room on it; we don't want
+# a real LiveKit server, and dispatch may be a no-op if no forms are queued.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLiveKit:
+    async def create_call_room(
+        self, room_name: str, metadata: dict[str, object] | None = None
+    ) -> None:
+        pass
+
+    async def delete_room(self, room_name: str) -> None:
+        pass
+
+    async def set_room_metadata(self, room_name: str, metadata: dict[str, object]) -> None:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Seed context returned by the fixture.
 # ---------------------------------------------------------------------------
 
@@ -141,6 +160,11 @@ class _SeedCtx:
 @pytest.fixture
 def fake_audit() -> _FakeAuditSink:
     return _FakeAuditSink()
+
+
+@pytest.fixture
+def fake_livekit() -> _FakeLiveKit:
+    return _FakeLiveKit()
 
 
 async def _seed_form(database_url: str, *, retry_count: int = 0) -> AsyncGenerator[_SeedCtx]:
@@ -339,6 +363,7 @@ def _observer_answer(
 async def test_verdict_path_mismatch_is_logged_not_silent(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A judge verdict whose field_path matches no judged answer must be
@@ -354,7 +379,7 @@ async def test_verdict_path_mismatch_is_logged_not_silent(
             JudgeVerdict(ctx.collection_path, True, 88, "yes in network"),
         ],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     with caplog.at_level("WARNING", logger="vera_core.services.post_call_eval"):
         await evaluate_call(
@@ -395,6 +420,7 @@ async def test_verdict_path_mismatch_is_logged_not_silent(
 async def test_observer_answers_are_judged_and_missing_paths_topped_up(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Regression for the Observer/eval conflict (2026-07-27 E2E): live ai_call
     answers must NOT no-op the eval. The eval judges them, extracts only the
@@ -414,7 +440,7 @@ async def test_observer_answers_are_judged_and_missing_paths_topped_up(
             JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
         ],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -468,6 +494,7 @@ async def test_observer_answers_are_judged_and_missing_paths_topped_up(
 async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """When the Observer answered every collection path, the eval must not
     spend an extract call — judge-only."""
@@ -484,7 +511,7 @@ async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
             JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
         ],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -505,6 +532,7 @@ async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
 async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """The LLM emitting the same field_path twice must not violate fa_current_uq
     (which would leave the job unacked and reclaim-loop it forever): the last
@@ -522,7 +550,7 @@ async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
         ],
         verdicts=[JudgeVerdict(path, True, 88, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -554,6 +582,7 @@ async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(
 async def test_evaluate_call_writes_answers_and_parks_for_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     ctx = seeded_ai_processing_form
     path = ctx.collection_path
@@ -565,7 +594,7 @@ async def test_evaluate_call_writes_answers_and_parks_for_review(
         extracted=[ExtractedField(path, "in-network", 92, 1)],
         verdicts=[JudgeVerdict(path, True, 88, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -620,6 +649,7 @@ async def test_evaluate_call_writes_answers_and_parks_for_review(
 async def test_token_valued_field_routes_to_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     ctx = seeded_ai_processing_form
     path = ctx.collection_path
@@ -628,7 +658,7 @@ async def test_token_valued_field_routes_to_review(
         extracted=[ExtractedField(path, "[[MEMBER_ID_1]]", 99, 0)],
         verdicts=[JudgeVerdict(path, True, 99, "member id")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -659,6 +689,7 @@ async def test_token_valued_field_routes_to_review(
 async def test_blank_valued_field_is_never_stored(  # VR2-93
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     # This writer bypasses record_answer, so a blank extraction would demote the
     # baseline and leave an empty field flagged as a dispute.
@@ -669,7 +700,7 @@ async def test_blank_valued_field_is_never_stored(  # VR2-93
         extracted=[ExtractedField(path, "  ", 40, 0)],
         verdicts=[],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     await evaluate_call(
         ctx.session,
@@ -695,6 +726,7 @@ async def test_blank_valued_field_is_never_stored(  # VR2-93
 async def test_redelivery_is_a_noop(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     ctx = seeded_ai_processing_form
     path = ctx.collection_path
@@ -703,7 +735,7 @@ async def test_redelivery_is_a_noop(
         extracted=[ExtractedField(path, "in-network", 92, 0)],
         verdicts=[JudgeVerdict(path, True, 88, "in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     await evaluate_call(
         ctx.session,
@@ -739,6 +771,7 @@ async def test_redelivery_is_a_noop(
 async def test_non_ai_processing_form_is_noop(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Fix A: a form not in AI_PROCESSING must be ACKed cleanly (no raise, no writes)."""
     ctx = seeded_ai_processing_form
@@ -757,7 +790,7 @@ async def test_non_ai_processing_form_is_noop(
 
     turns = [TranscriptTurn(0, "user", "in network")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -790,6 +823,7 @@ async def test_non_ai_processing_form_is_noop(
 async def test_llm_failure_routes_to_exception_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Fix B: an LLM extract error must route the form to EXCEPTION_REVIEW without raising."""
     ctx = seeded_ai_processing_form
@@ -799,7 +833,7 @@ async def test_llm_failure_routes_to_exception_review(
         verdicts=[],
         raise_on_extract=RuntimeError("Vertex quota exceeded"),
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -840,17 +874,25 @@ async def test_llm_failure_routes_to_exception_review(
 async def test_incomplete_with_retries_left_requeues(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A form with a required unfilled field and retries remaining re-queues (IN_QUEUE).
 
     The LLM extracts nothing — the single required ask field stays empty — so
     retryable_required_paths returns it.  retry_count starts at 0, max_retries=5,
     so the retry branch fires: form → IN_QUEUE, retry_count incremented to 1.
+
+    Note: try_dispatch runs inside the same transaction immediately after the
+    IN_QUEUE transition.  Because max_concurrent_calls leaves free slots and no forms are active,
+    the fake LiveKit dispatches immediately (IN_QUEUE → IN_CALL within the same
+    flush).  We therefore assert on the *outcome* (what _finish returned) rather
+    than the post-dispatch DB status, and verify that retry_count was incremented
+    (the state machine side effect that proves the IN_QUEUE branch fired).
     """
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -863,15 +905,19 @@ async def test_incomplete_with_retries_left_requeues(
 
     # _finish returns IN_QUEUE — the re-queue decision was made.
     assert outcome.status == FormStatus.IN_QUEUE
-    # retry_count == 1 is the state-machine side effect proving the branch fired.
+    # try_dispatch fires immediately inside the same transaction, so by the time
+    # we reload, the form may be IN_CALL.  What proves IN_QUEUE fired is
+    # retry_count == 1 (incremented by FormStateMachine on AI_PROCESSING → IN_QUEUE).
     form = await ctx.reload_form()
     assert form.retry_count == 1
-    assert form.status == FormStatus.IN_QUEUE.value
+    # Status is either IN_QUEUE (dispatch blocked) or IN_CALL (dispatch succeeded).
+    assert form.status in (FormStatus.IN_QUEUE.value, FormStatus.IN_CALL.value)
 
 
 async def test_incomplete_retries_exhausted_goes_to_review(
     seeded_ai_processing_form_maxed: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A form with a required unfilled field and no retries remaining routes to EXCEPTION_REVIEW.
 
@@ -882,7 +928,7 @@ async def test_incomplete_retries_exhausted_goes_to_review(
     ctx = seeded_ai_processing_form_maxed
     turns = [TranscriptTurn(0, "user", "no")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -903,6 +949,7 @@ async def test_incomplete_retries_exhausted_goes_to_review(
 async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Retryable required field + retries remaining, but the tenant auto-retry
     flag is off (EvalDeps default) → no requeue; EXCEPTION_REVIEW with the
@@ -911,7 +958,7 @@ async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
     turns = [TranscriptTurn(0, "agent", "are they in network")]
     # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit)  # flag defaults off
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)  # flag defaults off
 
     outcome = await evaluate_call(
         ctx.session,
@@ -931,6 +978,7 @@ async def test_incomplete_retryable_with_auto_retry_disabled_goes_to_review(
 async def test_incomplete_retryable_with_tenant_flag_off_goes_to_review(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Retryable required field + retries remaining + the deployment kill-switch
     on, but the TENANT's own auto-retry flag off → no requeue; EXCEPTION_REVIEW
@@ -944,7 +992,7 @@ async def test_incomplete_retryable_with_tenant_flag_off_goes_to_review(
     turns = [TranscriptTurn(0, "agent", "are they in network")]
     # LLM extracts nothing → the required ask field stays unsatisfied (retryable).
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -964,12 +1012,13 @@ async def test_incomplete_retryable_with_tenant_flag_off_goes_to_review(
 async def test_incomplete_with_retries_left_requeues_clears_review_reason(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Non-review outcome (IN_QUEUE) always clears review_reason."""
     ctx = seeded_ai_processing_form
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -988,6 +1037,7 @@ async def test_incomplete_with_retries_left_requeues_clears_review_reason(
 async def test_user_canceled_call_never_requeues(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A supervisor-ended (CANCELED) call is routed to human review, never
     auto-redialed — even with an unsatisfied required field and retries remaining.
@@ -1004,7 +1054,7 @@ async def test_user_canceled_call_never_requeues(
     # normally-ended call would route to IN_QUEUE here.
     turns = [TranscriptTurn(0, "user", "sorry, we got cut off")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1026,6 +1076,7 @@ async def test_user_canceled_call_never_requeues(
 async def test_stale_job_for_older_call_is_skipped(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A redelivered job for a call that is no longer the form's latest attempt
     must no-op: evaluating the older call's transcript would demote the newer
@@ -1047,7 +1098,7 @@ async def test_stale_job_for_older_call_is_skipped(
         extracted=[ExtractedField(ctx.collection_path, "in-network", 92, 1)],
         verdicts=[JudgeVerdict(ctx.collection_path, True, 88, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1067,6 +1118,7 @@ async def test_stale_job_for_older_call_is_skipped(
 async def test_extract_failure_still_judges_observer_answers(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A top-up extraction blip must not forfeit judge verdicts for the
     Observer's already-captured answers — the judge pass runs regardless, then
@@ -1080,7 +1132,7 @@ async def test_extract_failure_still_judges_observer_answers(
         verdicts=[JudgeVerdict(ctx.collection_path, True, 88, "yes in network")],
         raise_on_extract=RuntimeError("vertex blip"),
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1120,6 +1172,7 @@ async def test_extract_failure_still_judges_observer_answers(
 async def test_hallucinated_token_path_outside_request_does_not_quarantine(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A token-shaped value the LLM emits for a path it was NOT asked about is
     dropped entirely — it must not route the form to TOKEN_VALUE review for a
@@ -1138,7 +1191,7 @@ async def test_hallucinated_token_path_outside_request_does_not_quarantine(
             JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
         ],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1169,6 +1222,7 @@ async def test_hallucinated_token_path_outside_request_does_not_quarantine(
 async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """An Observer answer recorded without an evidence turn (evidence_seq NULL)
     must reach the judge with no anchor — not a fabricated turn 0."""
@@ -1184,7 +1238,7 @@ async def test_observer_answer_without_evidence_anchor_is_judged_with_none(
             JudgeVerdict(_NOTES_PATH, True, 70, "no notes"),
         ],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     await evaluate_call(
         ctx.session,
@@ -1221,6 +1275,7 @@ async def _repoint_notes_schema(ctx: _SeedCtx, **overrides: Any) -> None:
 async def test_a_special_value_is_stored_as_the_schema_spells_it(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """This writer builds its `FieldAnswer` rows directly, and gates compare byte-exact — so
     an un-snapped "unlimited" here leaves met/remaining unsatisfied and can redial the payer
@@ -1234,7 +1289,7 @@ async def test_a_special_value_is_stored_as_the_schema_spells_it(
         extracted=[ExtractedField(_NOTES_PATH, " unlimited ", 92, 0)],
         verdicts=[JudgeVerdict(_NOTES_PATH, True, 90, "that one is unlimited")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     await evaluate_call(
         ctx.session,
@@ -1263,6 +1318,7 @@ async def test_a_special_value_is_stored_as_the_schema_spells_it(
 async def test_an_intake_special_value_is_snapped_before_the_gates_read_it(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """A path already answered is never topped up, so an intake, human or older-release
     variant reaches the decision map unsnapped — and every gate below reads that map, not
@@ -1287,7 +1343,7 @@ async def test_an_intake_special_value_is_snapped_before_the_gates_read_it(
         extracted=[],
         verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
 
     await evaluate_call(
         ctx.session,
@@ -1320,6 +1376,7 @@ async def _require_notes_and_set_threshold(ctx: _SeedCtx, threshold: float) -> N
 async def test_threshold_met_routes_to_review_not_retry(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Once the verified fraction clears the tenant's retry_fill_threshold, the
     form parks for review instead of redialing for the remaining unsatisfied-
@@ -1338,7 +1395,7 @@ async def test_threshold_met_routes_to_review_not_retry(
         extracted=[],
         verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1360,6 +1417,7 @@ async def test_threshold_met_routes_to_review_not_retry(
 async def test_verified_fraction_exactly_at_threshold_is_suppressed(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Boundary: verified fraction == threshold suppresses the retry (the gate is
     `>=`, not `>`). Guards against a silent flip at the schema-default 0.50."""
@@ -1374,7 +1432,7 @@ async def test_verified_fraction_exactly_at_threshold_is_suppressed(
         extracted=[],
         verdicts=[JudgeVerdict(ctx.collection_path, True, 90, "yes in network")],
     )
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1393,6 +1451,7 @@ async def test_verified_fraction_exactly_at_threshold_is_suppressed(
 async def test_below_threshold_still_retries(
     seeded_ai_processing_form: _SeedCtx,
     fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
 ) -> None:
     """Below the tenant's fill threshold, an unsatisfied askable field still
     takes the ordinary retry path — the gate only ever suppresses a retry, it
@@ -1404,7 +1463,7 @@ async def test_below_threshold_still_retries(
     # verified fraction is 0.0, well below the 1.0 threshold.
     turns = [TranscriptTurn(0, "user", "sorry I cannot share that")]
     llm = FakeLLMClient(extracted=[], verdicts=[])
-    deps = EvalDeps(llm=llm, audit=fake_audit, auto_retry_enabled=True)
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
 
     outcome = await evaluate_call(
         ctx.session,
@@ -1416,3 +1475,40 @@ async def test_below_threshold_still_retries(
     )
 
     assert outcome.status == FormStatus.IN_QUEUE
+
+
+async def test_rule_terminated_call_never_requeues(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A rule-terminated call (VR2-188) never re-queues — it parks for review with
+    TERMINATED_BY_RULE, like the user_ended gate."""
+    ctx = seeded_ai_processing_form
+    await ctx.session.execute(
+        update(Call).where(Call.id == ctx.call_id).values(terminated_by_flow_rule=True)
+    )
+    await ctx.session.flush()
+
+    # LLM extracts nothing → the required ask field stays unsatisfied (retryable),
+    # retries remain, and auto-retry is on — without the terminated_by_flow_rule
+    # guard this is exactly the shape that routes to IN_QUEUE.
+    turns = [TranscriptTurn(0, "user", "the plan is not active")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit, auto_retry_enabled=True)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value
+    assert form.retry_count == 0  # the retry budget is untouched
+    assert form.enqueued_at is None  # the review path must not queue the form

@@ -88,6 +88,9 @@ class Call(Base, TenantScopedMixin):
     end_requested_by_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
+    # Stamped at closeout (never reset) when a flow rule cut the call short: the post-call
+    # retry decision routes such a call to review instead of redialing it (VR2-188).
+    terminated_by_flow_rule: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default=CallMode.FULL)
     current_status: Mapped[str] = mapped_column(

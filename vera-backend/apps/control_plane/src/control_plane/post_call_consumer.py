@@ -90,13 +90,13 @@ class PostCallConsumer:
         self._consumer = consumer_name or f"{socket.gethostname()}:{os.getpid()}"
         self._trace_links = trace_links
         self._bus = PostCallJobBus(redis)
-        self._livekit = livekit
-        self._kms = kms
-        self._recording = recording
-        self._plan_service = plan_service
         self._deps = EvalDeps(
             llm=llm,
             audit=audit,
+            livekit=livekit,
+            kms=kms,
+            recording=recording,
+            plan_service=plan_service,
             floor=review_floor,
             auto_retry_enabled=auto_retry_enabled,
         )
@@ -223,11 +223,11 @@ class PostCallConsumer:
         await run_dispatch_pass(
             self._sessionmaker,
             job.tenant_id,
-            self._livekit,
-            self._kms,
+            self._deps.livekit,
+            self._deps.kms,
             self._deps.audit,
-            recording=self._recording,
-            plan_service=self._plan_service,
+            recording=self._deps.recording,
+            plan_service=self._deps.plan_service,
             retry_floor=self._deps.floor,
         )
 

@@ -38,13 +38,17 @@ from opentelemetry import trace
 
 from agent_worker.rule_engine import RuleEngine
 from vera_core.call_stream import TYPE_TRANSCRIPT, CallStreamEvent
-from vera_core.events.worker import CallAnswerRecordedEvent, WorkerEventBus
+from vera_core.events.worker import (
+    CallAnswerRecordedEvent,
+    CallRuleTerminatedEvent,
+    WorkerEventBus,
+)
 from vera_core.forms.answers import canonical_answer, literals_of
 from vera_core.forms.call_plan import CallPlan, PlanTask
 from vera_core.forms.consistency import derive_remaining, triplet_paths
 from vera_core.forms.extraction_prompt import (
-    ANSWER_UNIT_FORMAT_RULE,
-    EXACT_VALUE_RULE,
+    answer_shape_rules,
+    is_coverage_status_path,
     special_values_hint,
 )
 from vera_core.forms.review import is_blank_answer
@@ -163,13 +167,15 @@ def _extraction_instructions(task: PlanTask) -> str:
         # over three services with three different cycle limits it changed neither attribution
         # nor formatting, and cost ~1.3k chars on the CPT panel, re-sent every pass.
         lines.append(f"- {f.path}: {f.title}{vocabulary}{note}")
+    # Same conditioning as the exact-value rule above: 250 chars on a prompt re-sent every pass.
+    collects_coverage = any(is_coverage_status_path(f.path) for f in task.fields)
     preamble = (
         "You extract answers from a phone call between an insurance-verification agent and "
         "a payer representative. Return ONLY the fields below that the representative has "
         "clearly answered in the transcript. Output a JSON array of "
         '{"field_path", "value", "confidence"} (confidence 0-100). No prose, no code fence. '
         "Omit a field entirely if it is not yet answered. "
-        f"{ANSWER_UNIT_FORMAT_RULE} {EXACT_VALUE_RULE + ' ' if names_exact else ''}"
+        f"{answer_shape_rules(names_exact=names_exact, collects_coverage=collects_coverage)} "
         "Use only these field_path values:"
     )
     return "\n".join([preamble, *lines])
@@ -420,6 +426,7 @@ class ObserverManager:
         # A retiring Observer's pass runs concurrently with the active one's, and `_record`
         # read-modify-writes `_on_file` across awaits.
         self._record_lock = asyncio.Lock()
+        self._rule_terminated_emitted = False
 
     def start(self) -> None:
         """Begin tailing the transcript stream in the background."""
@@ -626,7 +633,25 @@ class ObserverManager:
                 # Redirect the live call NOW: interrupt the bot + swap/re-ask (the controller
                 # serializes it against an in-flight task_complete handoff).
                 await self._controller.apply_directive_now(directive)
+                await self._emit_rule_terminated_once(directive.rule_key)
         await self._derive_remaining_locked(answer, evidence_seq)
+
+    async def _emit_rule_terminated_once(self, rule_key: str) -> None:
+        """Persist the rule-terminated fact the moment the controller accepts it — the
+        call.ended flag is only the shutdown-path echo and a crash would lose it."""
+        if self._rule_terminated_emitted or not self._controller.ended_by_flow_rule:
+            return
+        try:
+            await self._bus.emit(
+                CallRuleTerminatedEvent(room_name=self._room, rule_key=rule_key, ts=self._now_ms())
+            )
+            self._rule_terminated_emitted = True
+        except Exception as exc:  # best-effort: the call.ended flag is the backstop
+            logger.warning(
+                "observer manager %s: rule-terminated emit failed (%s)",
+                self._room,
+                type(exc).__name__,
+            )
 
     def _push_recorded(self, field_path: str, value: str) -> None:
         """Tell the controller the call collected this value — the one sync point onto

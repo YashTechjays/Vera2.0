@@ -58,6 +58,7 @@ async def close_call(
     trigger: str,
     actor_label: str = "agent-worker",
     end_requested_by: UUID | None = None,
+    terminated_by_flow_rule: bool = False,
 ) -> tuple[RoomRef, CallStatus] | None:
     """Apply *status* as the call's terminal state. Returns ``(ref, applied)``
     when a concurrency slot was freed (caller should run a dispatch pass), else
@@ -77,8 +78,14 @@ async def close_call(
         call = (
             await session.execute(select(Call).where(Call.id == ref.call_id).with_for_update())
         ).scalar_one_or_none()
-        if call is None or call.current_status in TERMINAL_VALUES:
-            return None  # voice-lab room, or idempotent redelivery / lost race
+        if call is None:
+            return None  # voice-lab room
+        if terminated_by_flow_rule:
+            call.terminated_by_flow_rule = True  # stamp only, never reset
+        if call.current_status in TERMINAL_VALUES:
+            # Lost the close race (e.g. the sweeper closed a still-draining room) —
+            # the stamp above is preserved on the terminal row, the rest is a no-op.
+            return None
         if end_requested_by is not None:
             call.end_requested_by_id = end_requested_by
         if call.end_requested_by_id is not None:

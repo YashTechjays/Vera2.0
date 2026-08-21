@@ -45,7 +45,7 @@ Verify the member's plan identity and network status. Confirm the spouse's ident
    - Answers: Yes | No
 
 TERMINATION RULE — no_out_of_network_coverage:
-If "Doctor Inside Network" is "No" and "Facility Inside Network" is "No" and "Out-of-Network Coverage" is "No": Both the doctor and facility are out of network and the plan has no out-of-network coverage. Skip all remaining tasks, collect the representative name and call reference number, then end the call. Stop the remaining questions and move to "Wrap Up".
+If "Doctor Inside Network" is "No" and "Facility Inside Network" is "No" and "Out-of-Network Coverage" is "No": Both the doctor and facility are out of network and the plan has no out-of-network coverage. Stop the remaining questions and move to "Wrap Up".
 
 CONSISTENCY CHECK — small_group_self_insured_conflict:
 If "Employer Support Size" is "Small Group" and "Plan Fund Type" is "Self Insured": Small group plans are typically fully insured, not self-funded. Push back once, saying: "I want to make sure I have this right — I have the plan as self insured and the employer as a small group, but small group plans are typically fully insured. Could you double-check whether the plan is self insured or fully funded, and whether the employer group is small or large?" Then re-confirm: Plan Fund Type, Employer Support Size.

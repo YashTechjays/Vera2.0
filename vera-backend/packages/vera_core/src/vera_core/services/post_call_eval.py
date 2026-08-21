@@ -36,10 +36,11 @@ from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
 from vera_core.models.call import Call
-from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, ReviewReason
+from vera_core.models.enums import AnswerSource, FormStatus, ReviewReason
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
+from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 
@@ -74,6 +75,14 @@ def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str 
 class EvalDeps:
     llm: LLMClient
     audit: AuditSink
+    # Unread by evaluate_call since dispatching moved to PostCallConsumer._process_job;
+    # they stay only because that consumer reads them back off here to run the pass.
+    # Dropping them is a follow-up, not this change — every test in this file constructs
+    # them, so removing the fields turns each new one on dev into a merge break.
+    livekit: Any
+    kms: Any = None
+    recording: Any = None
+    plan_service: Any = None
     floor: int = REVIEW_CONFIDENCE_FLOOR
     # Mirrors settings.form_auto_retry_enabled — the DEPLOYMENT-WIDE kill-switch;
     # ANDed with tenant.auto_retry_enabled at the decision site, so either one
@@ -158,15 +167,12 @@ async def evaluate_call(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
-    # A user-ended (CANCELED) call must never be auto-redialed — the supervisor who
-    # ended it does not want the payer called back. resolve_ai_processing enforces this
-    # on the non-eval path; the eval pipeline bypasses that gate, so re-check it here.
+    # A supervisor-ended or rule-terminated call must never be auto-redialed
+    # (call_lifecycle.no_retry_reason — the same policy the fallback resolver applies).
     call: Call | None = (
         await session.execute(select(Call).where(Call.id == call_id))
     ).scalar_one_or_none()
-    user_ended = call is not None and (
-        call.current_status == CallStatus.CANCELED.value or call.end_requested_by_id is not None
-    )
+    no_retry = no_retry_reason(call) if call is not None else None
     # (0b) Stale-call guard — only the form's LATEST attempt may be evaluated.
     # A job can be redelivered after its transaction committed (crash between
     # commit and XACK); if the form has since re-entered AI_PROCESSING for a
@@ -513,14 +519,14 @@ async def evaluate_call(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
     if retryable and sm.can_retry(form, tenant_max_retries=tenant.max_retries):
-        # Never auto-redial a call a supervisor deliberately ended: route to human
-        # review instead of re-queueing (see user_ended above).
-        if user_ended:
+        # Never auto-redial a call a supervisor or a flow rule deliberately ended:
+        # route to human review instead of re-queueing (call_lifecycle.no_retry_reason).
+        if no_retry is not None:
             return await _finish(
                 FormStatus.EXCEPTION_REVIEW,
                 written=len(kept),
                 reviewed=unsatisfied,
-                reason=ReviewReason.USER_ENDED,
+                reason=no_retry,
             )
         if tenant.allows_auto_retry(deps.auto_retry_enabled):
             return await _finish(

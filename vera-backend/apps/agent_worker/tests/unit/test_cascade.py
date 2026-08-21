@@ -30,8 +30,8 @@ def test_interruption_pinned_to_local_vad() -> None:
     # Pin local VAD barge-in instead.
     interruption = cascade_session_kwargs(turn_detector=object())["turn_handling"]["interruption"]
     assert interruption["mode"] == "vad"
-    assert interruption["min_duration"] == 0.5
-    assert interruption["false_interruption_timeout"] == 2.0
+    assert interruption["min_duration"] == 0.2
+    assert interruption["false_interruption_timeout"] == 1.0
     assert interruption["resume_false_interruption"] is True
 
 

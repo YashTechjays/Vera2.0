@@ -12,8 +12,8 @@ from google.genai import types
 from opentelemetry import trace
 
 from vera_core.forms.extraction_prompt import (
-    ANSWER_UNIT_FORMAT_RULE,
-    EXACT_VALUE_RULE,
+    answer_shape_rules,
+    is_coverage_status_path,
     special_values_hint,
 )
 from vera_core.forms.review import is_blank_answer
@@ -79,14 +79,14 @@ def build_extract_prompt(
         if (hint := special_values_hint(named_by_path.get(path)))
     )
     # A form whose requested paths name nothing gets the prompt byte-for-byte as before.
-    exact_rule = f" {EXACT_VALUE_RULE}" if named else ""
     named_block = f"named answers:\n{named}\n\n" if named else ""
+    collects_coverage = any(is_coverage_status_path(path) for path in field_paths)
     return (
         "You are extracting insurance-benefit answers from a de-identified call "
         "transcript. Turns are numbered [n]. For each requested field_path, return the "
         "value stated by the payer, a 0-100 confidence, and evidence_seq = the [n] of the "
         "turn that supports it. Omit fields not present. Do NOT invent values. "
-        f"{ANSWER_UNIT_FORMAT_RULE}{exact_rule}\n\n"
+        f"{answer_shape_rules(names_exact=bool(named), collects_coverage=collects_coverage)}\n\n"
         f"field_paths:\n{json.dumps(field_paths)}\n\n"
         f"{named_block}"
         f"transcript:\n{_turns_block(turns)}"

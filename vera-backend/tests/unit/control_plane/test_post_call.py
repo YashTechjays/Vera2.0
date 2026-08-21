@@ -268,6 +268,29 @@ async def test_low_completion_with_retries_exhausted_goes_to_review(
 
 
 @pytest.mark.asyncio
+async def test_rule_terminated_call_never_auto_requeues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rule-terminated call (VR2-188) is never redialed — it parks for review
+    with TERMINATED_BY_RULE instead."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=40.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id, terminated_by_flow_rule=True),
+        form=form,
+        tenant=_tenant(tenant_id, max_retries=3, retry_fill_threshold=0.95),
+    )
+    audit = _wire(monkeypatch, session)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
+    )
+
+    assert requeued is False
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value
+    assert form.retry_count == 0  # budget untouched — the redial was refused
+
+
+@pytest.mark.asyncio
 async def test_canceled_call_never_auto_requeues(monkeypatch: pytest.MonkeyPatch) -> None:
     """A user-ended (CANCELED) call rides the post-call pipeline for transcript
     validation, but the auto-retry edge is refused whatever the fill and flag —
