@@ -3,7 +3,7 @@ import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
 import { isTerminalCallStatus } from "@/lib/api/callEvents"
-import { leafByPath } from "@/lib/ibv/schema"
+import { titleOf } from "@/lib/ibv/schema"
 import type { FormSchema } from "@/lib/ibv/types"
 import { getPatientFormCalls } from "@/lib/patient-forms/api"
 import type { CallAttempt } from "@/lib/patient-forms/types"
@@ -12,6 +12,7 @@ import {
   formatDate,
   modeBadgeClass,
   statusLabel,
+  warningPillClass,
 } from "@/lib/patient-forms/display"
 import { usePermission } from "@/lib/auth/permissions"
 import { useIbv } from "./IbvProvider"
@@ -20,8 +21,9 @@ import { RecordingPlayer } from "./RecordingPlayer"
 /** The leaf's schema-authored title for `path`, falling back to a humanized path
  *  segment (never a raw dotted path) when the schema hasn't loaded or lacks the leaf. */
 function fieldTitle(schema: FormSchema | null, path: string): string {
-  const leaf = schema ? leafByPath(schema).get(path) : undefined
-  return leaf ? leaf.field.title : fieldLabel(path)
+  if (!schema) return fieldLabel(path)
+  const title = titleOf(schema, path)
+  return title === path ? fieldLabel(path) : title
 }
 
 /** One attempt row. Props-driven (no hooks) so the play-control gating is unit-
@@ -71,7 +73,7 @@ export function AttemptCard({
         )}
         {a.authoritative === false && (
           <span
-            className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+            className={warningPillClass}
             title="Nothing ties this call to a payer-side record — the answers are unverified, but a reviewer may still accept them."
           >
             No call reference — unverified
@@ -79,7 +81,7 @@ export function AttemptCard({
         )}
         {notFinalized && (
           <span
-            className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+            className={warningPillClass}
             title="This call ended without a post-call review recording an outcome — that is not the same as it having collected nothing."
           >
             Not finalized

@@ -5,6 +5,7 @@ import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls
 import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { phonePaths } from "@/lib/ibv/phone"
+import { warningPillClass } from "@/lib/patient-forms/display"
 import { USAGE_META } from "./usageMeta"
 import type { Condition, LeafField } from "@/lib/ibv/types"
 
@@ -81,7 +82,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
         )}
         {provenance?.authoritative === false && (
           <span
-            className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700"
+            className={cn(warningPillClass, "shrink-0 px-1.5 py-0.5 text-[9px]")}
             title="No call reference — nothing ties this answer to a payer-side record. A reviewer may still accept it."
           >
             Unverified
