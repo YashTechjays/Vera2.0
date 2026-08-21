@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { isTerminalCallStatus } from "@/lib/api/callEvents"
 import { leafByPath } from "@/lib/ibv/schema"
 import type { FormSchema } from "@/lib/ibv/types"
 import { getPatientFormCalls } from "@/lib/patient-forms/api"
@@ -45,9 +46,11 @@ export function AttemptCard({
   onTogglePlayer: () => void
   schema: FormSchema | null
 }) {
-  // false only on an explicit false — an older backend contract omitting the field
-  // reads as finalized, same idiom as `authoritative` above.
-  const notFinalized = a.finalized === false
+  // finalized=false also covers a call still in flight (or one that simply failed to
+  // connect) — after_state is {} for its whole life, not just once it's over. Only a
+  // TERMINAL call with finalized=false is a genuine "no outcome recorded"; a live call
+  // already says so via its status badge, so the marker is gated on both.
+  const notFinalized = a.finalized === false && isTerminalCallStatus(a.status)
   return (
     <div className="rounded-md border border-border bg-white p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -77,7 +80,7 @@ export function AttemptCard({
         {notFinalized && (
           <span
             className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
-            title="The post-call review never finished, so what this attempt collected is unknown — that is not the same as it having collected nothing."
+            title="This call ended without a post-call review recording an outcome — that is not the same as it having collected nothing."
           >
             Not finalized
           </span>
@@ -85,7 +88,7 @@ export function AttemptCard({
       </div>
       {notFinalized ? (
         <p className="mt-1 text-xs text-muted-foreground">
-          Outcome unknown — this attempt was never finalized
+          No outcome recorded for this attempt
         </p>
       ) : (
         <>
