@@ -79,6 +79,14 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
             <span className="text-[#b91c1c]">*</span>
           </span>
         )}
+        {provenance?.authoritative === false && (
+          <span
+            className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700"
+            title="No call reference — nothing ties this answer to a payer-side record. A reviewer may still accept it."
+          >
+            Unverified
+          </span>
+        )}
       </div>
 
       <div className="relative flex min-w-0 flex-1 items-stretch">

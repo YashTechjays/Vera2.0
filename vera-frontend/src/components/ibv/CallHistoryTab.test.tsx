@@ -14,6 +14,7 @@ const attempt = (over: Partial<CallAttempt>): CallAttempt => ({
   retry_of: null,
   changed_paths: [],
   recording_available: false,
+  authoritative: true,
   ...over,
 })
 
@@ -53,5 +54,21 @@ describe("AttemptCard recording playback", () => {
     const html = card(attempt({ recording_available: true }), true, true)
     expect(html).toContain("Hide recording")
     expect(html).toContain('aria-label="Call recording"')
+  })
+})
+
+describe("AttemptCard authoritative marker", () => {
+  it("marks an attempt that captured no reference number", () => {
+    expect(card(attempt({ authoritative: false }), true)).toContain("No call reference")
+  })
+
+  it("does not mark an authoritative attempt", () => {
+    expect(card(attempt({ authoritative: true }), true)).not.toContain("No call reference")
+  })
+
+  it("treats a payload missing the flag as authoritative (older backend contract)", () => {
+    const legacy: Partial<CallAttempt> = attempt({ authoritative: false })
+    delete legacy.authoritative
+    expect(card(legacy as CallAttempt, true)).not.toContain("No call reference")
   })
 })

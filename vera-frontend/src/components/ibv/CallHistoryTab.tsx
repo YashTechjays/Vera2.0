@@ -52,6 +52,14 @@ export function AttemptCard({
         {retriedAttempt !== undefined && (
           <span className="text-xs text-muted-foreground">retry of attempt {retriedAttempt}</span>
         )}
+        {a.authoritative === false && (
+          <span
+            className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+            title="Nothing ties this call to a payer-side record — the answers are unverified, but a reviewer may still accept them."
+          >
+            No call reference — unverified
+          </span>
+        )}
       </div>
       <button
         type="button"
