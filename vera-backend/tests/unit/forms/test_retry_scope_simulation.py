@@ -7,6 +7,14 @@ Expectations come only from `vera_core.forms.conditions` primitives (`leaf_gates
 `focus_paths`, `_required_paths`, `expand_to_groups`, `_confirmed`, `is_call_confirmed`, or
 `satisfied_required_fraction`. See docs/superpowers/plans/2026-08-21-f-retry-scope-simulation-
 suite.md and docs/superpowers/specs/2026-08-21-retry-call-scoping-design.md.
+
+Not covered: `Scenario` carries a single `confirmed_by_authoritative` bool for the WHOLE form, so
+the commonest real retry — call 1 authoritative over part of the form, call 2 not, mixed
+per-path provenance — is unrepresentable here. That is a deliberate scope limit, not an
+oversight: generalizing it needs I1 (`_assert_soundness`) and I2 (`_assert_completeness`) to
+reason about per-path provenance rather than one scenario-wide flag, which is a design change to
+this harness, not a scenario addition. See `_owed_now` and `_assert_soundness` below for the two
+narrower gaps this same single-flag design leaves in I1/I2 even within a single scenario.
 """
 
 import json
@@ -60,7 +68,13 @@ def _owed_now(doc: FormSchemaDoc, scenario: Scenario) -> set[str]:
     """Required + applicable + collectable, and not confirmed by an authoritative call, under
     `scenario.values` — built only from `leaf_gates`/`is_applicable`/`is_required`, so it is
     independent of `focus_paths`. `default` never enters `is_required`/`is_applicable`, so a
-    defaulted leaf is included here exactly as the retry rule (`include_defaulted=True`) needs."""
+    defaulted leaf is included here exactly as the retry rule (`include_defaulted=True`) needs.
+
+    Does NOT model either/or satisfaction (an answered `copay` can excuse an unanswered
+    `coinsurance`): this counts such a sibling as owed even when `focus_paths` correctly omits
+    it. That makes I2 (`_assert_completeness`) able to FALSE-FAIL on a scenario built around an
+    either/or pair — reject a correct `focus_paths` result — but never false-PASS (it never
+    undercounts what's owed), so the completeness guarantee itself is not weakened."""
     shared = doc.shared_conditions or {}
     confirmed = set(scenario.values) if scenario.confirmed_by_authoritative else set()
     return {
@@ -92,6 +106,14 @@ def _assert_soundness(doc: FormSchemaDoc, scenario: Scenario, focus: list[str]) 
     owed = _owed_now(doc, scenario)
     # `expand_to_groups` pulls a group in on ANY owed member without re-checking each member's
     # own gate, so an unconfirmed sibling can legitimately drag in a still-inapplicable one.
+    # This exemption under-approximates that: `expand_to_groups` sweeps EVERY ANCESTOR group of
+    # an owed path, but this only credits the owed path's INNERMOST group. On a panel owed via
+    # a nested sub-group (e.g. one CPT code's `covered` pending inside a bigger multi-CPT
+    # panel), a sibling CPT code's own still-inapplicable leaf has no owed member in ITS
+    # innermost group and trips this assertion even though `focus_paths` is behaving correctly.
+    # Safe direction: this can only make I1 FALSE-FAIL (reject a correct result), never
+    # false-PASS (accept an incorrect one) — build such a scenario with every other member of
+    # the wider panel already confirmed (see the group-closure tests below) to avoid it.
     owed_groups = {g for path in owed for g in (_innermost_group(doc, path),) if g is not None}
     for path in focus:
         if path in call_scoped:
@@ -138,7 +160,8 @@ def assert_invariants(
     doc: FormSchemaDoc, raw: dict[str, Any], scenario: Scenario, focus: list[str]
 ) -> None:
     """The four global retry-scope invariants every scenario in this suite must satisfy."""
-    assert is_v2(raw)
+    schema_is_v2 = is_v2(raw)  # keep `raw` out of the assert: it's the whole schema, not a bool
+    assert schema_is_v2, "fixture schema is not a v2 DSL document"
     _assert_soundness(doc, scenario, focus)
     _assert_completeness(doc, scenario, focus)
     _assert_group_closure(doc, scenario, focus)
@@ -883,5 +906,10 @@ def test_everything_supplied_by_intake_nothing_is_skipped() -> None:
     assert_invariants(_DOC, _RAW, scenario, focus)
     expected = _owed_now(_DOC, scenario) | _DOC.collected_per_call_paths()
     assert expected <= set(focus)
+    # `is_call_confirmed` rejects intake (wrong source) and this non-authoritative call (right
+    # source, wrong call_id) for the same reason it rejects both: neither is an AUTHORITATIVE
+    # call. Worth asserting anyway — it pins that `focus_paths` draws no special-case distinction
+    # between them; a regression that started trusting intake as call-equivalent would break
+    # this equality without tripping any other assertion in the suite.
     non_authoritative_focus = _focus(scenario)
     assert set(focus) == set(non_authoritative_focus)
