@@ -420,33 +420,116 @@ class TestExpandToGroups:
 
 
 class TestSatisfiedRequiredFraction:
+    """Pre-Plan-B, `_status()`'s default (ai_call, no call_id) was itself sufficient to
+    satisfy — these tests now pass an explicit authoritative call so they still exercise
+    the fraction arithmetic rather than trivially reading 0.0 for lack of one."""
+
     def test_none_satisfied_is_zero(self) -> None:
-        assert satisfied_required_fraction({}, SCHEMA, floor=70) == 0.0
+        # No status at all — unaffected by the authoritative-call rule either way.
+        assert satisfied_required_fraction({}, SCHEMA, floor=70, authoritative_calls=set()) == 0.0
 
     def test_one_of_three_satisfied(self) -> None:
+        call_id = uuid4()
         assert (
             satisfied_required_fraction(
-                {"patient_information.patient_name": _status()}, SCHEMA, floor=70
+                {"patient_information.patient_name": _status(call_id=call_id)},
+                SCHEMA,
+                floor=70,
+                authoritative_calls={call_id},
             )
             == 1 / 3
         )
 
     def test_all_satisfied_is_one(self) -> None:
+        call_id = uuid4()
         status = {
-            "patient_information.patient_name": _status(),
-            "patient_information.patient_dob": _status(),
-            "insurance_information.policy_number": _status(),
+            "patient_information.patient_name": _status(call_id=call_id),
+            "patient_information.patient_dob": _status(call_id=call_id),
+            "insurance_information.policy_number": _status(call_id=call_id),
         }
-        assert satisfied_required_fraction(status, SCHEMA, floor=70) == 1.0
+        assert (
+            satisfied_required_fraction(status, SCHEMA, floor=70, authoritative_calls={call_id})
+            == 1.0
+        )
 
     def test_no_applicable_required_is_one(self) -> None:
-        assert satisfied_required_fraction({}, {"sections": []}, floor=70) == 1.0
+        # No required fields in the schema at all — vacuous, regardless of authority.
+        assert (
+            satisfied_required_fraction({}, {"sections": []}, floor=70, authoritative_calls=set())
+            == 1.0
+        )
 
     def test_ai_answer_below_floor_counts_unsatisfied(self) -> None:
-        weak = FieldStatus(source="ai_call", ai_supported=True, ai_confidence=50)
+        """Confidence still gates even on an authoritative call — isolating the floor
+        check from the authority check, which `TestVerifiedCountsOnlyAuthoritativeAnswers`
+        covers separately."""
+        call_id = uuid4()
+        weak = FieldStatus(source="ai_call", ai_supported=True, ai_confidence=50, call_id=call_id)
         assert (
             satisfied_required_fraction(
-                {"patient_information.patient_name": weak}, SCHEMA, floor=70
+                {"patient_information.patient_name": weak},
+                SCHEMA,
+                floor=70,
+                authoritative_calls={call_id},
             )
             == 0.0
+        )
+
+
+class TestVerifiedCountsOnlyAuthoritativeAnswers:
+    def test_intake_values_are_not_verified(self) -> None:
+        """The headline defect: a form nobody has called reported 100% verified and routed to
+        READY_FOR_REVIEW — "nothing is wrong, sign it off" — with zero judge verdicts in existence.
+        """
+        raw = _ibv_raw()
+        doc = FormSchemaDoc.model_validate(raw)
+        status: dict[str, FieldStatus] = {}
+        values: dict[str, Any] = {}
+        for path, _leaf, gates in leaf_gates(doc):
+            if is_applicable(gates, values, doc.shared_conditions or {}):
+                status[path] = FieldStatus("intake", None, None, None)
+                values[path] = "x"
+        assert (
+            satisfied_required_fraction(
+                status, raw, floor=70, values=values, authoritative_calls=set()
+            )
+            == 0.0
+        )
+
+    def test_an_answer_from_a_non_authoritative_call_is_not_verified(self) -> None:
+        raw, auth, other = _ibv_raw(), uuid4(), uuid4()
+        target = "sections.patient_verification.is_insurance_active"
+        status = {target: FieldStatus("ai_call", True, 95, other)}
+        frac = satisfied_required_fraction(
+            status, raw, floor=70, values={target: "Yes"}, authoritative_calls={auth}
+        )
+        assert frac == 0.0
+
+    def test_the_same_answer_from_an_authoritative_call_is(self) -> None:
+        raw, auth = _ibv_raw(), uuid4()
+        target = "sections.patient_verification.is_insurance_active"
+        status = {target: FieldStatus("ai_call", True, 95, auth)}
+        frac = satisfied_required_fraction(
+            status, raw, floor=70, values={target: "Yes"}, authoritative_calls={auth}
+        )
+        assert frac > 0.0
+
+    def test_one_hundred_percent_stays_reachable(self) -> None:
+        """The reason the denominator must shrink too: with `askable_only=False` the
+        never-collectable leaves would stay in the divisor while becoming permanently
+        unsatisfiable, capping this below 100% — so a `retry_fill_threshold` above that
+        cap could never fire the park gate."""
+        raw, auth = _ibv_raw(), uuid4()
+        doc = FormSchemaDoc.model_validate(raw)
+        status: dict[str, FieldStatus] = {}
+        values: dict[str, Any] = {}
+        for path, leaf, _gates in leaf_gates(doc):
+            if leaf.role in COLLECTED_ROLES:
+                status[path] = FieldStatus("ai_call", True, 95, auth)
+                values[path] = "Yes"
+        assert (
+            satisfied_required_fraction(
+                status, raw, floor=70, values=values, authoritative_calls={auth}
+            )
+            == 1.0
         )

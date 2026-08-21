@@ -41,7 +41,7 @@ from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEv
 from vera_core.models.patient_form import PatientForm
 from vera_core.models.tenant import Tenant
 from vera_core.services.call_lifecycle import no_retry_reason
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
 from vera_core.services.queue_dispatcher import try_dispatch
 
@@ -460,8 +460,15 @@ async def evaluate_call(
     # token_fields early return below, so a token-flagged form never persists a stale
     # verified_pct beside a fresh completion_pct.
     status_by_path = await load_field_status(session, form_id)
+    authoritative = await load_authoritative_call_ids(
+        session, form_id, reference_field=doc.rep_call_reference_number_field
+    )
     verified_fraction = satisfied_required_fraction(
-        status_by_path, version.schema_json, floor=deps.floor, values=current_values
+        status_by_path,
+        version.schema_json,
+        floor=deps.floor,
+        values=current_values,
+        authoritative_calls=authoritative,
     )
     form.verified_pct = round(verified_fraction * 100, 2)
 

@@ -371,8 +371,19 @@ async def seed(missing: tuple[str, ...]) -> None:
         await recompute_form_projection(session, form, schema_json)
         status_by_path = await load_field_status(session, form.id)
         values = await current_values_by_path(session, form.id)
+        # The seeded call captures the reference number (below), so it is authoritative and
+        # `verified_pct` stays close to `completion_pct` rather than collapsing to 0%.
+        authoritative = await load_authoritative_call_ids(
+            session, form.id, reference_field=doc.rep_call_reference_number_field
+        )
         form.verified_pct = round(
-            satisfied_required_fraction(status_by_path, schema_json, floor=floor, values=values)
+            satisfied_required_fraction(
+                status_by_path,
+                schema_json,
+                floor=floor,
+                values=values,
+                authoritative_calls=authoritative,
+            )
             * 100,
             2,
         )
@@ -385,9 +396,6 @@ async def seed(missing: tuple[str, ...]) -> None:
         print(
             f"  answers: {len(answers)} rows, {len(judged)} judged, sections left empty: "
             f"{', '.join(missing)}"
-        )
-        authoritative = await load_authoritative_call_ids(
-            session, form.id, reference_field=doc.rep_call_reference_number_field
         )
         _report(doc, status_by_path, values, schema_json, floor, authoritative)
         print("\nArm it when you are ready to take the call: just arm-retry-form")

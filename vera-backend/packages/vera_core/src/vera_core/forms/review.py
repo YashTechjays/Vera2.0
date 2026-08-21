@@ -338,9 +338,10 @@ def _unsatisfied(
     floor: int,
     askable_only: bool,
 ) -> tuple[list[str], list[str]]:
-    """`(applicable required paths, those still unsatisfied)` — the one set all three public
-    consumers measure, so the auto-complete gate, the retry set and `verified_pct` cannot drift
-    apart. They did: the alternatives rule reached the first two and not the third."""
+    """`(applicable required paths, those still unsatisfied)` — the set `unsatisfied_required_paths`
+    and `retryable_required_paths` both measure, so the auto-complete gate and the retry set cannot
+    drift apart. `satisfied_required_fraction` (verified_pct) no longer routes through this: it
+    judges by `is_call_confirmed`, not `is_field_satisfied` — see its own docstring for why."""
     gate_values = _gate_values(status_by_path, values)
     applicable = _required_paths(schema_json, gate_values, askable_only=askable_only)
     alternatives = _alternatives(schema_json)
@@ -397,17 +398,35 @@ def satisfied_required_fraction(
     *,
     floor: int,
     values: Mapping[str, Any] | None = None,
+    authoritative_calls: Collection[UUID],
 ) -> float:
-    """Fraction (0.0-1.0) of required, applicable fields that are satisfied - the
-    same set unsatisfied_required_paths measures. No applicable-required fields -> 1.0.
-    Satisfaction is verified (is_field_satisfied: AI answers need supported +
-    confidence >= floor), not mere value presence."""
-    applicable, unsatisfied = _unsatisfied(
-        status_by_path, schema_json, values, floor=floor, askable_only=False
-    )
+    """Fraction (0.0-1.0) of required, applicable, COLLECTABLE leaves an AUTHORITATIVE call
+    confirmed — what `verified_pct` reports and what the park gate compares against
+    `tenant.retry_fill_threshold`.
+
+    Two restrictions, and they only work together (spec D9):
+
+    * `is_call_confirmed`, not `is_field_satisfied` — an intake value is trusted for completeness
+      and for the retry-worthiness decision but was never put to the payer, and an answer from a
+      call that captured no reference number is not proof either;
+    * `askable_only=True` — the never-collectable leaves would otherwise stay in the denominator
+      while becoming permanently unsatisfiable, capping this below 100% on a form no retry could
+      ever finish clearing.
+
+    NOT the auto-complete gate: `unsatisfied_required_paths` keeps `is_field_satisfied` and all
+    roles, because a human signing a form off legitimately trusts an intake-supplied patient name.
+    """
+    gate_values = _gate_values(status_by_path, values)
+    applicable = _required_paths(schema_json, gate_values, askable_only=True)
     if not applicable:
         return 1.0
-    return (len(applicable) - len(unsatisfied)) / len(applicable)
+    alternatives = _alternatives(schema_json)
+    confirmed = sum(
+        1
+        for path in applicable
+        if _confirmed(path, status_by_path, alternatives, authoritative_calls, floor=floor)
+    )
+    return confirmed / len(applicable)
 
 
 def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[str]:
