@@ -656,7 +656,7 @@ def test_build_agent_playbook_specializes_but_never_selects() -> None:
         controller=controller,
     )
     assert isinstance(nav, IvrNavigatorAgent)
-    assert "<provider_subflows>Press 3</provider_subflows>" in nav.instructions
+    assert 'provider_subflows="Press 3"' in nav.instructions
     # The flag is the sole selector: a playbook without it — even with the flag explicitly
     # false — never overrides the opt-out into a silent-on-connect navigator.
     for meta in (
