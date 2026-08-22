@@ -268,7 +268,7 @@ class Settings(BaseSettings):
     # lower if answers arrive late/out-of-sequence, raise if the bot answers into
     # a mid-prompt pause. Patient by default (a machine pauses mid-readout more than
     # a person does), well above the snappy human-cascade delays.
-    ivr_endpointing_min_delay: float = 0.8  # VERA_IVR_ENDPOINTING_MIN_DELAY
+    ivr_endpointing_min_delay: float = 0.2  # VERA_IVR_ENDPOINTING_MIN_DELAY
     ivr_endpointing_max_delay: float = 1.5  # VERA_IVR_ENDPOINTING_MAX_DELAY
 
     # --- audit anchoring (WORM bucket) -------------------------------------
