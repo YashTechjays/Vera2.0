@@ -206,15 +206,21 @@ _PLAYBOOK_CONFIG_KEYS: tuple[str, ...] = tuple(
 )
 
 
+def _config_attr_value(value: object) -> str:
+    """Collapse whitespace (html.escape leaves newlines alone, and a newline would add a line to
+    the block that reads as its own instruction), then escape markup and quotes so the value can
+    neither close the attribute nor inject <config> structure."""
+    return html.escape(" ".join(str(value).split()))
+
+
 def _render_playbook_overrides(playbook: IvrPlaybookConfig) -> str | None:
     """Render a per-provider playbook as high-priority override sections appended after the
     base navigator prompt. Only fields the playbook actually sets are emitted: each restates a
     <config> key with the provider's value (superseding the generic default), and extra_rules
     is appended as provider-specific guidance. Returns None when the playbook sets nothing."""
-    # Escape markup AND quotes in knob values so a value can't close the attribute or inject
-    # <config> structure (extra_rules below is intentionally free text and left as-is).
+    # Knob values are sanitized; extra_rules below is intentionally free text and left as-is.
     config_lines = [
-        f'  {key}="{html.escape(str(value))}"'
+        f'  {key}="{_config_attr_value(value)}"'
         for key in _PLAYBOOK_CONFIG_KEYS
         if (value := getattr(playbook, key))
     ]
