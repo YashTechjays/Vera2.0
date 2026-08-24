@@ -29,9 +29,12 @@ def test_ownerless_call_is_tenant_visible() -> None:
 
 
 def test_finished_call_content_is_tenant_visible() -> None:
-    assert call_content_visible(OWNER, False, OTHER, is_terminal=True) is True
-    assert call_content_visible(OWNER, False, OTHER, is_terminal=False) is False
-    assert call_content_visible(OWNER, False, OWNER, is_terminal=False) is True
+    # Every terminal status opens the content; a live one keeps the owner rule.
+    for status in ("completed", "failed", "no_answer", "busy", "canceled"):
+        assert call_content_visible(OWNER, False, OTHER, status=status) is True
+    assert call_content_visible(OWNER, False, OTHER, status="active") is False
+    assert call_content_visible(OWNER, False, OWNER, status="active") is True
+    assert call_content_visible(OWNER, True, OTHER, status="ringing") is True
 
 
 def _playable(*, has_recording: bool = True, can_play: bool = True) -> bool:
@@ -42,7 +45,7 @@ def _playable(*, has_recording: bool = True, can_play: bool = True) -> bool:
         published=False,
         user_id=OTHER,
         can_play=can_play,
-        is_terminal=True,
+        status="completed",
     )
 
 

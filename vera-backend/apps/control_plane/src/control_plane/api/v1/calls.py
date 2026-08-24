@@ -103,7 +103,7 @@ from vera_core.observability.correlation import (
     supervisor_user_id,
 )
 from vera_core.schemas import CallStats, CallSummary, JoinTokenResponse, RecordingPlayback
-from vera_core.services.call_visibility import recording_playable
+from vera_core.services.call_visibility import call_content_visible, recording_playable
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +306,12 @@ async def join_token(
     call = (await session.execute(stmt)).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
-    if _call_hidden_from(call, caller.user_id):
+    # Content rule (VR2-177): a finished call is tenant-visible, so its modal may
+    # mint a (useless — the room is gone) listen token instead of 404ing; a live
+    # call stays owner-or-published. Intervening on a terminal call still 409s below.
+    if not call_content_visible(
+        call.initiated_by_id, call.published, caller.user_id, status=call.current_status
+    ):
         raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
     identity = (
@@ -423,9 +428,9 @@ async def _authorize_call_read(
         ).scalar_one_or_none()  # RLS already constrains to the caller's tenant
     if call is None:
         raise NotFoundError(message="call not found")
-    # A finished call's content is tenant-visible (VR2-177); only a LIVE call
-    # stays owner-or-published.
-    if call.current_status not in TERMINAL_VALUES and _call_hidden_from(call, user_id):
+    if not call_content_visible(
+        call.initiated_by_id, call.published, user_id, status=call.current_status
+    ):
         raise NotFoundError(message="call not found")  # don't reveal a private call
     allowed = "calls:read" in permissions
     await audit.emit(
@@ -460,10 +465,11 @@ async def stream_call_events(
     service: Annotated[CallStreamService, Depends(get_call_stream_service)],
 ) -> StreamingResponse:
     """Live per-call event stream (transcript turns, call_status frames; form-fill
-    later) for Live Monitoring. Same visibility rule as join-token: owner, or a
-    published/ownerless call. Authorization runs in a SHORT-LIVED tenant session
-    released before streaming (an SSE is long-lived and must not pin a DB
-    connection — mirrors voice_lab.stream_transcript)."""
+    later) for Live Monitoring. Content visibility (VR2-177): a finished call's
+    stream is tenant-visible; a live one is owner-or-published. Authorization runs
+    in a SHORT-LIVED tenant session released before streaming (an SSE is
+    long-lived and must not pin a DB connection — mirrors
+    voice_lab.stream_transcript)."""
     call = await _authorize_call_read(
         call_id, request, identity, sessionmaker, resolver, audit, resource_type="call_events"
     )
@@ -898,7 +904,6 @@ async def list_calls(
         if scope == "live"
         else Call.current_status.in_(TERMINAL_VALUES)
     )
-    visible = _visible_to(caller.user_id)
     query = (
         select(
             Call,
@@ -912,10 +917,14 @@ async def list_calls(
         .join(SchemaVersion, SchemaVersion.id == PatientForm.schema_version_id)
         .join(FormSchema, FormSchema.id == SchemaVersion.schema_id)
         .where(status_cond)
-        .where(visible)
         # id (UUIDv7) tie-break keeps pages stable across equal timestamps.
         .order_by(Call.created_at.desc(), Call.id.desc())
     )
+    if scope == "live":
+        # The live rule only: scope="history" rows are all terminal, where the
+        # content rule (VR2-177) is unconditionally true — so Live Monitoring's
+        # Completed tab lists the same set /call-history shows.
+        query = query.where(_visible_to(caller.user_id))
 
     def _summaries(rows: Sequence[Any]) -> list[CallSummary]:
         # `*_` absorbs the paged query's trailing window-count column.
@@ -948,11 +957,10 @@ async def list_calls(
         if rows:
             total = int(rows[0].total)
         else:
-            # Out-of-range page returns no rows; fall back to a bare count.
+            # Out-of-range page returns no rows; fall back to a bare count. No
+            # visibility filter: this paged branch is scope="history", all terminal.
             total = (
-                await session.execute(
-                    select(func.count()).select_from(Call).where(status_cond).where(visible)
-                )
+                await session.execute(select(func.count()).select_from(Call).where(status_cond))
             ).scalar_one()
         payload = PaginatedCallSummaries(
             items=_summaries(rows), page=page, page_size=page_size, total=total
@@ -1108,7 +1116,6 @@ async def list_call_history(
                     PatientForm.insurance_provider,
                     has_recording.label("has_recording"),
                     has_transcript.label("has_transcript"),
-                    func.coalesce(_visible_to(caller.user_id), False).label("caller_visible"),
                     func.count().over().label("total"),
                 )
                 .join(PatientForm, PatientForm.id == Call.form_id)
@@ -1171,10 +1178,12 @@ async def list_call_history(
                 published=r.published,
                 user_id=caller.user_id,
                 can_play=can_play,
-                is_terminal=r.current_status in TERMINAL_VALUES,
+                status=r.current_status,
             ),
             transcript_available=r.has_transcript
-            and (r.current_status in TERMINAL_VALUES or r.caller_visible),
+            and call_content_visible(
+                r.initiated_by_id, r.published, caller.user_id, status=r.current_status
+            ),
         )
         for r in rows
     ]
@@ -1212,9 +1221,9 @@ async def get_recording_playback(
     call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
-    # A finished call's recording is tenant-visible (VR2-177); only a LIVE call
-    # stays owner-or-published.
-    if call.current_status not in TERMINAL_VALUES and _call_hidden_from(call, caller.user_id):
+    if not call_content_visible(
+        call.initiated_by_id, call.published, caller.user_id, status=call.current_status
+    ):
         raise NotFoundError(message="call not found")  # don't reveal a private call
 
     storage = request.app.state.recording_storage

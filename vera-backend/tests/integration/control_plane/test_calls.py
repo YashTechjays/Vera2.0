@@ -562,28 +562,28 @@ async def test_ownerless_call_is_tenant_visible_and_joinable(
 
 
 @pytest.mark.asyncio
-async def test_ownerless_terminal_call_hidden_from_non_owners(
+async def test_terminal_calls_list_for_everyone_in_history_scope(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Ownerless visibility is a live-queue affordance only (VR2-62): a terminal
-    ownerless call (owner deleted — SET NULL) is nobody's to claim, so it stays
-    out of the history list — unless it was published. Neither counts toward the
-    supervisor's personal total_today (VR2-63)."""
-    done_id = await seed_call(
+    """A finished call's content is tenant-visible (VR2-177), so scope="history"
+    (Live Monitoring → Completed) lists every terminal call — published or not,
+    owned or ownerless — the same set /call-history shows. Stats stay personal:
+    neither counts toward the supervisor's total_today (VR2-63)."""
+    ownerless_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
         seeded_form_id,
         status=CallStatus.COMPLETED.value,
     )
-    published_id = await seed_call(
+    private_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
         seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
         status=CallStatus.COMPLETED.value,
-        published=True,
     )
 
     history = await client.get(
@@ -592,11 +592,35 @@ async def test_ownerless_terminal_call_hidden_from_non_owners(
         headers=_auth(rbac_world.supervisor_token),
     )
     ids = [c["id"] for c in history.json()["data"]["items"]]
-    assert str(done_id) not in ids
-    assert str(published_id) in ids
+    assert str(ownerless_id) in ids
+    assert str(private_id) in ids
 
     stats = await client.get("/api/v1/calls/stats", headers=_auth(rbac_world.supervisor_token))
     assert stats.json()["data"] == {"total_today": 0, "live": 0, "critical": 0}
+
+
+@pytest.mark.asyncio
+async def test_join_token_listen_allowed_on_finished_private_call(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A finished call's content is tenant-visible (VR2-177): the history modal's
+    listen join-token must not 404 for a non-owner (the token is useless — the
+    room is gone — but the view path must not error). A LIVE private call stays
+    404 (see test_join_token_gated_and_audited_for_non_owner)."""
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+        status=CallStatus.COMPLETED.value,
+    )
+    resp = await client.get(
+        f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
+    )
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.asyncio
@@ -1885,11 +1909,10 @@ async def test_call_history_ownerless_terminal_call_does_not_500(
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """An ownerless (initiated_by_id NULL — owner account deleted, or
-    dispatcher-initiated), unpublished, terminal call makes `call_authz.visible_to`
-    evaluate to SQL NULL (NULL OR FALSE OR FALSE), not FALSE. Selected as a plain
-    column that must land in a non-optional bool, that NULL must not crash the
-    whole page — and since the call is terminal, its transcript is tenant-visible
-    (VR2-177) regardless of that NULL."""
+    dispatcher-initiated), unpublished, terminal call: the NULL owner must not
+    crash the page, and since the call is terminal its transcript is
+    tenant-visible (VR2-177). (The old `visible_to` NULL-coalesce hazard is gone
+    with the caller_visible column — the flag comes from `call_content_visible`.)"""
     ownerless = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
