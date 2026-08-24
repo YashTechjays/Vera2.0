@@ -43,7 +43,9 @@ describe("FieldRenderer phone country select", () => {
     expect(onChange).toHaveBeenLastCalledWith("+12")
   })
 
-  it("recomposes when the country changes", async () => {
+  // 15s: opening the Radix menu renders ~250 options — legitimately slow in jsdom
+  // under full-suite parallel load, and it flaked at the default 5s.
+  it("recomposes when the country changes", { timeout: 15_000 }, async () => {
     const user = userEvent.setup()
     const onChange = renderPhone("+12125551234")
     // Radix menu, not a native <select>: the OS option list cannot be contained
@@ -56,7 +58,7 @@ describe("FieldRenderer phone country select", () => {
     expect(onChange).toHaveBeenLastCalledWith("+912125551234")
   })
 
-  it("opens the countries in a floating listbox (never a native OS popup)", async () => {
+  it("opens the countries in a floating listbox (never a native OS popup)", { timeout: 15_000 }, async () => {
     const user = userEvent.setup()
     renderPhone("+12125551234")
     await user.click(screen.getByRole("combobox", { name: "Country code" }))
