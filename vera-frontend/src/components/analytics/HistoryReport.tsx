@@ -46,8 +46,8 @@ const BAR_COLOR = "#34B2B2" // brand teal, same literal Live Monitoring uses
 
 // Stack order = array order; colors CVD-validated as adjacent pairs on white
 // (dataviz six-checks validator) — change order and colors together.
+// "flag" exists in the API shape but is not a shipped feature — not charted (VR2-286).
 const INTERVENTION_SERIES = [
-  { key: "flag", label: "Flag", color: "#2a78d6" },
   { key: "coach", label: "Coach", color: "#eb6834" },
   { key: "whisper", label: "Whisper", color: "#0f9b9b" },
   { key: "takeover", label: "Takeover", color: "#c98500" },
@@ -220,7 +220,7 @@ export function HistoryReport() {
             deltaPct={deltaPct(cur.call_volume, prev.call_volume)}
           />
           <MetricCard
-            label="Completion %"
+            label="Data Capture %"
             value={formatPct(cur.avg_completion_pct)}
             deltaPct={deltaPct(cur.avg_completion_pct, prev.avg_completion_pct)}
           />
@@ -239,7 +239,10 @@ export function HistoryReport() {
       )}
       {report && (
         <div className="grid gap-4 lg:grid-cols-2">
-          <ChartCard title="Calls per day">
+          <ChartCard
+            title="Calls per day"
+            empty={report.current.call_volume === 0 ? "No calls in this period" : undefined}
+          >
             <BarChart data={report.calls_per_day}>
               <CartesianGrid vertical={false} strokeOpacity={0.3} />
               <XAxis {...DAY_AXIS} />

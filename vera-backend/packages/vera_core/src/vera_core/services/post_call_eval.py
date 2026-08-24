@@ -43,7 +43,6 @@ from vera_core.models.tenant import Tenant
 from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.field_status import load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
-from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger("vera_core.services.post_call_eval")
 
@@ -76,6 +75,10 @@ def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str 
 class EvalDeps:
     llm: LLMClient
     audit: AuditSink
+    # Unread by evaluate_call since dispatching moved to PostCallConsumer._process_job;
+    # they stay only because that consumer reads them back off here to run the pass.
+    # Dropping them is a follow-up, not this change — every test in this file constructs
+    # them, so removing the fields turns each new one on dev into a merge break.
     livekit: Any
     kms: Any = None
     recording: Any = None
@@ -93,6 +96,8 @@ class EvalOutcome:
     status: FormStatus
     answers_written: int
     reviewed_fields: list[str] = field(default_factory=list)
+    # False on the stale-job branches, which return without touching the form.
+    transitioned: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +134,12 @@ async def evaluate_call(
     call_id: UUID,
     turns: list[TranscriptTurn],
 ) -> EvalOutcome:
-    """Extract, persist, judge, update status, and dispatch.
+    """Extract, persist, judge, and update status.
 
     Runs inside a caller-provided tenant-scoped session. Idempotent on redelivery.
+    Dispatching the freed concurrency slot is the CALLER's job, after this session
+    commits (see PostCallConsumer._process_job) — a pass that dials from inside this
+    transaction would place calls whose rows no consumer can yet see.
     """
     form: PatientForm = (
         await session.execute(
@@ -149,7 +157,7 @@ async def evaluate_call(
             form_id,
             form.status,
         )
-        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+        return EvalOutcome(status=FormStatus(form.status), answers_written=0, transitioned=False)
 
     tenant: Tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -191,7 +199,9 @@ async def evaluate_call(
                 call_id,
                 form_id,
             )
-            return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+            return EvalOutcome(
+                status=FormStatus(form.status), answers_written=0, transitioned=False
+            )
     prev_status = form.status
     sm = FormStateMachine()
 
@@ -225,16 +235,6 @@ async def evaluate_call(
                 resource_id=str(form_id),
                 detail=detail,
             )
-        )
-        await try_dispatch(
-            session,
-            tenant_id,
-            deps.livekit,
-            deps.kms,
-            audit=deps.audit,
-            recording=deps.recording,
-            plan_service=deps.plan_service,
-            retry_floor=deps.floor,
         )
         return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
 
@@ -481,7 +481,7 @@ async def evaluate_call(
             call_id,
         )
 
-    # (9-12) Decide status, transition, audit, dispatch.
+    # (9-12) Decide status, transition, audit.
     if token_fields:
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
