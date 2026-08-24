@@ -171,6 +171,12 @@ function parseDateInFormat(value: string, format: string): Date | null {
   return roundTrips ? date : null
 }
 
+/** Valid only when the value matches the format's shape and is a real calendar date. */
+function isValidDateInFormat(value: string, format: string): boolean {
+  // Shape alone lets "13/45/2026" through — the parse rejects non-calendar dates.
+  return dateFormatRegex(format).test(value) && parseDateInFormat(value, format) !== null
+}
+
 /** VR2-206: the patient must be at least 18. Only fires on a parseable DOB. */
 function underageError(schema: FormSchema, values: FormValues): ValidationErrors {
   const path = schema.system_fields?.["patient_dob"]
@@ -234,7 +240,7 @@ function validateLeaf(
   }
 
   const dateFormat = f.validation?.date_format
-  if (dateFormat && f.type === "date" && !dateFormatRegex(dateFormat).test(value)) {
+  if (dateFormat && f.type === "date" && !isValidDateInFormat(value, dateFormat)) {
     return `Enter ${f.title} in ${displayDateFormat(dateFormat)} format.`
   }
 
