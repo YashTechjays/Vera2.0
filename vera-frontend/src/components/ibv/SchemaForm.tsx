@@ -5,7 +5,7 @@ import { Section } from "./Section"
 import { UsageLegend } from "./UsageLegend"
 import { useIbv } from "./IbvProvider"
 import { contradictionWarnings, flattenSection, sectionEntriesOf } from "@/lib/ibv/schema"
-import { packTwoColumns } from "@/lib/ibv/layout"
+import { packTwoColumns, VALUE_CAP_CLASS } from "@/lib/ibv/layout"
 import type { FormSchema, Section as SectionModel } from "@/lib/ibv/types"
 
 // Presentation-only placement hints (matches smart-caller-fe's wide form).
@@ -150,7 +150,9 @@ export function SchemaForm() {
           <SectionColumn entries={rightTop} />
         </div>
         {rail.length > 0 && (
-          <aside className="flex w-[420px] shrink-0 flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5">
+          <aside
+            className={`flex ${VALUE_CAP_CLASS} flex-col gap-2 self-start rounded-lg border-2 border-[#34B2B2] bg-white p-1.5`}
+          >
             {rail.map(([key, section]) => (
               <Section key={key} sectionKey={key} section={section} />
             ))}

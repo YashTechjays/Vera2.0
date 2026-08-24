@@ -5,8 +5,7 @@ import { DisputeStrip } from "./DisputeControls"
 import {
   confidenceHighlightClass,
   fieldConfidenceLevel,
-  type Dispute,
-  type DisputeFlags,
+  unresolvedDispute,
 } from "@/lib/ibv/disputes"
 import { applicabilityReason, isApplicable } from "@/lib/ibv/schema"
 import { invalidSeverity } from "@/lib/ibv/validation"
@@ -19,15 +18,6 @@ const TH = "border border-ibv-input-border bg-ibv-label-bg px-2 py-0.5 font-bold
 const ICD_WIDTH = "min-w-[90px]"
 const CPT_WIDTH = "min-w-[110px]"
 const VALUE_WIDTH = "min-w-[100px]"
-
-/** The dispute a cell still draws UI for — gate-failed cells included: the backend
- *  still counts their disputes against completion (VR2-166). */
-function unresolvedDispute(
-  dispute: Dispute | undefined,
-  flags: DisputeFlags
-): Dispute | null {
-  return dispute !== undefined && !flags.applied ? dispute : null
-}
 
 /** One editable matrix cell; a disputed cell grows a second line for the dispute
  *  strip instead of overlaying the value (VR2-162). */
@@ -96,6 +86,7 @@ function MatrixCell({ cell, rowSpan }: { cell?: TableCell; rowSpan?: number }) {
             title={disabledReason ?? invalidReason}
             invalid={invalidSeverity(invalidReason, value)}
             highlightClass="bg-transparent"
+            disputeTinted={openDispute !== null}
             borderless
           />
         </div>

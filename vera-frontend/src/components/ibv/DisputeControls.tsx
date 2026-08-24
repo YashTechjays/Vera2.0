@@ -53,26 +53,36 @@ function SwapButton({
   disabled?: boolean
   onClick: () => void
 }) {
+  const reason = disabled
+    ? "Swap is unavailable while this field is not applicable"
+    : "Swap with prior value"
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={
-        disabled ? "Swap is unavailable while this field is not applicable" : "Swap with prior value"
-      }
-      className={cn(
-        "inline-flex size-5 shrink-0 items-center justify-center rounded-full text-white transition-colors",
-        disabled
-          ? "cursor-not-allowed bg-gray-400"
-          : swapped
-            ? "bg-[#34B2B2] hover:bg-[#2c9a9a]"
-            : "bg-[#003e64] hover:bg-[#002a45]"
-      )}
-    >
-      {/* Vertical: the value sits ABOVE the prior chip, so the swap arrow points at both. */}
-      <ArrowUpDown className="size-3" />
-    </button>
+    <Tooltip>
+      {/* Chrome excludes disabled controls from hit-testing, so the SPAN is the hover
+          target — same fix as FieldRenderer's withReasonTooltip. */}
+      <TooltipTrigger asChild>
+        <span className="inline-flex shrink-0">
+          <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            aria-label={reason}
+            className={cn(
+              "inline-flex size-5 shrink-0 items-center justify-center rounded-full text-white transition-colors",
+              disabled
+                ? "cursor-not-allowed bg-gray-400"
+                : swapped
+                  ? "bg-[#34B2B2] hover:bg-[#2c9a9a]"
+                  : "bg-[#003e64] hover:bg-[#002a45]"
+            )}
+          >
+            {/* Vertical: the value sits ABOVE the prior chip, so the swap arrow points at both. */}
+            <ArrowUpDown className="size-3" />
+          </button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{reason}</TooltipContent>
+    </Tooltip>
   )
 }
 

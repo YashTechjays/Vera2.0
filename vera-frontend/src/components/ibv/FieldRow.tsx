@@ -2,7 +2,12 @@ import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
 import { DisputeStrip } from "./DisputeControls"
-import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
+import {
+  confidenceHighlightClass,
+  fieldConfidenceLevel,
+  unresolvedDispute,
+} from "@/lib/ibv/disputes"
+import { VALUE_CAP_CLASS } from "@/lib/ibv/layout"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { invalidSeverity } from "@/lib/ibv/validation"
 import { phonePaths } from "@/lib/ibv/phone"
@@ -54,9 +59,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
-  // Drawn even on a gate-failed (grayed) field: the backend still counts its dispute
-  // against completion, so hiding the controls would block the form invisibly (VR2-166).
-  const openDispute = dispute !== undefined && !flags.applied ? dispute : null
+  const openDispute = unresolvedDispute(dispute, flags)
   const highlightClass = openDispute
     ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
@@ -88,7 +91,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
             // A disputed capped row keeps the CONTROL at 420px (below) but lets the
             // tinted cell span the full row — a capped tint next to the filler read
             // as a half-filled cell (VR2-162).
-            capValue && !openDispute ? "w-[420px] shrink-0" : "flex-1",
+            capValue && !openDispute ? VALUE_CAP_CLASS : "flex-1",
             // Stacked (disputed) cells carry the cell chrome themselves so the value
             // line and the dispute strip below it read as ONE cell.
             openDispute && [
@@ -105,7 +108,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
           <div
             className={cn(
               "flex min-w-0 flex-1 items-stretch",
-              capValue && "w-[420px] shrink-0"
+              capValue && VALUE_CAP_CLASS
             )}
           >
             <FieldRenderer
@@ -118,6 +121,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               title={disabledReason ?? invalidReason}
               invalid={invalidSeverity(invalidReason, value)}
               highlightClass={openDispute ? "bg-transparent" : highlightClass}
+              disputeTinted={openDispute !== null}
               borderless={openDispute !== null}
               noRightBorder={!capValue}
               countrySelect={schema !== null && phonePaths(schema).has(path)}

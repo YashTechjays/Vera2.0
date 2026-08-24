@@ -37,6 +37,15 @@ export function defaultFlags(): DisputeFlags {
   return { applied: false, swapped: false }
 }
 
+/** The dispute a cell still draws UI for — gate-failed cells included: the backend
+ *  still counts their disputes against completion (VR2-166). */
+export function unresolvedDispute(
+  dispute: Dispute | undefined,
+  flags: DisputeFlags
+): Dispute | null {
+  return dispute !== undefined && !flags.applied ? dispute : null
+}
+
 /** The value currently "primary" for the field (what Apply would commit). */
 export function activeDisputeValue(d: Dispute, f: DisputeFlags): string {
   return f.swapped ? d.previousValue : d.currentValue

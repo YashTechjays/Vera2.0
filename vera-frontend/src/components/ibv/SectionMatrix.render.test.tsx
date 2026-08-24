@@ -58,17 +58,19 @@ describe("SectionMatrix dispute controls on a gate-failed cell (VR2-166)", () =>
 
   it("disables Swap — it would write a value into a cell the reviewer cannot edit", () => {
     renderMatrix({})
-    expect(screen.queryByTitle("Swap with prior value")).toBeNull()
+    expect(screen.queryByRole("button", { name: "Swap with prior value" })).toBeNull()
     // Visible but inert, with the reason in the tooltip (VR2-162: hidden read as broken).
-    const disabledSwaps = screen.getAllByTitle(
-      "Swap is unavailable while this field is not applicable",
-    )
+    const disabledSwaps = screen.getAllByRole("button", {
+      name: "Swap is unavailable while this field is not applicable",
+    })
     expect(disabledSwaps.length).toBeGreaterThan(0)
     for (const swap of disabledSwaps) expect(swap).toBeDisabled()
   })
 
   it("offers Swap again once the gates hold", () => {
     renderMatrix(GATES_PASS)
-    expect(screen.getAllByTitle("Swap with prior value").length).toBeGreaterThan(0)
+    expect(
+      screen.getAllByRole("button", { name: "Swap with prior value" }).length,
+    ).toBeGreaterThan(0)
   })
 })

@@ -60,4 +60,18 @@ describe("FieldRenderer text-field suggestions", () => {
     const invalid = render("bad", { invalid: "error", title: "Enter a valid value" })
     expect(ancestorTags(invalid)).toEqual(ancestorTags(valid))
   })
+
+  // The two-tone cell (VR2-162 review): a disputed cell's tint lives on the wrapper,
+  // so the missing look must not paint its own fill on top — edge only.
+  it("drops the missing fill (keeps the edge) when a dispute tint owns the cell", () => {
+    const plain = render("", { invalid: "missing" })
+    expect(plain).toContain("bg-[#fdf3e0]")
+    const tinted = render("", {
+      invalid: "missing",
+      disputeTinted: true,
+      highlightClass: "bg-transparent",
+    })
+    expect(tinted).toContain("shadow-[inset_3px_0_0_0_#d97706]")
+    expect(tinted).not.toContain("bg-[#fdf3e0]")
+  })
 })

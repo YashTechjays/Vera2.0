@@ -1,3 +1,7 @@
+/** Width cap shared by capValue rows and the rail aside — one constant so the
+ *  control and the column it sits in can never drift apart (VR2-162). */
+export const VALUE_CAP_CLASS = "w-[420px] shrink-0"
+
 /**
  * Greedily place each item into the currently shorter column, preserving the items'
  * relative order within each column. Used for the form's section runs (VR2-162):

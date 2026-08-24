@@ -22,6 +22,9 @@ type Props = {
    *  still empty — a calmer amber, so untouched fields don't scream (VR2-162). */
   invalid?: InvalidSeverity
   highlightClass?: string
+  /** a dispute tint owns the cell background — "missing" keeps its edge but must
+   *  not paint its own fill on top (the two-tone cell, VR2-162) */
+  disputeTinted?: boolean
   /** drop the cell's right border (the section frame supplies that edge, so it
    *  would otherwise be a doubled line) — used by the single-column field rows */
   noRightBorder?: boolean
@@ -44,6 +47,8 @@ const DISABLED_LOOK = "cursor-not-allowed opacity-60"
 export const INVALID_LOOK = "shadow-[inset_0_0_0_2px_rgba(239,68,68,0.45)]"
 /** Required-but-empty: amber edge + tint — quieter than the red error ring. */
 export const MISSING_LOOK = "bg-[#fdf3e0] shadow-[inset_3px_0_0_0_#d97706]"
+/** Edge only — for cells whose background a dispute tint already owns (VR2-162). */
+export const MISSING_EDGE_LOOK = "shadow-[inset_3px_0_0_0_#d97706]"
 
 /** Base cell look when no dispute highlight overrides it. */
 function baseLook(borderless?: boolean, noRightBorder?: boolean): string {
@@ -99,6 +104,7 @@ export function FieldRenderer({
   title,
   invalid,
   highlightClass,
+  disputeTinted,
   noRightBorder,
   borderless,
   countrySelect,
@@ -107,7 +113,7 @@ export function FieldRenderer({
     highlightClass ?? baseLook(borderless, noRightBorder),
     disabled && DISABLED_LOOK,
     invalid === "error" && !disabled && INVALID_LOOK,
-    invalid === "missing" && !disabled && MISSING_LOOK
+    invalid === "missing" && !disabled && (disputeTinted ? MISSING_EDGE_LOOK : MISSING_LOOK)
   )
   // Something worth explaining on hover: gated off, or failing validation.
   const explainable = disabled || invalid !== undefined

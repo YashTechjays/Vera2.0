@@ -232,10 +232,35 @@ describe("DisputeStrip", () => {
         onApply={onApply}
       />
     )
-    const swap = screen.getByTitle("Swap with prior value")
+    const swap = screen.getByRole("button", { name: "Swap with prior value" })
     const apply = screen.getByTitle("Apply captured value")
     expect(swap.compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     fireEvent.click(apply)
     expect(onApply).toHaveBeenCalledOnce()
+  })
+
+  it("puts the disabled swap's reason on a non-disabled tooltip trigger", () => {
+    // Chrome excludes disabled controls from pointer hit-testing, so a title on the
+    // button itself never shows — the hover target must be the wrapper span (the
+    // withReasonTooltip pattern). Radix portals don't settle under jsdom, so this
+    // pins the trigger structure rather than hovering.
+    render(
+      <DisputeStrip
+        dispute={dispute()}
+        confidence={resolveConfidence(90, null)}
+        provenance={null}
+        flags={defaultFlags()}
+        canSwap={false}
+        onSwap={vi.fn()}
+        onApply={vi.fn()}
+      />
+    )
+    const swap = screen.getByRole("button", {
+      name: "Swap is unavailable while this field is not applicable",
+    })
+    expect(swap).toBeDisabled()
+    const trigger = swap.closest('[data-slot="tooltip-trigger"]')
+    expect(trigger).not.toBeNull()
+    expect(trigger).not.toBe(swap)
   })
 })
