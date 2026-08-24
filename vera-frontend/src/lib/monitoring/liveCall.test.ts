@@ -29,6 +29,30 @@ function callSummary(overrides: Partial<CallSummary> = {}): CallSummary {
 }
 
 describe("toLiveCall", () => {
+  // VR2-213: a completed call's timer must be its real duration, not time-since-start.
+  it("freezes the duration at ended_at for a completed call", () => {
+    const live = toLiveCall(
+      callSummary({
+        status: "completed",
+        started_at: "2026-08-19T00:00:00Z",
+        ended_at: "2026-08-19T00:03:24Z",
+      }),
+      Date.parse("2026-08-19T02:00:00Z"),
+    )
+    expect(live.duration).toBe("03:24")
+    expect(live.callTime).toBe("03:24")
+    expect(live.endedAt).toBe("2026-08-19T00:03:24Z")
+  })
+
+  it("keeps measuring against now while the call has no ended_at", () => {
+    const live = toLiveCall(
+      callSummary({ status: "active", started_at: "2026-08-19T00:00:00Z" }),
+      Date.parse("2026-08-19T00:01:30Z"),
+    )
+    expect(live.callTime).toBe("01:30")
+    expect(live.endedAt).toBeNull()
+  })
+
   it("maps the form completion percentage into formProgress", () => {
     const live = toLiveCall(callSummary({ completion_pct: 78 }), Date.parse("2026-07-29T00:01:00Z"))
     expect(live.formProgress).toBe(78)
