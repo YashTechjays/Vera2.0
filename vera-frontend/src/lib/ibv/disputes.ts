@@ -54,8 +54,9 @@ export function toggleSwapped(f: DisputeFlags): DisputeFlags {
   return { ...f, swapped: !f.swapped }
 }
 
-/** Mark each disputed path in `paths` applied (non-swapped); paths carrying no
- *  dispute are skipped, so callers may pass a section's whole leaf list. */
+/** Mark each disputed path in `paths` applied, preserving any swap (matching the
+ *  per-field ✓, which resolves with whatever value the field shows); paths carrying
+ *  no dispute are skipped, so callers may pass a section's whole leaf list. */
 export function applyFlagsForPaths(
   disputes: DisputeMap,
   flags: DisputeFlagMap,
@@ -64,7 +65,7 @@ export function applyFlagsForPaths(
   const next: DisputeFlagMap = { ...flags }
   for (const path of paths) {
     if (!(path in disputes)) continue
-    next[path] = { ...(next[path] ?? defaultFlags()), applied: true, swapped: false }
+    next[path] = { ...(next[path] ?? defaultFlags()), applied: true }
   }
   return next
 }

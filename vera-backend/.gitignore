@@ -33,6 +33,7 @@ infra/**/*.tfstate*
 # Generated TTS probe audio (scripts/tts_probe.py)
 tts-probe/
 
-# Langfuse price rates: contract values, not secrets, but never committed —
-# the app holds no prices and a second copy in the repo is one that drifts.
-langfuse-rates.env
+# Per-environment Langfuse files: contract rates (the app holds no prices, and a second
+# copy in the repo is one that drifts) and, for anything but the local stack, that
+# project's API keys. The glob deliberately spares *.example, which is the template.
+langfuse-*.env

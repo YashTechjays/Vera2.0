@@ -47,7 +47,7 @@ describe("HistoryReport", () => {
   it("loads and renders the metric cards", async () => {
     render(<HistoryReport />)
     await waitFor(() => expect(screen.getByText("40")).toBeInTheDocument())
-    expect(screen.getByText("Completion %")).toBeInTheDocument()
+    expect(screen.getByText("Data Capture %")).toBeInTheDocument()
     expect(screen.getByText("53.3%")).toBeInTheDocument()
     expect(screen.getByText("Intervention Rate")).toBeInTheDocument()
     expect(screen.getByText("25.0%")).toBeInTheDocument()
@@ -58,6 +58,8 @@ describe("HistoryReport", () => {
     render(<HistoryReport />)
     await waitFor(() => expect(screen.getByText("Interventions per day")).toBeInTheDocument())
     expect(screen.queryByText("No interventions in this period")).not.toBeInTheDocument()
+    // "Flag" is not a shipped feature — it must not appear as a series/legend entry (VR2-286).
+    expect(screen.queryByText("Flag")).not.toBeInTheDocument()
   })
 
   it("shows an empty state when the range has no interventions", async () => {
@@ -66,6 +68,29 @@ describe("HistoryReport", () => {
     await waitFor(() =>
       expect(screen.getByText("No interventions in this period")).toBeInTheDocument(),
     )
+  })
+
+  it("both charts show an empty state when the range has zero calls (VR2-284)", async () => {
+    mockedReport.mockResolvedValue({
+      ...REPORT,
+      current: { ...REPORT.current, call_volume: 0, intervened_calls: 0, intervention_rate: null },
+      // The backend zero-fills days (VR2-282), so an empty window still carries rows.
+      calls_per_day: [
+        { day: "2026-08-01", calls: 0 },
+        { day: "2026-08-02", calls: 0 },
+      ],
+      interventions_by_type: [],
+      interventions_per_day: [],
+    })
+    render(<HistoryReport />)
+    await waitFor(() => expect(screen.getByText("No calls in this period")).toBeInTheDocument())
+    expect(screen.getByText("No interventions in this period")).toBeInTheDocument()
+  })
+
+  it("calls chart shows no empty state while the range has calls", async () => {
+    render(<HistoryReport />)
+    await waitFor(() => expect(screen.getByText("Calls per day")).toBeInTheDocument())
+    expect(screen.queryByText("No calls in this period")).not.toBeInTheDocument()
   })
 
   it("refetches when the provider filter changes", async () => {

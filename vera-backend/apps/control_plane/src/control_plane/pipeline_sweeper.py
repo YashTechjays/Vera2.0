@@ -18,7 +18,7 @@ refill), which leaves two timing holes this loop closes on every tick:
 2. WAKE the dispatcher. Queued forms whose blocking condition lapsed (working
    hours reopened, a slot freed by reconciliation) get a dispatch pass without
    waiting for the next enqueue/call-end event; queue expiry rides the same pass
-   (try_dispatch expires stale forms).
+   (stage_dispatch expires stale forms).
 
 Tenant enumeration runs under platform_session (the tenant catalog is
 platform-readable — migration 0022); every row mutation runs per-tenant under

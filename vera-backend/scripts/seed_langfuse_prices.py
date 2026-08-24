@@ -43,7 +43,16 @@ replacement is reported by name and exits non-zero rather than passing silently.
 Models Vera routes to but deliberately does not price live in `KNOWN_UNPRICED`; they
 are reported without being treated as a mistake.
 
-Writes to whatever VERA_LANGFUSE_HOST resolves to — the target host is logged.
+Writes to whatever VERA_LANGFUSE_HOST resolves to — the target host and project are
+both logged. The API takes NO project parameter: the KEY PAIR alone decides which project
+is changed. Set VERA_LANGFUSE_PROJECT and the run refuses unless the keys really belong to
+it — worth doing for anything but the local stack, because replacing an entry is
+DELETE-then-POST, so keys aimed at the wrong project can leave THAT project unpriced.
+
+Seeding another environment means pointing it at that environment. Keep its host, keys,
+project and rates together in one per-environment file and pass it through:
+
+    just langfuse-seed-prices langfuse-test.env
 """
 
 import asyncio
@@ -134,6 +143,9 @@ GEMINI_MODELS: tuple[str, ...] = (
 # prices most of them from its own built-in model table anyway. Named here so the
 # coverage check can tell "knowingly unpriced" apart from "somebody forgot", instead
 # of reporting a permanent failure that trains everyone to ignore it.
+# Names the project a run intends to change, so it can refuse to change any other.
+PROJECT_ENV_VAR = "VERA_LANGFUSE_PROJECT"
+
 KNOWN_UNPRICED: tuple[str, ...] = (
     "gpt-5.4-mini",  # summary / observer-extract / health fallback tier
     "best",  # assemblyai:best, the whisper STT fallback tier
@@ -409,11 +421,50 @@ async def seed(client: httpx.AsyncClient, rates: Mapping[str, float]) -> dict[st
     return outcomes
 
 
+async def target_project(client: httpx.AsyncClient) -> tuple[str, ...] | None:
+    """Every identifier (id and name) of the project these keys write to, or None when the
+    deployment will not say.
+
+    There is nothing else to ask: the API takes no project parameter, so the key pair IS
+    the target and this endpoint is the only way a run can state which project it is about
+    to change. Best-effort by design — an older Langfuse without it still seeds.
+    """
+    try:
+        response = await client.get("/api/public/projects")
+    except httpx.HTTPError:
+        return None
+    if response.is_error:
+        return None
+    projects = response.json().get("data") or []
+    return tuple(str(v) for p in projects for v in (p.get("id"), p.get("name")) if v)
+
+
+def project_mismatch(expected: str | None, identifiers: tuple[str, ...] | None) -> str | None:
+    """Why this run must not proceed, or None when it may.
+
+    Fails CLOSED when the project cannot be confirmed: someone who named a project is
+    guarding a shared environment, and silently seeding an unverified one is the outcome
+    they were trying to prevent.
+    """
+    if not expected:
+        return None
+    if not identifiers:
+        return f"this Langfuse does not report its project, so {expected} cannot be confirmed"
+    if expected not in identifiers:
+        return f"these keys write to {' / '.join(identifiers)}, not {expected}"
+    return None
+
+
 async def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     settings = get_settings()
     if not settings.langfuse_host:
         logger.error("VERA_LANGFUSE_HOST is not set — nothing to seed")
+        return 1
+    if not (settings.langfuse_public_key and settings.langfuse_secret_key):
+        # Without this the run reaches the API as "None:None" and reports a bare 401,
+        # which reads as bad credentials rather than absent ones.
+        logger.error("VERA_LANGFUSE_PUBLIC_KEY / VERA_LANGFUSE_SECRET_KEY are not set")
         return 1
     try:
         rates = resolve_rates(os.environ)
@@ -431,6 +482,12 @@ async def main() -> int:
         headers={"Authorization": f"Basic {token}"},
         timeout=30.0,
     ) as client:
+        identifiers = await target_project(client)
+        if identifiers:
+            logger.info("target project: %s", " / ".join(identifiers))
+        if reason := project_mismatch(os.environ.get(PROJECT_ENV_VAR), identifiers):
+            logger.error("refusing to seed: %s", reason)
+            return 1
         outcomes = await seed(client, rates)
     logger.info(
         "model price entries: %s", ", ".join(f"{name}={how}" for name, how in outcomes.items())

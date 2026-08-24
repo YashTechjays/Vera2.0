@@ -4,11 +4,15 @@ Uses an in-memory approach: the dispatcher is tested through its public
 interface with mock SQLAlchemy session results and a FakeLiveKit, verifying
 FIFO ordering, concurrency gating, working-hours checks, and expiry.
 
-The dial-path tests below route `try_dispatch`'s `session.execute()` calls to
+The dial-path tests below route the dispatcher's `session.execute()` calls to
 canned results through `FakeSession`, which inspects each statement's target
 entity (Tenant / the count aggregate / PatientForm-with-LIMIT vs
 PatientForm-without / InsuranceProvider) rather than assuming a fixed call
-order — this survives try_dispatch's queries being reordered.
+order — this survives the dispatcher's queries being reordered.
+
+`_dispatch` drives the whole pass (`stage_and_dial`), so the same FakeSession
+serves both phases: staging, and the fresh transactions `place_dials` opens for
+recording/dial-failure bookkeeping.
 """
 
 import json
@@ -20,7 +24,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
@@ -44,7 +48,7 @@ from vera_core.models.enums import CallStatus, FormStatus, VoiceModelStage
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
-from vera_core.services.queue_dispatcher import is_within_working_hours, try_dispatch
+from vera_core.services.queue_dispatcher import is_within_working_hours, stage_and_dial
 from vera_core.telephony import LiveKitUnavailable, OutboundDialError
 
 IBV_SCHEMA_JSON: dict[str, Any] = json.loads(
@@ -101,7 +105,7 @@ class TestIsWithinWorkingHours:
 
 
 class _Result:
-    """Stand-in for a SQLAlchemy `Result` — only the accessors try_dispatch calls."""
+    """Stand-in for a SQLAlchemy `Result` — only the accessors the dispatcher calls."""
 
     def __init__(self, *, scalar: Any = None, rows: list[Any] | None = None) -> None:
         self._scalar = scalar
@@ -123,20 +127,24 @@ class _Result:
 def _bound_value(stmt: Any, column_name: str) -> Any:
     """Pull a bound literal (e.g. `InsuranceProvider.name == "Acme"`) out of a
     statement's WHERE clause by column name — lets the fake resolve which
-    provider a `select(InsuranceProvider).where(...)` is asking for."""
+    provider a `select(InsuranceProvider).where(...)` is asking for.
+
+    getattr on `left`: a nested clause list (the candidates query's OR) has no
+    sides of its own, and skipping it is right — the columns we resolve on are
+    always compared at the top level."""
     where = stmt.whereclause
     clauses = where.clauses if hasattr(where, "clauses") else [where]
     for clause in clauses:
-        if getattr(clause.left, "name", None) == column_name:
+        if getattr(getattr(clause, "left", None), "name", None) == column_name:
             return clause.right.value
     return None
 
 
-class _NestedTransaction:
-    """Stand-in for `session.begin_nested()` — a plain pass-through async
-    context manager; the fake session has nothing to roll back."""
+class _FakeTransaction:
+    """Stand-in for `session.begin()` / `session.begin_nested()` — a plain pass-through
+    async context manager; the fake session has nothing to roll back."""
 
-    async def __aenter__(self) -> "_NestedTransaction":
+    async def __aenter__(self) -> "_FakeTransaction":
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -144,7 +152,7 @@ class _NestedTransaction:
 
 
 class FakeSession:
-    """Routes try_dispatch's `execute()` calls to canned results by the
+    """Routes the dispatcher's `execute()` calls to canned results by the
     statement's target entity — Tenant, the count aggregate (no entity),
     PatientForm with a LIMIT (candidates) vs without (expired), and
     InsuranceProvider by name. Order-independent by construction."""
@@ -175,17 +183,40 @@ class FakeSession:
         self.voice_model = voice_model
         self.added: list[Any] = []
 
+    async def __aenter__(self) -> "FakeSession":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    def begin(self) -> _FakeTransaction:
+        return _FakeTransaction()
+
     async def execute(self, stmt: Any) -> _Result:
         # .get(...): the advisory-lock select (no select_from) omits the "entity"
         # key entirely, unlike select(func.count()).select_from(...) which carries
         # entity=None — both fall through to the same "no mapped entity" branch.
-        entity = stmt.column_descriptions[0].get("entity")
+        desc = stmt.column_descriptions[0]
+        entity = desc.get("entity")
         if entity is Tenant:
             return _Result(scalar=self.tenant)
         if entity is InsuranceProvider:
             name = _bound_value(stmt, "name")
             return _Result(scalar=self.providers.get(name))
+        if entity is Call:
+            # The RETRY lineage probe selects Call.id; phase two re-reads the whole row.
+            if desc.get("name") == "id":
+                return _Result(scalar=None)  # these fakes seed no prior call
+            return _Result(
+                scalar=next(
+                    (c for c in self.calls_added() if c.id == _bound_value(stmt, "id")), None
+                )
+            )
         if entity is PatientForm:
+            # An id filter is a phase-two reload of a staged form, not a queue scan.
+            form_id = _bound_value(stmt, "id")
+            if form_id is not None:
+                return _Result(scalar=next((f for f in self.candidates if f.id == form_id), None))
             # Honor the LIMIT's bound value so slot math (limit(slots)) is
             # actually exercised — presence alone can't catch a wrong slot count.
             if stmt._limit_clause is not None:
@@ -198,7 +229,7 @@ class FakeSession:
             # Two query shapes share this entity: the plan-template read selects the
             # full row (name == "SchemaVersion"); the agent-context read selects only
             # the schema_json column (name == "schema_json").
-            if stmt.column_descriptions[0].get("name") == "schema_json":
+            if desc.get("name") == "schema_json":
                 return _Result(
                     scalar=self.schema_version.schema_json if self.schema_version else None
                 )
@@ -221,8 +252,8 @@ class FakeSession:
     async def flush(self) -> None:
         return None
 
-    def begin_nested(self) -> _NestedTransaction:
-        return _NestedTransaction()
+    def begin_nested(self) -> _FakeTransaction:
+        return _FakeTransaction()
 
     def calls_added(self) -> list[Call]:
         return [o for o in self.added if isinstance(o, Call)]
@@ -320,16 +351,21 @@ async def _dispatch(
     livekit: FakeLiveKit,
     *,
     plan_service: Any = None,
+    dial_pacing_s: float = 1.0,
+    audit: Any = None,
 ) -> int:
-    """try_dispatch(), casting the fakes to their real types — mypy-strict clean,
-    mirroring the `cast(AsyncSession, fake)` convention used elsewhere in the
-    unit-test suite (e.g. tests/unit/control_plane/test_queueability.py)."""
-    return await try_dispatch(
-        cast(AsyncSession, session),
+    """A full dispatch pass over the fakes, cast to their real types — mypy-strict
+    clean, mirroring the `cast(AsyncSession, fake)` convention used elsewhere in the
+    unit-test suite (e.g. tests/unit/control_plane/test_queueability.py). Every
+    transaction the pass opens gets the same FakeSession."""
+    return await stage_and_dial(
+        cast(async_sessionmaker[AsyncSession], lambda: session),
         tenant_id,
         livekit,
         cast(KeyManagementService, object()),
         plan_service=cast(CallPlanService | None, plan_service),
+        dial_pacing_s=dial_pacing_s,
+        audit=audit,
     )
 
 
@@ -617,6 +653,25 @@ async def test_browser_callee_dispatches_without_a_trunk_and_never_dials(
     assert metadata["browser_callee"] is True
 
 
+async def test_a_form_with_no_payer_number_is_dialed_and_fails_not_silently_skipped(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """insurance_provider_phone_number is nullable, so a missing number must not read as
+    browser-callee transport — that would report the call dispatched, start egress on a
+    room nobody joins, and audit a dial that never happened. The transport is carried
+    explicitly, so a NULL number still goes out and lands in the dial-failure path."""
+    tenant = _tenant()
+    form = _form(tenant.id, insurance_provider_phone_number=None)
+    session = FakeSession(tenant=tenant, candidates=[form])
+    livekit = FakeLiveKit()
+    livekit.dial_error = OutboundDialError("no phone number to dial")
+
+    dispatched = await _dispatch(session, tenant.id, livekit, dial_pacing_s=0)
+
+    assert dispatched == 0
+    assert session.calls_added()[0].current_status == CallStatus.FAILED.value
+
+
 async def test_sip_transport_still_needs_a_trunk(
     _stub_credentials: dict[str, dict[str, Any] | None],
 ) -> None:
@@ -671,6 +726,60 @@ async def test_dial_failure_does_not_requeue_when_tenant_auto_retry_disabled(
     assert session.calls_added()[0].current_status == CallStatus.FAILED.value
     assert form.status == FormStatus.CALL_FAILED.value
     assert form.retry_count == 0
+
+
+async def test_a_call_ended_before_its_dial_is_never_rung(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """Committing the row before the dial makes the call endable in the gap. A pass that
+    dialed anyway would recreate the room the closeout deleted and ring the payer into
+    it with no agent — and nothing reconciles a terminal call with a live SIP leg.
+
+    The closeout's decision also stands: the skipped call keeps its terminal status
+    rather than being rewritten as a dial failure."""
+    tenant = _tenant(max_concurrent_calls=5)
+    form_a, form_b = _form(tenant.id), _form(tenant.id)
+    session = FakeSession(tenant=tenant, candidates=[form_a, form_b])
+    livekit = FakeLiveKit()
+
+    async def _end_the_next_call(room_name: str, phone_number: str, trunk_id: str) -> None:
+        session.calls_added()[1].current_status = CallStatus.CANCELED.value
+        livekit.sip_dials.append((room_name, phone_number, trunk_id))
+
+    livekit.create_sip_participant = _end_the_next_call  # type: ignore[method-assign]
+
+    dispatched = await _dispatch(session, tenant.id, livekit, dial_pacing_s=0)
+
+    assert dispatched == 1
+    assert len(livekit.sip_dials) == 1  # the canceled call was never rung
+    assert session.calls_added()[1].current_status == CallStatus.CANCELED.value
+    assert not any(e.event_value == CallStatus.FAILED.value for e in session.call_events_added())
+
+
+async def test_post_dial_bookkeeping_failure_does_not_strand_later_dials(
+    _stub_credentials: dict[str, dict[str, Any] | None],
+) -> None:
+    """The first call's SIP leg is already live when its audit emit fails; aborting the
+    loop there would leave every later staged call committed but never dialed."""
+    tenant = _tenant(max_concurrent_calls=5)
+    session = FakeSession(tenant=tenant, candidates=[_form(tenant.id), _form(tenant.id)])
+    livekit = FakeLiveKit()
+
+    class _FlakyAudit:
+        def __init__(self) -> None:
+            self.emitted = 0
+
+        async def emit(self, record: Any) -> None:
+            self.emitted += 1
+            if self.emitted == 1:
+                raise RuntimeError("audit sink down")
+
+    audit = _FlakyAudit()
+
+    dispatched = await _dispatch(session, tenant.id, livekit, dial_pacing_s=0, audit=audit)
+
+    assert dispatched == 2
+    assert len(livekit.sip_dials) == 2
 
 
 async def test_dials_are_paced_one_second_apart(
