@@ -1,13 +1,18 @@
 import { render, screen } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { demoSchema as schema } from "@/lib/ibv/mock"
 import { leafByPath } from "@/lib/ibv/schema"
 import type { FormValues } from "@/lib/ibv/types"
 
 const PATH = vi.hoisted(() => "sections.male_partner_coverage.male_partner_covered")
-// Mutable so a test can satisfy the male-partner gates instead of failing them.
-const state = vi.hoisted(() => ({ values: {} as FormValues }))
+// Mutable so a test can satisfy the male-partner gates instead of failing them,
+// switch the provider mode, or inject validation errors.
+const state = vi.hoisted(() => ({
+  values: {} as FormValues,
+  mode: "mock" as string,
+  errors: {} as Record<string, string>,
+}))
 
 vi.mock("./IbvProvider", async () => {
   const { demoSchema } = await import("@/lib/ibv/mock")
@@ -18,7 +23,8 @@ vi.mock("./IbvProvider", async () => {
       schema: demoSchema,
       values: state.values,
       setValue: vi.fn(),
-      errors: {},
+      errors: state.errors,
+      mode: state.mode,
       disputeFor: (p: string) => (p === PATH ? dispute : undefined),
       flagsFor: () => defaultFlags(),
       applyDispute: vi.fn(),
@@ -44,6 +50,11 @@ function renderRow(values: FormValues) {
   render(<FieldRow field={leaf.field} path={PATH} depth={0} gates={leaf.gates} />)
 }
 
+beforeEach(() => {
+  state.mode = "mock"
+  state.errors = {}
+})
+
 describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
   it("still shows the dispute chip and Apply — the dispute blocks completion regardless of gates", () => {
     renderRow({})
@@ -65,5 +76,29 @@ describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
     renderRow(GATES_PASS)
     expect(screen.getByTitle("Swap with prior value")).toBeInTheDocument()
     expect(screen.getByRole("combobox")).toBeEnabled()
+  })
+})
+
+describe("FieldRow inline validation message (VR2-206)", () => {
+  const MESSAGE = "Enter a valid Tax ID. Please enter a 9-digit Tax ID."
+
+  it("shows the error text under the field in create mode", () => {
+    state.mode = "create"
+    state.errors = { [PATH]: MESSAGE }
+    renderRow(GATES_PASS)
+    expect(screen.getByText(MESSAGE)).toBeInTheDocument()
+  })
+
+  it("keeps the message tooltip-only outside create mode", () => {
+    state.errors = { [PATH]: MESSAGE }
+    renderRow(GATES_PASS)
+    // The review sheet is dense — the message stays on the hover tooltip there.
+    expect(screen.queryByText(MESSAGE)).not.toBeInTheDocument()
+  })
+
+  it("renders no message line while the field is valid", () => {
+    state.mode = "create"
+    renderRow(GATES_PASS)
+    expect(screen.queryByText(MESSAGE)).not.toBeInTheDocument()
   })
 })
