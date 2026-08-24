@@ -289,19 +289,25 @@ async def test_under_the_turn_cap_does_not_end_the_call() -> None:
     mock_session.shutdown.assert_not_called()
 
 
-def test_ivr_turn_handling_is_patient() -> None:
-    # The IVR phase uses vad end-of-turn + a moderately patient delay; barge-in stays on (so real
-    # IVR prompts still interrupt) but preemptive is off + min_words raised to stop the SIP
-    # self-echo from clipping the start of answers.
+def test_ivr_turn_handling_is_tuned_for_a_machine() -> None:
     th = ivr_turn_handling()
     assert th["turn_detection"] == "vad"  # not the human-trained EnglishModel
-    # patient, but not so long that answers land on the next prompt (key tunable)
-    assert 0.6 <= th["endpointing"]["min_delay"] <= 1.5
+    # The delay is a live tunable (already retuned 0.8 -> 0.2), so pin the ordering, not a range.
+    assert 0 < th["endpointing"]["min_delay"] < th["endpointing"]["max_delay"]
     # preemptive OFF: keeps a tiny output buffer so a false-interruption pause can't discard the
     # start of the utterance (self-echo clip: "Medical" → "dical").
     assert th["preemptive_generation"]["enabled"] is False
     assert th["interruption"]["enabled"] is True  # real IVR prompts still supersede a stale answer
     assert th["interruption"]["min_words"] >= 2  # short self-echo transcripts don't trip the pause
+
+
+def test_ivr_endpointing_comes_from_settings_not_a_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sentinels no hardcoded literal would produce: retuning VERA_IVR_ENDPOINTING_* must land here.
+    stub = SimpleNamespace(ivr_endpointing_min_delay=0.37, ivr_endpointing_max_delay=0.94)
+    monkeypatch.setattr("agent_worker.ivr_agent.get_settings", lambda: stub)
+    assert ivr_turn_handling()["endpointing"] == {"min_delay": 0.37, "max_delay": 0.94}
 
 
 def test_ivr_navigator_wires_patient_turn_config_and_plan_agent_does_not() -> None:

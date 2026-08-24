@@ -50,6 +50,22 @@ def test_ivr_navigator_prompt_is_generic_and_cascade_compatible() -> None:
     assert "transfer_to_verification" in lower
 
 
+def test_prompt_resolves_its_own_rule_conflicts() -> None:
+    # Rules the prompt states in one place and contradicts in another. Each needs the prompt to say
+    # which one wins, or the model picks — and it has picked wrong on live calls.
+    prompt = IVR_NAVIGATOR_SYSTEM_PROMPT
+    # "say or enter your NPI" once matched BOTH branches of the same MODALITY line (speak AND press)
+    assert '"say or enter" / "say or press" (BOTH offered) → speak' in prompt
+    # <when_stuck> precedes <how_to_say_it>, so "earlier section wins" let step 6's sanctioned
+    # silence outrank CONFIRM's never-silence rule; step 6 must carry the carve-out
+    assert prompt.index("<when_stuck>") < prompt.index("<how_to_say_it>")
+    assert "NEVER on a confirmation" in prompt
+    # ...which only binds because a later rule may declare that it outranks an earlier one
+    assert "except where a later rule says it outranks" in prompt
+    # the two-turn handoff path needs a reset, or two chatty turns trip an irreversible handoff
+    assert "RESETS the count" in prompt
+
+
 def test_base_prompt_declares_the_provider_override_contract() -> None:
     # The base prompt must itself tell the model that an appended provider playbook is
     # authoritative (not rely only on the appended block being self-describing) — AND must keep
