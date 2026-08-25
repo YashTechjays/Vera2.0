@@ -15,7 +15,7 @@ from control_plane.llm import (
     parse_extract_response,
     parse_judge_response,
 )
-from vera_core.integrations.llm import ExtractedField, TranscriptTurn
+from vera_core.integrations.llm import ExtractedField, PartialJudgeError, TranscriptTurn
 
 _loads_response = VertexLLMClient._loads_response
 
@@ -273,14 +273,20 @@ async def test_judge_raises_when_a_chunk_error_leaves_coverage_incomplete(
 ) -> None:
     """A chunk that keeps failing so some fields never get a verdict must raise
     (→ LLM_ERROR review), never return partial — a silently-unjudged required field
-    reads as unsatisfied and redials the payer for data already collected."""
+    reads as unsatisfied and redials the payer for data already collected. The verdicts
+    the pass DID earn ride on the exception: dropping them would strand those answers
+    with no evidence and no verdict over a failure in an unrelated chunk."""
     monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
     extracted = [_ef("a"), _ef("b"), _ef("c")]
     # chunk 1 (a,b) succeeds; chunk 2 (c) fails every attempt → 'c' never covered.
     responses: list[_Queued] = [[_vd("a"), _vd("b")], *([RuntimeError("boom")] * 4)]
     stub = _StubJudgeClient(responses)
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(PartialJudgeError) as excinfo:
         await stub.judge(extracted=extracted, turns=[])
+    assert sorted(v.field_path for v in excinfo.value.verdicts) == ["a", "b"]
+    # The provider's own message can embed the transcript — only its TYPE may surface.
+    assert "boom" not in str(excinfo.value)
+    assert "RuntimeError" in str(excinfo.value)
 
 
 async def test_judge_recovers_when_a_transient_chunk_error_clears_on_retry(
@@ -302,8 +308,9 @@ async def test_judge_raises_when_every_call_fails(monkeypatch: pytest.MonkeyPatc
     routes to LLM_ERROR review — never silently return [] and let the payer be redialed."""
     monkeypatch.setattr(llm_mod, "_JUDGE_CHUNK_SIZE", 2)
     stub = _StubJudgeClient([RuntimeError("boom")] * 6)
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(PartialJudgeError) as excinfo:
         await stub.judge(extracted=[_ef("a"), _ef("b")], turns=[])
+    assert excinfo.value.verdicts == []  # nothing salvaged, but the shape is the same
 
 
 async def test_judge_ignores_verdicts_outside_the_asked_chunk() -> None:
