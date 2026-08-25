@@ -12,9 +12,11 @@ from uuid import UUID
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import Update, delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import control_plane.api.v1.patient_forms as patient_forms_mod
 from control_plane.dispatch import drain_pending
 from tests.integration.control_plane.conftest import FakeLiveKit, RBACWorld
 from tests.integration.control_plane.test_patient_forms_intake import (
@@ -231,6 +233,37 @@ async def test_enqueue_form_triggers_dispatch(
     # At least one call should exist for this tenant.
     calls = calls_resp.json()["data"]
     assert len(calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_forwards_the_review_floor_to_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    queue_form_id: UUID,
+    trunk_configured: None,
+    authz_app: FastAPI,
+) -> None:
+    """This endpoint's own `schedule_dispatch_pass` call site must forward
+    `settings.post_call_review_floor` as `retry_floor` — the call-site half
+    `test_dispatch_runner.py` cannot see."""
+    # schedule_dispatch_pass only creates the detached task, so the fake captures the
+    # kwargs synchronously — unlike the sibling test above, no drain_pending() needed.
+    seen: dict[str, object] = {}
+
+    def _fake_schedule_dispatch_pass(*_args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(patient_forms_mod, "schedule_dispatch_pass", _fake_schedule_dispatch_pass)
+
+    resp = await client.put(
+        f"/api/v1/patient-forms/{queue_form_id}/status",
+        headers=_auth(rbac_world.admin_token),
+        json={"status": "in_queue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    assert seen["retry_floor"] == authz_app.state.settings.post_call_review_floor
 
 
 @pytest.mark.asyncio
