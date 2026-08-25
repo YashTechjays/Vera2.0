@@ -600,16 +600,16 @@ async def test_terminal_calls_list_for_everyone_in_history_scope(
 
 
 @pytest.mark.asyncio
-async def test_join_token_listen_allowed_on_finished_private_call(
+async def test_join_token_still_owner_or_published_on_finished_private_call(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
     seeded_form_id: UUID,
     admin_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A finished call's content is tenant-visible (VR2-177): the history modal's
-    listen join-token must not 404 for a non-owner (the token is useless — the
-    room is gone — but the view path must not error). A LIVE private call stays
-    404 (see test_join_token_gated_and_audited_for_non_owner)."""
+    """join-token keeps the LIVE owner-or-published rule even on a terminal-status
+    call: a token grants room access, and the row can go terminal while the room
+    survives (end_call's delete can fail), so the VR2-177 content widening must
+    not let a non-owner mint a listen token into that surviving room."""
     call_id = await seed_call(
         admin_sessionmaker,
         rbac_world.tenant_id,
@@ -620,7 +620,7 @@ async def test_join_token_listen_allowed_on_finished_private_call(
     resp = await client.get(
         f"/api/v1/calls/{call_id}/join-token", headers=_auth(rbac_world.supervisor_token)
     )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 404, resp.text
 
 
 @pytest.mark.asyncio

@@ -306,12 +306,10 @@ async def join_token(
     call = (await session.execute(stmt)).scalar_one_or_none()
     if call is None:
         raise NotFoundError(message="call not found")
-    # Content rule (VR2-177): a finished call is tenant-visible, so its modal may
-    # mint a (useless — the room is gone) listen token instead of 404ing; a live
-    # call stays owner-or-published. Intervening on a terminal call still 409s below.
-    if not call_content_visible(
-        call.initiated_by_id, call.published, caller.user_id, status=call.current_status
-    ):
+    # Deliberately NOT the VR2-177 content rule: a token grants live ROOM access, and
+    # a terminal-status row can outlive its room (end_call's delete can fail), so the
+    # owner-or-published live rule stays — content surfaces widened instead.
+    if _call_hidden_from(call, caller.user_id):
         raise NotFoundError(message="call not found")  # 404 not 403: don't reveal a private call
     room_name = room_name_for_call(tenant_id, call.id)
     identity = (
