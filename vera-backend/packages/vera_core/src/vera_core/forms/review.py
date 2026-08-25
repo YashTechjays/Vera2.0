@@ -324,19 +324,40 @@ def _alternatives(schema_json: Mapping[str, Any]) -> AlternativeIndex:
     return alternative_index(alternative_pairs(FormSchemaDoc.model_validate(schema_json)))
 
 
+def _confirm_paths(schema_json: Mapping[str, Any]) -> frozenset[str]:
+    """Paths of `role="confirm"` leaves. Their declared purpose is payer CONFIRMATION, so the
+    intake value is the thing to be confirmed, not the confirmation (spec §4.1). Empty for v1,
+    which has no role concept."""
+    if not is_v2(schema_json):
+        return frozenset()
+    doc = FormSchemaDoc.model_validate(schema_json)
+    return frozenset(path for path, leaf in doc.leaf_items() if leaf.role == "confirm")
+
+
 def _satisfied(
     path: str,
     status_by_path: Mapping[str, FieldStatus],
     alternatives: AlternativeIndex,
     *,
     floor: int,
+    confirm_paths: Collection[str] = (),
 ) -> bool:
     """Satisfied itself, or by a sibling in its either/or group — one answer satisfies the pair.
+
+    A `confirm`-role leaf is NOT satisfied by intake alone (spec §4.1); a human edit still is,
+    since that is a reviewer's deliberate decision. The rule is applied to the leaf itself and
+    not to its siblings: no confirm leaf is an either/or member in any shipped catalog, pinned
+    by `test_no_confirm_leaf_is_an_either_or_member_in_any_shipped_catalog`.
 
     Judged with `is_field_satisfied` rather than `conditions.has_value` because `_gate_values` may
     hand these callers a sentinel map instead of real values, and because a low-confidence AI
     answer must not satisfy its sibling any more than it satisfies itself."""
-    return is_field_satisfied(status_by_path.get(path), floor=floor) or any(
+    status = status_by_path.get(path)
+    if path in confirm_paths and status is not None and status.source == AnswerSource.INTAKE.value:
+        own = False
+    else:
+        own = is_field_satisfied(status, floor=floor)
+    return own or any(
         is_field_satisfied(status_by_path.get(other), floor=floor)
         for other in alternatives.get(path, ())
     )
@@ -357,10 +378,13 @@ def _unsatisfied(
     gate_values = _gate_values(status_by_path, values)
     applicable = _required_paths(schema_json, gate_values, askable_only=askable_only)
     alternatives = _alternatives(schema_json)
+    confirm_paths = _confirm_paths(schema_json)
     return applicable, [
         path
         for path in applicable
-        if not _satisfied(path, status_by_path, alternatives, floor=floor)
+        if not _satisfied(
+            path, status_by_path, alternatives, floor=floor, confirm_paths=confirm_paths
+        )
     ]
 
 

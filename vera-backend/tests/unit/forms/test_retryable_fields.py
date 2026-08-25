@@ -1,13 +1,21 @@
+import json
+from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
-from vera_core.forms.dsl import PromotedFields
+from vera_core.forms.conditions import alternative_pairs
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields
+from vera_core.forms.intake import required_intake_fields
 from vera_core.forms.review import (
+    REVIEW_CONFIDENCE_FLOOR,
     FieldStatus,
+    _confirm_paths,
     field_labels,
     is_field_satisfied,
     retryable_required_paths,
     unsatisfied_required_paths,
 )
+from vera_core.models.enums import AnswerSource
 
 FLOOR = 70
 
@@ -136,3 +144,84 @@ def test_real_values_evaluate_value_gates_exactly() -> None:
     assert with_values == ["sections.cov.copay"]
     sentinel = unsatisfied_required_paths(status, doc, floor=FLOOR)
     assert sentinel == []  # sentinel reads the eq-gate as not matching
+
+
+# ---------------------------------------------------------------------------
+# A `role="confirm"` leaf's declared purpose is payer confirmation, so an intake
+# value alone must not satisfy it (spec §4.1). Measured scope: the shipped IBV
+# catalog has exactly three confirm leaves; the two spouse leaves declare
+# `default: "N/A"` and so are already outside every gate population
+# (`_required_paths` drops defaulted leaves) — this rule reaches `policy_number`
+# alone. Constants and schema come from the compiled artifact, not hand-typed.
+# ---------------------------------------------------------------------------
+
+_FORM_SCHEMA_DIR = Path(__file__).resolve().parents[3] / "data" / "form_schemas"
+
+POLICY_NUMBER = "sections.insurance_information.policy_number"
+SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
+SPOUSE_DOB = "sections.patient_information.spouse_partner_dob"
+COVERAGE_TYPE = "sections.benefit_coverage.coverage_type"
+
+IBV_STANDARD_V2: dict[str, Any] = json.loads(
+    (_FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text()
+)
+DISEASE_ONLY_V2: dict[str, Any] = json.loads(
+    (_FORM_SCHEMA_DIR / "disease_only_verification.json").read_text()
+)
+SCHEMA_JSON = IBV_STANDARD_V2
+INTAKE_VALUES: dict[str, Any] = dict.fromkeys(required_intake_fields(SCHEMA_JSON), "x")
+
+
+def test_intake_does_not_satisfy_a_confirm_leaf() -> None:
+    """A confirm leaf's declared purpose is payer confirmation, so the value typed at intake
+    is the thing to be confirmed, not the confirmation (spec §4.1)."""
+    status = {POLICY_NUMBER: FieldStatus(AnswerSource.INTAKE.value, None, None)}
+    assert POLICY_NUMBER in unsatisfied_required_paths(
+        status, SCHEMA_JSON, floor=REVIEW_CONFIDENCE_FLOOR, values=INTAKE_VALUES
+    )
+
+
+def test_a_call_satisfies_a_confirm_leaf() -> None:
+    status = {
+        POLICY_NUMBER: FieldStatus(AnswerSource.AI_CALL.value, True, 90, uuid4()),
+    }
+    assert POLICY_NUMBER not in unsatisfied_required_paths(
+        status, SCHEMA_JSON, floor=REVIEW_CONFIDENCE_FLOOR, values=INTAKE_VALUES
+    )
+
+
+def test_a_human_edit_satisfies_a_confirm_leaf() -> None:
+    """A reviewer typing the value IS a decision — only intake is excluded. Without this the
+    reviewer could never clear the field and the form could never complete."""
+    status = {POLICY_NUMBER: FieldStatus(AnswerSource.HUMAN.value, None, None)}
+    assert POLICY_NUMBER not in unsatisfied_required_paths(
+        status, SCHEMA_JSON, floor=REVIEW_CONFIDENCE_FLOOR, values=INTAKE_VALUES
+    )
+
+
+def test_a_defaulted_confirm_leaf_stays_outside_every_gate() -> None:
+    """The coverage-flip case: the rep says Family mid-call and will not disclose dependent
+    PHI. Both spouse leaves declare `default: "N/A"`, so they must never enter the gate
+    population and never point the retry loop at data the payer cannot give (spec E8)."""
+    values = dict(INTAKE_VALUES) | {COVERAGE_TYPE: "Family"}
+    status = {COVERAGE_TYPE: FieldStatus(AnswerSource.AI_CALL.value, True, 95, uuid4())}
+    unsat = unsatisfied_required_paths(
+        status, SCHEMA_JSON, floor=REVIEW_CONFIDENCE_FLOOR, values=values
+    )
+    retryable = retryable_required_paths(
+        status, SCHEMA_JSON, floor=REVIEW_CONFIDENCE_FLOOR, values=values
+    )
+    for path in (SPOUSE_NAME, SPOUSE_DOB):
+        assert path not in unsat
+        assert path not in retryable
+
+
+def test_no_confirm_leaf_is_an_either_or_member_in_any_shipped_catalog() -> None:
+    """The confirm rule is applied to the leaf itself, not to its either/or siblings — sound
+    only while no confirm leaf has any. If a catalog adds one, revisit `_satisfied`."""
+    for schema_json in (IBV_STANDARD_V2, DISEASE_ONLY_V2):
+        confirm = _confirm_paths(schema_json)
+        members = {
+            m for pair in alternative_pairs(FormSchemaDoc.model_validate(schema_json)) for m in pair
+        }
+        assert not (confirm & members)
