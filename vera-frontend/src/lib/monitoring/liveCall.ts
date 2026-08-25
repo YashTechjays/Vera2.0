@@ -14,12 +14,15 @@ export function categoryOf(status: string): CallCategory {
 /** Adapt a real call into the modal's LiveCall shape; confidence is still a placeholder
  *  (the API doesn't provide it yet). */
 export function toLiveCall(c: CallSummary, now: number): LiveCall {
+  // A finished call's timer is its real duration; only a live call measures against now (VR2-213).
+  const end = c.ended_at ? Date.parse(c.ended_at) : now
+  const callDuration = elapsed(c.started_at, end)
   return {
     id: c.id,
     patient: c.patient_name || "—",
     type: "Patient",
     agent: "—",
-    duration: elapsed(c.started_at, now),
+    duration: callDuration,
     status: c.status,
     category: categoryOf(c.status),
     visible: c.published,
@@ -31,8 +34,9 @@ export function toLiveCall(c: CallSummary, now: number): LiveCall {
     // calls render no "Verified" label rather than a misleading 0%.
     verifiedProgress: c.verified_pct ?? null,
     formId: c.form_id,
-    callTime: elapsed(c.started_at, now),
+    callTime: callDuration,
     startedAt: c.started_at,
+    endedAt: c.ended_at,
     healthScore: c.health_score,
     isOwner: c.is_owner,
   }

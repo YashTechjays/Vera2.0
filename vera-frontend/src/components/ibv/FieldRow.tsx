@@ -37,6 +37,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
     values,
     setValue,
     errors,
+    mode,
     disputeFor,
     flagsFor,
     applyDispute,
@@ -56,6 +57,9 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
+  // VR2-206 (reopened): in create mode the message must be VISIBLE at the field —
+  // the red ring + hover tooltip alone read as a generic error.
+  const inlineError = mode === "create" ? invalidReason : undefined
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
@@ -127,6 +131,11 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
               countrySelect={schema !== null && phonePaths(schema).has(path)}
             />
           </div>
+          {inlineError && (
+            <p className="border-b border-ibv-input-border bg-ibv-input-bg px-1 pb-1 pt-0.5 font-ibv text-[11px] leading-tight text-[#b91c1c]">
+              {inlineError}
+            </p>
+          )}
           {openDispute && (
             <DisputeStrip
               dispute={openDispute}

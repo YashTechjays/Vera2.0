@@ -28,6 +28,9 @@ export type LiveCall = {
   /** ISO start time from the API (null until the callee answers) — the modals'
    *  live-timer seed. Absent on mock rows. */
   startedAt?: string | null
+  /** ISO end time from the API (null while live) — freezes the timer for
+   *  completed calls (VR2-213). Absent on mock rows. */
+  endedAt?: string | null
   /** Latest observer health score (0-100); null/undefined = not assessed. */
   healthScore?: number | null
   /** True when the current caller owns the call — gates coaching for an owner

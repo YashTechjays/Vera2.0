@@ -201,14 +201,17 @@ export function LiveCallModal({
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
-  const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
-    call?.id,
-  )
+  const { startedAtMs, endedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } =
+    useCallStatus(call?.id)
+  // A call that ended before the modal opened has no SSE terminal event yet — the polled
+  // ended_at freezes the timer until the stream replay delivers the exact ts (VR2-213).
+  const endedMs = endedAtMs ?? (call?.endedAt ? Date.parse(call.endedAt) : null)
   const duration = useLiveDuration({
     open,
-    ended: sseEnded,
+    ended: sseEnded || endedMs != null,
     sseMs: startedAtMs,
     startedAt: call?.startedAt,
+    endedMs,
   })
   // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
   // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).

@@ -101,6 +101,17 @@ describe("validateAll — date format", () => {
     expect(validateAll(schema, { [DOB]: "1990-02-15" })[DOB]).toMatch(/MM\/DD\/YYYY/)
     expect(validateAll(schema, { [DOB]: "Feb 15 1990" })[DOB]).toMatch(/MM\/DD\/YYYY/)
   })
+
+  it("flags shape-valid values that are not real calendar dates", () => {
+    expect(validateAll(schema, { [DOB]: "13/15/1990" })[DOB]).toMatch(/MM\/DD\/YYYY/)
+    expect(validateAll(schema, { [DOB]: "02/30/1990" })[DOB]).toMatch(/MM\/DD\/YYYY/)
+    expect(validateAll(schema, { [DOB]: "0/0/1990" })[DOB]).toMatch(/MM\/DD\/YYYY/)
+  })
+
+  it("flags non-calendar dates live in create mode too", () => {
+    const errors = validateCreate(schema, { [DOB]: "13/15/1990" }, { includeRequired: false })
+    expect(errors[DOB]).toMatch(/MM\/DD\/YYYY/)
+  })
 })
 
 describe("isoToDateFormat", () => {
