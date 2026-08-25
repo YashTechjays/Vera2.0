@@ -284,13 +284,37 @@ Five read-only fields on `PatientFormDetail`: `verified_pct`, `review_reason`, `
 ### B6. One retry gate, one number
 
 `post_call.py` computes the verified fraction **on the spot** at call close and gates on it,
-replacing `form.completion_pct < T*100`. Both paths then read one semantics.
+replacing `form.completion_pct < T*100`. Both paths then compare the same number against the
+same threshold.
+
+> **Correction, found by the final whole-branch review.** "One semantics" overstated it. The two
+> paths now agree on the *number* but NOT on the *decision*: `evaluate_call` carries two guards
+> the fallback lacks — `if not unsatisfied: park` (ahead of the fraction gate) and
+> `if retryable and sm.can_retry(...)`. A probe found a reachable form where the fallback
+> **redials** while both of the eval path's guards say don't (call A answered 33 of 34 askable
+> leaves at confidence 95 but captured no reference number; call B captured only the reference
+> number). Pre-branch that form read `completion_pct = 100` and both paths parked, so this branch
+> *creates* the disagreement — the same "which consumer closed the call decides whether we
+> redial" defect class, relocated rather than removed. It is dormant behind
+> `form_auto_retry_enabled=False` (the deployment default), which is why it did not block merge.
+> **The correct fix, and the top follow-up, is to extract the whole park-vs-redial DECISION into
+> `verification.py` beside `load_verified_fraction` and have both consumers call it** — not just
+> the fraction. Honest status: one number at 3 of 3 sites, one decision at 1 of 2.
 
 `recompute_form_projection` is **not** changed to write `verified_pct`: it runs on every
 answer write, and `satisfied_required_fraction` needs `load_field_status` +
 `load_authoritative_call_ids` — two extra queries per answer, ~540 on a 270-answer call. The
-stored `verified_pct` column stays a display value refreshed at post-call eval and at
-dispute-resolve; the gate never reads it. No migration, no hot-path cost.
+stored `verified_pct` column stays a display value; the gate never reads it. No migration, no
+hot-path cost.
+
+> **Correction, found by the final whole-branch review.** This said the column is "refreshed at
+> post-call eval **and at dispute-resolve**". That is false: the only writers in the repo are
+> `post_call_eval.py:473` and `scripts/seed_retry_form.py`. `resolve_disputes` recomputes
+> `completion_pct` and then returns it beside an untouched `verified_pct` — and a resolve inserts
+> a `source=human` answer, so a previously-confirmed leaf stops being confirmed and the true
+> fraction *drops* while the displayed number stays high. That is the misleading-display class B5
+> exists to remove, and F4's summary strip would render it as current. Fixed in this branch by
+> recomputing the column in `resolve_disputes` before building the detail.
 
 Behaviour change is confined to where the two numbers diverge (E3): at T=0.80, S1/S4/S5 decide
 identically and **S3 flips from park to retry** — a call that proved nothing earns another,
