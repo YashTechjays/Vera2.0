@@ -62,9 +62,15 @@ describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
     expect(screen.getByText("Prior:")).toBeInTheDocument()
   })
 
-  it("hides Swap while the field is inapplicable — it writes a value the reviewer cannot undo", () => {
+  it("disables Swap while the field is inapplicable — it writes a value the reviewer cannot undo", () => {
     renderRow({})
-    expect(screen.queryByTitle("Swap with prior value")).toBeNull()
+    expect(screen.queryByRole("button", { name: "Swap with prior value" })).toBeNull()
+    // Visible but inert, with the reason in the tooltip (VR2-162: hidden read as broken).
+    expect(
+      screen.getByRole("button", {
+        name: "Swap is unavailable while this field is not applicable",
+      }),
+    ).toBeDisabled()
   })
 
   it("keeps the input itself disabled while the field is inapplicable", () => {
@@ -74,7 +80,7 @@ describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
 
   it("offers Swap again once the gates hold", () => {
     renderRow(GATES_PASS)
-    expect(screen.getByTitle("Swap with prior value")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Swap with prior value" })).toBeInTheDocument()
     expect(screen.getByRole("combobox")).toBeEnabled()
   })
 })

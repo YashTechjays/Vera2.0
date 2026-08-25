@@ -12,6 +12,18 @@ import type { FlatLeaf, FormSchema, FormValues } from "./types"
 /** Errors keyed by root-anchored field path (absent = valid). */
 export type ValidationErrors = Record<string, string>
 
+/** How loudly a field's error is drawn — see `invalidSeverity`. */
+export type InvalidSeverity = "error" | "missing"
+
+/** A required value never filled in reads calmer than one that is actually wrong (VR2-162). */
+export function invalidSeverity(
+  message: string | undefined,
+  value: string
+): InvalidSeverity | undefined {
+  if (!message) return undefined
+  return value.trim() === "" ? "missing" : "error"
+}
+
 const NUMERIC_TYPES = new Set(["currency", "percent", "integer"])
 
 const CURRENCY_STRIP_RE = /[$,%\s]/g
