@@ -34,6 +34,7 @@ from vera_core.models import (
     Call,
     CallEvent,
     CallFormSnapshot,
+    CallLineage,
     FieldAnswer,
     InsuranceProvider,
     PatientForm,
@@ -42,7 +43,7 @@ from vera_core.models import (
     Tenant,
     VoiceModelConfig,
 )
-from vera_core.models.enums import CallStatus, FormStatus, VoiceModelStage
+from vera_core.models.enums import CallMode, CallStatus, FormStatus, VoiceModelStage
 from vera_core.observability.otel_testing import assert_no_phi_values
 from vera_core.plan_store import CallPlanService
 from vera_core.services import queue_dispatcher
@@ -244,6 +245,14 @@ class FakeSession:
             return _Result(rows=[])
         if entity is VoiceModelConfig:
             return _Result(scalar=self.voice_model)
+        if entity is Call:
+            # The parent-call lookup for CallLineage, now unconditional (Task 2) rather than
+            # RETRY-only. `self.added` preserves insertion order and the just-added current
+            # call is always its last Call entry for this form_id, so excluding it leaves the
+            # prior calls — mirroring `Call.id != call.id` without needing to parse it.
+            form_id = _bound_value(stmt, "form_id")
+            prior = [o for o in self.added if isinstance(o, Call) and o.form_id == form_id][:-1]
+            return _Result(scalar=prior[-1].id if prior else None)
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
 
@@ -263,6 +272,9 @@ class FakeSession:
 
     def call_events_added(self) -> list[CallEvent]:
         return [o for o in self.added if isinstance(o, CallEvent)]
+
+    def lineage_added(self) -> list[CallLineage]:
+        return [o for o in self.added if isinstance(o, CallLineage)]
 
 
 class FakeLiveKit:
@@ -1423,6 +1435,78 @@ class TestCallPlanStaging:
                 task_key
             )
             assert len(staged_task.prompt) < len(full_task.prompt), task_key
+
+    async def test_operator_requeue_with_a_reference_number_is_labelled_retry(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The branch's premise: a manual requeue resets retry_count, so the OLD rule
+        labelled a narrowed call `full`. Mode must follow what was staged, not the retry
+        budget."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id)  # manual requeue reset retry_count to 0
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        ref = "sections.insurance_representative.call_reference_number"
+        call_id = uuid7()
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            return {
+                ref: FieldStatus(
+                    source="ai_call", ai_supported=True, ai_confidence=96, call_id=call_id
+                )
+            }
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return {ref: "ABC-123"}
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        assert form.retry_count == 0  # the budget was reset, not spent
+        assert session.calls_added()[0].mode == CallMode.RETRY.value
+
+    async def test_a_prior_call_always_writes_lineage_even_when_the_plan_was_not_narrowed(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        """A second attempt is a retry of the first whether or not it was focused — the
+        timeline's 'retry of attempt N' must not depend on the mode label."""
+        tenant = _tenant()
+        form = _form(tenant.id)  # no plan_service below: never focused, always FULL
+        session = FakeSession(tenant=tenant, candidates=[form])
+        livekit = FakeLiveKit()
+
+        # First dispatch: nothing on file yet, runs fresh.
+        dispatched_first = await _dispatch(session, tenant.id, livekit)
+        assert dispatched_first == 1
+        parent = session.calls_added()[0]
+        assert parent.mode == CallMode.FULL.value
+
+        dispatched_second = await _dispatch(session, tenant.id, livekit)
+        assert dispatched_second == 1
+        child = session.calls_added()[1]
+        assert child.mode == CallMode.FULL.value  # unfocused, but still a retry of the first
+
+        lineage = session.lineage_added()
+        assert len(lineage) == 1
+        assert lineage[0].parent_call_id == parent.id
+        assert lineage[0].retry_call_id == child.id
 
 
 async def _noop_sleep(seconds: float) -> None:

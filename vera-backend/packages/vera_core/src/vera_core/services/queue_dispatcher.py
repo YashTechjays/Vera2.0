@@ -369,7 +369,10 @@ async def try_dispatch(
             sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
             continue
 
-        call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
+        # Whether the question tree was narrowed — decided below, never from
+        # retry_count: a manual requeue resets that budget, so it can't tell us the
+        # call's shape.
+        focused = False
         # Real-call dispatch metadata: the worker must wait for the SIP callee to
         # answer and publish envelope events for live monitoring. IVR navigation is
         # the operator's per-form queue-time choice (voice-lab-style toggle) — when
@@ -427,6 +430,12 @@ async def try_dispatch(
                         focus_call_plan(plan, focus, answers=values),
                         plan_prompt_version_id,
                     )
+                    focused = True
+
+        # `mode` describes THIS call: "retry" means the question tree was narrowed, which is
+        # what the attempt timeline reports. A budgeted retry that runs FRESH (no reference
+        # number on file) is honestly a full call.
+        call_mode = CallMode.RETRY if focused else CallMode.FULL
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.
@@ -466,21 +475,19 @@ async def try_dispatch(
                         after_state={},
                     )
                 )
-                # For RETRY calls: find the most-recent prior call so we can write a
-                # CallLineage row. The retry is SCOPED by the plan itself (a focused
-                # retry stages a narrowed plan via focus_call_plan above), never by a
-                # prompt overlay — the agent is never told this is a retry, so nothing
-                # leaks to the payer rep.
-                parent_call_id = None
-                if call_mode == CallMode.RETRY:
-                    parent_call_id = (
-                        await session.execute(
-                            select(Call.id)
-                            .where(Call.form_id == form.id, Call.id != call.id)
-                            .order_by(Call.created_at.desc())
-                            .limit(1)
-                        )
-                    ).scalar_one_or_none()
+                # Any prior call on this form makes this one its retry, whatever the plan's
+                # shape — the timeline's "retry of attempt N" must not depend on the label.
+                # The retry is SCOPED by the plan itself (a focused retry stages a narrowed
+                # plan via focus_call_plan above), never by a prompt overlay — the agent is
+                # never told this is a retry, so nothing leaks to the payer rep.
+                parent_call_id = (
+                    await session.execute(
+                        select(Call.id)
+                        .where(Call.form_id == form.id, Call.id != call.id)
+                        .order_by(Call.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
 
                 room_name = room_name_for_call(tenant_id, call.id)
                 span_attrs: dict[str, Any] = {
