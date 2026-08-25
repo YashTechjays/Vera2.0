@@ -299,6 +299,10 @@ a reference number could then never reach review. S3 is carried by F4, not by a 
 
 ### B8. Re-anchor the confidence bands (E5)
 
+> Numbered with the backend items because it consumes B5, but it edits
+> `vera-frontend/src/lib/ibv/disputes.ts` — so it is implemented in the **frontend** plan,
+> after B5 has shipped `review_floor`.
+
 `confidenceLevel` takes the floor from B5: below floor -> red *"below the retry floor"*;
 at or above -> two steps (>= 95 green, else neutral). One real boundary plus one
 essentially-certain band, replacing three arbitrary ones. `answeredNotCounted` and F4's
