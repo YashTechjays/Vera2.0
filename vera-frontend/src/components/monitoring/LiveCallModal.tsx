@@ -60,19 +60,25 @@ function FormPanel({
   formId,
   progress,
   verified,
+  callEnded,
   onExpand,
 }: {
   formId: string | undefined
   progress: number
   verified: number | null
+  callEnded: boolean
   onExpand: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const { loadFormById, formId: loadedFormId, loading, error, schema } = useIbv()
+  const { loadFormById, formId: loadedFormId, loading, error, schema, dirty } = useIbv()
 
   function toggleExpanded() {
-    // Skip when already loaded: a refetch would wipe live answers applied so far and any edit.
-    if (!expanded && formId && formId !== loadedFormId) loadFormById(formId)
+    // Skip when already loaded: a refetch would wipe live answers applied so far and
+    // any edit. But once the call has ENDED, the cached in-call snapshot is stale —
+    // post-call processing moves the form's status on (VR2-295) — so refetch then,
+    // unless the reviewer has unsaved edits.
+    const stale = callEnded && !dirty
+    if (!expanded && formId && (formId !== loadedFormId || stale)) loadFormById(formId)
     setExpanded((v) => !v)
   }
 
@@ -393,6 +399,9 @@ export function LiveCallModal({
               formId={call?.formId}
               progress={progress}
               verified={verified}
+              // category covers a call that ended BEFORE the modal opened — the SSE
+              // terminal frame only arrives once the stream replay catches up.
+              callEnded={callEnded || call?.category === "completed"}
               onExpand={onExpand}
             />
 
