@@ -603,6 +603,21 @@ class PatientFormDetail(BaseModel):
     insurance_type: str
     schema_version_id: UUID
     completion_pct: float
+    # The retry gate's own number: the fraction of required, applicable, collectable leaves an
+    # AUTHORITATIVE call confirmed. Diverges sharply from completion_pct — a call that answered
+    # everything but captured no reference number reads 100% complete and 0% verified. None
+    # preserves "not yet evaluated" (mirrors CallSummary.verified_pct) — a real 0.0 would
+    # misread as "0% verified" for a pre-eval form.
+    verified_pct: float | None
+    # Why the form parked (vera_core ReviewReason). On the worklist row too; here so the review
+    # modal can say it where the reviewer actually decides.
+    review_reason: str | None
+    # Retry budget: how many auto-redials this enqueue episode has consumed, and the tenant cap.
+    retry_count: int
+    max_retries: int
+    # The confidence floor `is_call_confirmed` applies (settings.post_call_review_floor). The UI
+    # renders confidence scores, and their meaning is defined entirely by this boundary.
+    review_floor: int
     created_at: datetime
     updated_at: datetime
     patient_name: str | None
@@ -766,7 +781,9 @@ async def _unresolved_dispute_count(
     return len(await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths))
 
 
-async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
+async def _build_detail(
+    session: TenantSession, form: PatientForm, settings: AppSettings
+) -> PatientFormDetail:
     """Assemble the full review detail for one form (current answers + disputes)."""
     # One round trip for both the schema row (insurance_type) and its document (doc) — the
     # v2-or-None parse happens once here, shared by the call-scoped and authoritative lookups
@@ -779,6 +796,7 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         )
     ).one()
     doc = _v2_doc(version.schema_json)
+    tenant = (await session.execute(select(Tenant).where(Tenant.id == form.tenant_id))).scalar_one()
 
     call_scoped_paths = _call_scoped_paths(doc)
     views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
@@ -804,6 +822,11 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         insurance_type=form_schema.insurance_type,
         schema_version_id=form.schema_version_id,
         completion_pct=float(form.completion_pct),
+        verified_pct=float(form.verified_pct) if form.verified_pct is not None else None,
+        review_reason=form.review_reason,
+        retry_count=form.retry_count,
+        max_retries=tenant.max_retries,
+        review_floor=settings.post_call_review_floor,
         created_at=form.created_at,
         updated_at=form.updated_at,
         patient_name=form.patient_name,
@@ -1023,6 +1046,7 @@ async def get_patient_form(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:read"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
@@ -1031,7 +1055,7 @@ async def get_patient_form(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    detail = await _build_detail(session, form)
+    detail = await _build_detail(session, form, settings)
     await emit_phi_read_audit(
         get_audit(request),
         request,
@@ -1106,6 +1130,7 @@ async def resolve_disputes(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
@@ -1261,7 +1286,7 @@ async def resolve_disputes(
     await session.flush()
     await session.refresh(form)
 
-    detail = await _build_detail(session, form)
+    detail = await _build_detail(session, form, settings)
     audit = get_audit(request)
     # The response discloses every field value (PHI) — audit the disclosure, then the action.
     await emit_phi_read_audit(

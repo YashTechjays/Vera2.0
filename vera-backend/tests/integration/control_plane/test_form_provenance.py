@@ -5,10 +5,12 @@ answers and null for human answers.
 """
 
 from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -16,7 +18,13 @@ from tests.integration.control_plane.conftest import RBACWorld
 from vera_core.db import uuid7
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call, CallLineage
-from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType
+from vera_core.models.enums import (
+    AnswerSource,
+    CallStatus,
+    FormStatus,
+    InsuranceType,
+    ReviewReason,
+)
 from vera_core.models.field_answer import CallFormSnapshot, FieldAnswer, FieldEvaluation
 from vera_core.models.patient_form import PatientForm
 
@@ -372,3 +380,122 @@ async def test_calls_timeline_unknown_form_404(
         headers={"Authorization": f"Bearer {rbac_world.admin_token}"},
     )
     assert resp.status_code == 404
+
+
+async def _get_detail(client: httpx.AsyncClient, token: str, form_id: UUID) -> dict[str, Any]:
+    resp = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+    data: dict[str, Any] = resp.json()["data"]
+    return data
+
+
+@pytest.fixture
+async def retry_decision_form_id(
+    database_url: str,
+    rbac_world: RBACWorld,
+) -> AsyncGenerator[UUID]:
+    """A parked form with its five retry-decision inputs set directly on the row.
+    `verified_pct` is deliberately set apart from `completion_pct` (spec E4's headline
+    case: every field answered, nothing verified) — nothing recomputes verified_pct on
+    write, so this is the only way to seed it, and it is what stops the detail from
+    passing with `verified_pct` wired to `completion_pct` by mistake.
+
+    Teardown in FK order; does NOT delete the tenant (owned by rbac_world).
+    """
+    tenant_id = rbac_world.tenant_id
+    form_id = uuid7()
+    schema_version_id = uuid7()
+
+    engine = create_async_engine(database_url)
+    sm: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
+
+    schema_id: UUID
+    schema_id_to_delete: UUID | None = None
+
+    try:
+        async with sm() as session, session.begin():
+            existing = (
+                await session.execute(
+                    select(FormSchema).where(
+                        FormSchema.insurance_type == InsuranceType.DISEASE_ONLY.value
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                fs = FormSchema(
+                    id=uuid7(),
+                    insurance_type=InsuranceType.DISEASE_ONLY.value,
+                    name="Retry Decision Test Schema",
+                )
+                session.add(fs)
+                await session.flush()
+                schema_id = fs.id
+                schema_id_to_delete = fs.id
+            else:
+                schema_id = existing.id
+
+            session.add(
+                SchemaVersion(
+                    id=schema_version_id,
+                    schema_id=schema_id,
+                    version=992,
+                    schema_json={},
+                )
+            )
+            session.add(
+                PatientForm(
+                    id=form_id,
+                    tenant_id=tenant_id,
+                    schema_version_id=schema_version_id,
+                    patient_name="Retry Decision Patient",
+                    status=FormStatus.EXCEPTION_REVIEW.value,
+                    completion_pct=100.0,
+                    verified_pct=0.0,
+                    review_reason=ReviewReason.FILL_THRESHOLD_MET.value,
+                    retry_count=2,
+                )
+            )
+
+        yield form_id
+
+    finally:
+        async with sm() as session, session.begin():
+            # Teardown in FK order, scoped to this fixture's form_id only
+            # (rbac_world owns the tenant; we must NOT delete other tenant rows).
+            await session.execute(
+                text("DELETE FROM field_answer WHERE form_id = :fid").bindparams(fid=form_id)
+            )
+            await session.execute(
+                text("DELETE FROM patient_form WHERE id = :fid").bindparams(fid=form_id)
+            )
+            await session.execute(
+                text("DELETE FROM schema_version WHERE id = :sid").bindparams(sid=schema_version_id)
+            )
+            if schema_id_to_delete is not None:
+                await session.execute(
+                    text("DELETE FROM form_schema WHERE id = :fsid").bindparams(
+                        fsid=schema_id_to_delete
+                    )
+                )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_detail_exposes_the_retry_decision_inputs(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    retry_decision_form_id: UUID,
+    authz_app: FastAPI,
+) -> None:
+    """A reviewer cannot be shown WHY a form parked without these. verified_pct in
+    particular is the number the gate reads and never left the database before
+    (spec E4)."""
+    body = await _get_detail(client, rbac_world.admin_token, retry_decision_form_id)
+    assert body["verified_pct"] == pytest.approx(0.0)
+    assert body["completion_pct"] == pytest.approx(100.0)
+    assert body["review_reason"] == ReviewReason.FILL_THRESHOLD_MET.value
+    assert body["retry_count"] == 2
+    assert body["max_retries"] == 5
+    assert body["review_floor"] == authz_app.state.settings.post_call_review_floor
