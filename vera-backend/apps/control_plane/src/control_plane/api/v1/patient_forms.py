@@ -622,10 +622,9 @@ class CallAttemptView(BaseModel):
     created_at: datetime
     retry_of: UUID | None
     changed_paths: list[str]
-    # True only when THIS caller may actually fetch the recording: it is
-    # AVAILABLE, the call passes the playback endpoint's owner-or-published
-    # gate, and the caller holds recordings:read — the DTO must never
-    # advertise a recording the playback endpoint would refuse.
+    # True only when THIS caller may actually fetch the recording (see
+    # `recording_playable`, the single source of this flag) — the DTO must
+    # never advertise a recording the playback endpoint would refuse.
     recording_available: bool
 
 
@@ -644,6 +643,7 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
             published=a.published,
             user_id=caller_id,
             can_play=can_play,
+            status=a.status,
         ),
     )
 

@@ -82,6 +82,9 @@ class _FakeCall:
     initiated_by_id: UUID | None = _OWNER_ID
     revoked_user_ids: list[str] = field(default_factory=list)
     published: bool = True
+    # "active" keeps the owner-or-published pins meaning the LIVE-call rule;
+    # a terminal status exercises the VR2-177 tenant-visible rule.
+    current_status: str = "active"
 
 
 @dataclass
@@ -214,7 +217,8 @@ async def test_owner_available_recording_returns_signed_url() -> None:
 
 
 async def test_non_owner_unpublished_call_is_404() -> None:
-    """Non-owner on an unpublished call → 404 (no-enumeration, same shape as missing call)."""
+    """Non-owner on an unpublished LIVE call → 404 (no-enumeration, same shape as
+    a missing call)."""
     app = _build_app(
         permissions=_READ,
         call=_FakeCall(published=False),
@@ -225,6 +229,22 @@ async def test_non_owner_unpublished_call_is_404() -> None:
         resp = await c.get(_PATH)
 
     assert resp.status_code == 404
+
+
+async def test_non_owner_unpublished_finished_call_returns_200() -> None:
+    """A finished call's recording is tenant-visible (VR2-177): non-owner +
+    unpublished + terminal status → 200."""
+    app = _build_app(
+        permissions=_READ,
+        call=_FakeCall(published=False, current_status="completed"),
+        recording=_FakeRecording(),
+        identity=_OTHER_IDENTITY,
+    )
+
+    async with _client(app) as c:
+        resp = await c.get(_PATH)
+
+    assert resp.status_code == 200, resp.text
 
 
 async def test_non_owner_published_call_returns_200() -> None:

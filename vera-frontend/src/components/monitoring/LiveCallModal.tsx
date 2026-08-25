@@ -467,7 +467,10 @@ export function LiveCallModal({
                   key={`${call.id}:${mode}`}
                   callId={call.id}
                   mode={mode}
-                  ended={sseEnded}
+                  // category covers rows that ended before the modal opened: the SSE
+                  // terminal frame lags, and the join-token it would fetch meanwhile
+                  // 404s for non-owners (join-token keeps the live rule — VR2-177).
+                  ended={sseEnded || call?.category === "completed"}
                   endedStatus={terminalStatus}
                   onStatus={setRoomStatus}
                   onJoinFailed={handleJoinFailed}

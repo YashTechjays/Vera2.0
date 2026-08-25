@@ -1,7 +1,8 @@
 """GET /patient-forms/{id}/calls `recording` enrichment: advertised only when an
-AVAILABLE recording exists AND the call is visible to the caller (owner-or-
-published — the playback endpoint's exact gate), so the UI never renders a
-play button that would 404."""
+AVAILABLE recording exists AND the call's content is visible to the caller (a
+finished call is tenant-visible per VR2-177; a live one is owner-or-published —
+the playback endpoint's exact gate), so the UI never renders a play button that
+would 404."""
 
 from collections.abc import AsyncGenerator
 from uuid import UUID
@@ -149,11 +150,13 @@ async def test_owner_sees_available_on_owned_and_published_calls(
 
 
 @pytest.mark.asyncio
-async def test_non_owner_sees_available_only_on_published_call(
+async def test_non_owner_sees_available_on_all_finished_calls(
     client: httpx.AsyncClient, rbac_world: RBACWorld, recording_form_id: UUID
 ) -> None:
+    # All three calls are terminal, so their content is tenant-visible (VR2-177);
+    # only the PENDING recording stays hidden.
     assert await _recordings_by_attempt(client, recording_form_id, rbac_world.admin_token) == [
-        False,
+        True,
         True,
         False,
     ]
