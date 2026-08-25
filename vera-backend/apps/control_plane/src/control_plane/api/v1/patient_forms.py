@@ -569,8 +569,10 @@ def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
 def _field_evidence(view: dict[str, Any], p: FieldProvenance | None) -> str | None:
     """The field's single evidence text. The judge's verdict quote wins: it is drawn from
     the role-labelled transcript, so it carries the agent's question as well as the rep's
-    answer, whereas `field_answer.evidence` is one rep turn — and NULL for every field the
-    live Observer wrote. Read-side only; both columns stay exactly as stored."""
+    answer, whereas `field_answer.evidence` is the single turn the extractor anchored to.
+    That column is now populated for every evaluated answer (post_call_eval resolves the
+    anchor), so this is a precedence rule between two real quotes, not a fallback for an
+    empty column. Read-side only; both columns stay exactly as stored."""
     judge_evidence = p.judge.evidence if p is not None and p.judge is not None else None
     if judge_evidence and judge_evidence.strip():
         return judge_evidence

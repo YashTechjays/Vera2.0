@@ -21,6 +21,7 @@ from vera_core.integrations.llm import (
     ExtractedField,
     JudgeVerdict,
     LLMClient,
+    PartialJudgeError,
     SpecialValues,
     TranscriptTurn,
 )
@@ -321,10 +322,11 @@ class VertexLLMClient(LLMClient):
             # a clean attempt that returned nothing new won't improve on a re-ask.
             if not progressed and not errored:
                 break
+        covered = [by_path[ef.field_path] for ef in extracted if ef.field_path in by_path]
         # An error that left ANY field unjudged must surface so the caller routes to
         # LLM_ERROR review — otherwise those fields look unsatisfied and the payer is
         # redialed for data a transient error merely failed to score. A retry that
         # recovered full coverage clears this (nothing left uncovered).
-        if last_error is not None and any(ef.field_path not in by_path for ef in extracted):
-            raise last_error
-        return [by_path[ef.field_path] for ef in extracted if ef.field_path in by_path]
+        if last_error is not None and len(covered) != len(extracted):
+            raise PartialJudgeError(covered, last_error)
+        return covered
