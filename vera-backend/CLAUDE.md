@@ -23,6 +23,24 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   merge-base), verify your own changed files pass that check in isolation
   (`git diff --name-only <base>...HEAD | xargs uv run ruff format --check`), and say so in the
   PR body — never wave a red step through as "pre-existing" on say-so.
+- **Integration tests must run through `just`, never a bare `uv run pytest <path>`.**
+  `justfile` sets `dotenv-load := true`, so a recipe gets the dotenv file exported as REAL process
+  vars; `tests/integration/conftest.py` deliberately builds `Settings(_env_file=None)` and reads only
+  real env vars. So `just test tests/integration/...` finds `VERA_DATABASE_URL` and a bare pytest
+  does not — it silently falls back to a different database and fails on a stale `alembic_version`.
+  Unit tests under `tests/unit/` are unaffected. Symptom of the trap: an integration test that fails
+  alone but passes under `just test`.
+- **`mypy --strict` covers `tests/` too** (see `[tool.mypy] files` in `pyproject.toml`), so a test
+  helper needs full annotations like any other function. Run mypy on EVERY file you changed, named
+  explicitly — scoping it to the production module is how an unannotated test helper reached the
+  gate.
+- **A test must be able to fail. Prove it.** After writing a test for a behaviour, delete or invert
+  the behaviour, confirm the test FAILS, then restore it. This is not paranoia: one branch shipped
+  eight tests that passed with their feature fully removed — a "narrowing" test whose assertion held
+  trivially, a component test whose mock meant the new branch was never entered, an endpoint whose
+  entire wiring could be neutered with 560 integration tests still green, and a test asserting
+  `toContain("Total")` that the fallback string also satisfied. Every one was found by mutation and
+  none by reading. A green suite is evidence only if you have seen it go red.
 - **After every implementation, run the `/simplify` skill** on the change (reuse /
   simplification / efficiency / altitude cleanup — quality only, not bug-hunting), then
   re-run `just check`, before claiming done or committing. Skip only for truly trivial edits
@@ -43,7 +61,13 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
   never starts it. Bring it up on demand: `just langfuse-up` (= `docker compose --profile langfuse
   up -d`, web UI at http://localhost:4000), `just langfuse-down`. Left running it balloons the
   Docker VM until the kernel OOM-kills its ClickHouse — start it only when you actually need
-  tracing; the worker degrades gracefully (drops spans) when it's down.
+  tracing; the worker degrades gracefully (drops spans) when it's down. **Measured cost of leaving
+  it up: `just check` goes ~180s → ~620s** (a 3.4x inflation) because Langfuse holds ~2.4GiB of a
+  3.8GiB Docker VM, ClickHouse alone 1.4GiB. The tell is that the slowdown does NOT show in any
+  per-directory run — decompose before hunting a code hot spot that isn't there.
+  **`just langfuse-down` is NOT scoped to the profile**: `docker compose --profile langfuse down`
+  tears down the WHOLE compose project, taking postgres, redis, livekit and sendria with it.
+  Recover with `just up` (volumes survive a `down` without `-v`, so no data is lost).
   Migration `0001` materializes table DDL from `Base.metadata` at runtime — a table name may not
   appear literally in any migration; removing a model needs an explicit drop migration.
   Because `0001` runs `create_all` off the **live** models, a DB built fresh **after** a model
