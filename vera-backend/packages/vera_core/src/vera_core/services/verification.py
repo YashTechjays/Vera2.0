@@ -1,0 +1,49 @@
+"""The one place the verified fraction is computed from a live session.
+
+`verified_pct` is the fraction of required, applicable, collectable leaves an AUTHORITATIVE
+call confirmed. Both retry gates read it through here, so they cannot drift onto different
+populations (spec E3). Values are PHI — passed to the pure helper, never logged.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.review import satisfied_required_fraction
+from vera_core.models import PatientForm, SchemaVersion
+from vera_core.services.field_answers import current_values_by_path
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
+
+
+async def load_verified_fraction(
+    session: AsyncSession, form: PatientForm, *, floor: int
+) -> float | None:
+    """`verified_pct / 100` for *form*, or `None` for a legacy v1 schema — which declares no
+    reference-number field, so "authoritative" is undefined and the caller must fall back to
+    its previous gate rather than read 0.0 as "nothing verified"."""
+    schema_json: Mapping[str, Any] = (
+        await session.execute(
+            select(SchemaVersion.schema_json).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    if not is_v2(schema_json):
+        return None
+    doc = FormSchemaDoc.model_validate(schema_json)
+    status_by_path = await load_field_status(session, form.id)
+    authoritative = await load_authoritative_call_ids(
+        session, form.id, reference_field=doc.rep_call_reference_number_field
+    )
+    values = await current_values_by_path(session, form.id)
+    return satisfied_required_fraction(
+        status_by_path,
+        schema_json,
+        floor=floor,
+        values=values,
+        authoritative_calls=authoritative,
+    )

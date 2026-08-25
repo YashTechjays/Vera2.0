@@ -1,18 +1,19 @@
 """Post-call AI-processing resolution — the system edge out of AI_PROCESSING.
 
 After a completed call parks the form in AI_PROCESSING, `resolve_ai_processing`
-decides the diagrammed system transition: low completion + retries remaining →
+decides the diagrammed system transition: low fill + retries remaining →
 auto-requeue (IN_QUEUE); otherwise → EXCEPTION_REVIEW for human review. COMPLETED
 is never reachable from here — only a reviewer's manual approve sets it.
 
 The auto-retry edge is feature-gated behind the deployment kill-switch
-(`auto_retry_enabled`, default OFF) AND the tenant's own `auto_retry_enabled`:
-until a post-call form-filling mechanism exists, completion never improves
-between calls, so a retry would redial to no benefit — everything goes to
-EXCEPTION_REVIEW.
+(`auto_retry_enabled`, default OFF) AND the tenant's own `auto_retry_enabled`.
 
 DB seam faked exactly like `test_worker_events.py`: `tenant_session` is
-monkeypatched to a `_FakeSession` routed by target entity.
+monkeypatched to a `_FakeSession` routed by target entity. `load_verified_fraction`
+is a separate seam (it runs its own SchemaVersion query `_FakeSession` doesn't route)
+— the autouse fixture below defaults it to `None` so the existing fixtures, which
+build a bare form/tenant with no schema, keep exercising the `completion_pct`
+fallback undisturbed; the two verified-fraction tests override it.
 """
 
 from typing import Any, cast
@@ -94,6 +95,19 @@ class _SpyAudit:
 def _wire(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> _SpyAudit:
     monkeypatch.setattr(post_call, "tenant_session", lambda sm, tid: _FakeSessionCtx(session))
     return _SpyAudit()
+
+
+@pytest.fixture(autouse=True)
+def _default_verified_fraction_to_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`load_verified_fraction` runs its own SchemaVersion query that `_FakeSession` does not
+    route, so every test must patch it. Default to `None` (the legacy-schema fallback) so the
+    existing fixtures — a bare form/tenant with no schema — keep exercising `completion_pct`
+    unchanged; the two verified-fraction tests below override this."""
+
+    async def _none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(post_call, "load_verified_fraction", _none)
 
 
 def _tenant(tenant_id: UUID, **overrides: Any) -> Tenant:
@@ -397,3 +411,64 @@ async def test_sweep_with_no_stuck_forms_resolves_nothing(
 
     assert await sweep_stuck_ai_processing(_SM, audit, uuid4(), grace_s=300) == 0
     assert audit.records == []
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_gate_reads_the_verified_fraction_not_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec S3/S4: a call can read completion 100% and verified 0%. The fallback path must
+    decide on the same number the eval path does, or which consumer closed the call decides
+    whether the payer is redialled."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=100.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        tenant=_tenant(
+            tenant_id, retry_fill_threshold=0.80, auto_retry_enabled=True, max_retries=5
+        ),
+    )
+    audit = _wire(monkeypatch, session)
+
+    async def _zero(*_args: object, **_kwargs: object) -> float:
+        return 0.0
+
+    monkeypatch.setattr(post_call, "load_verified_fraction", _zero)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True, review_floor=70
+    )
+
+    assert requeued is True
+    assert form.status == FormStatus.IN_QUEUE.value
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_v1_form_falls_back_to_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None means 'authoritative is undefined here', not 'nothing verified'."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=100.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        tenant=_tenant(
+            tenant_id, retry_fill_threshold=0.80, auto_retry_enabled=True, max_retries=5
+        ),
+    )
+    audit = _wire(monkeypatch, session)
+
+    async def _none(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(post_call, "load_verified_fraction", _none)
+
+    requeued = await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True, review_floor=70
+    )
+
+    # completion 100 >= 80, so no low_fill and no redial — the v1 fallback still works.
+    assert requeued is False
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value

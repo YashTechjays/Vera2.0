@@ -5,12 +5,12 @@ extractable data for post-call validation — parks its form in AI_PROCESSING
 (`call_closeout.close_call`, in its own committed transaction). This module
 then decides the lifecycle's next system transition:
 
-- completion below the tenant's ``retry_fill_threshold`` and retries remaining
-  → auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
+- the verified fraction (``load_verified_fraction`` — required, applicable, collectable
+  leaves an AUTHORITATIVE call confirmed; ``completion_pct`` only as a legacy-schema
+  fallback) below the tenant's ``retry_fill_threshold`` and retries remaining →
+  auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
   feature-gated behind the deployment kill-switch (``settings.form_auto_retry_enabled``,
-  default OFF) AND the tenant's own ``auto_retry_enabled``, until a post-call
-  form-filling mechanism exists, since today nothing raises ``completion_pct``
-  between calls and a retry would redial to no benefit. NEVER taken for a
+  default OFF) AND the tenant's own ``auto_retry_enabled``. NEVER taken for a
   user-ended (CANCELED) call — the supervisor who ended it does not want the
   payer redialed;
 - otherwise → ``EXCEPTION_REVIEW`` for human review. ``COMPLETED`` is never set
@@ -18,7 +18,7 @@ then decides the lifecycle's next system transition:
 
 This is also the seam where post-call AI work (answer extraction from the
 transcript into ``form_answer`` rows, recomputing ``completion_pct``) will slot
-in; today the decision runs on the completion the form already carries.
+in; today the decision runs on the answers the form already carries.
 
 Idempotent: a form no longer in AI_PROCESSING is left untouched (redelivered
 ``call.ended`` events and sweeper/consumer races are harmless — the row lock
@@ -37,12 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera_core.audit import AuditRecord, AuditSink
 from vera_core.db.rls import tenant_session
+from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR
 from vera_core.models import Call, PatientForm, Tenant
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
 from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
+from vera_core.services.verification import load_verified_fraction
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +57,11 @@ async def resolve_ai_processing(
     trigger: str,
     actor_label: str = "agent-worker",
     auto_retry_enabled: bool = False,
+    review_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> bool:
     """Resolve *ref*'s form out of AI_PROCESSING. Returns True when the form was
     auto-requeued for a retry call (a dispatch pass should follow either way —
-    leaving AI_PROCESSING frees a concurrency slot). The low-completion
+    leaving AI_PROCESSING frees a concurrency slot). The low-fill
     auto-retry edge only runs when feature-gated behind the deployment
     kill-switch (*auto_retry_enabled*, settings ``form_auto_retry_enabled``,
     default off) AND the tenant's own ``auto_retry_enabled`` — otherwise every
@@ -89,8 +92,17 @@ async def resolve_ai_processing(
         # A supervisor-ended or rule-terminated call never auto-retries, whatever the
         # fill — the shared never-redial policy (call_lifecycle.no_retry_reason).
         no_retry = no_retry_reason(call)
-        # completion_pct is 0-100; retry_fill_threshold is a 0-1 fraction.
-        low_fill = float(form.completion_pct) < float(tenant.retry_fill_threshold) * 100
+        # ONE gate, ONE number: the eval path compares the verified fraction against this same
+        # threshold (post_call_eval), so reading completion_pct here made the decision depend on
+        # which consumer closed the call. Computed fresh — the stored verified_pct column is a
+        # display value that `recompute_form_projection` deliberately does not maintain.
+        threshold = float(tenant.retry_fill_threshold)
+        fraction = await load_verified_fraction(session, form, floor=review_floor)
+        low_fill = (
+            fraction < threshold
+            if fraction is not None
+            else float(form.completion_pct) < threshold * 100
+        )
         if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and no_retry is None:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
@@ -137,6 +149,7 @@ async def sweep_stuck_ai_processing(
     *,
     grace_s: int,
     auto_retry_enabled: bool = False,
+    review_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
     """Resolve forms stranded in AI_PROCESSING (a crash between closeout and
     resolution) whose call ended more than *grace_s* ago. Both AI_PROCESSING
@@ -173,6 +186,7 @@ async def sweep_stuck_ai_processing(
             trigger="sweeper_ai_processing",
             actor_label="pipeline-sweeper",
             auto_retry_enabled=auto_retry_enabled,
+            review_floor=review_floor,
         )
         resolved += 1
         logger.info("post-call sweep: resolved stuck AI_PROCESSING form for call %s", call_id)

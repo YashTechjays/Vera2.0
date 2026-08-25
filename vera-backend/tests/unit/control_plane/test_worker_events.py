@@ -299,6 +299,15 @@ def _consumer(
     monkeypatch.setattr(transcript_finalizer, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(post_call, "tenant_session", _fake_tenant_session)
 
+    async def _fake_load_verified_fraction(*_a: object, **_kw: object) -> None:
+        # `resolve_ai_processing` now calls this unconditionally; it runs its own
+        # SchemaVersion query that `_FakeSession` doesn't route (no test here seeds a
+        # schema). Default to the legacy fallback (None) so every existing test keeps
+        # exercising completion_pct, exactly as before this seam existed.
+        return None
+
+    monkeypatch.setattr(post_call, "load_verified_fraction", _fake_load_verified_fraction)
+
     async def _fake_run_dispatch_pass(
         sessionmaker: Any,
         tenant_id: Any,

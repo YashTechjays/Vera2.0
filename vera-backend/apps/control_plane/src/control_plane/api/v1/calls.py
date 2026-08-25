@@ -841,7 +841,12 @@ async def end_call(
             # the normal post-call pipeline); resolve it to EXCEPTION_REVIEW
             # now — the resolver's canceled gate never auto-requeues.
             await resolve_ai_processing(
-                sessionmaker, audit, ref, trigger="user_end_call", actor_label=actor_label
+                sessionmaker,
+                audit,
+                ref,
+                trigger="user_end_call",
+                actor_label=actor_label,
+                review_floor=settings.post_call_review_floor,
             )
             await run_dispatch_pass(
                 sessionmaker,

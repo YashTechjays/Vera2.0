@@ -835,6 +835,7 @@ class WorkerEventConsumer:
                         ref,
                         trigger=trigger,
                         auto_retry_enabled=self._form_auto_retry_enabled,
+                        review_floor=self._review_floor,
                     )
             await run_dispatch_pass(
                 self._sessionmaker,
