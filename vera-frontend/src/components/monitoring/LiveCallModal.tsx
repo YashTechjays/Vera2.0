@@ -60,19 +60,25 @@ function FormPanel({
   formId,
   progress,
   verified,
+  callEnded,
   onExpand,
 }: {
   formId: string | undefined
   progress: number
   verified: number | null
+  callEnded: boolean
   onExpand: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const { loadFormById, formId: loadedFormId, loading, error, schema } = useIbv()
+  const { loadFormById, formId: loadedFormId, loading, error, schema, dirty } = useIbv()
 
   function toggleExpanded() {
-    // Skip when already loaded: a refetch would wipe live answers applied so far and any edit.
-    if (!expanded && formId && formId !== loadedFormId) loadFormById(formId)
+    // Skip when already loaded: a refetch would wipe live answers applied so far and
+    // any edit. But once the call has ENDED, the cached in-call snapshot is stale —
+    // post-call processing moves the form's status on (VR2-295) — so refetch then,
+    // unless the reviewer has unsaved edits.
+    const stale = callEnded && !dirty
+    if (!expanded && formId && (formId !== loadedFormId || stale)) loadFormById(formId)
     setExpanded((v) => !v)
   }
 
@@ -201,14 +207,17 @@ export function LiveCallModal({
   // Prefer the live SSE score; fall back to the polled list value until the first envelope.
   const healthScore = liveHealth?.score ?? call?.healthScore ?? null
 
-  const { startedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } = useCallStatus(
-    call?.id,
-  )
+  const { startedAtMs, endedAtMs, callEnded: sseEnded, terminalStatus, onCallStatus } =
+    useCallStatus(call?.id)
+  // A call that ended before the modal opened has no SSE terminal event yet — the polled
+  // ended_at freezes the timer until the stream replay delivers the exact ts (VR2-213).
+  const endedMs = endedAtMs ?? (call?.endedAt ? Date.parse(call.endedAt) : null)
   const duration = useLiveDuration({
     open,
-    ended: sseEnded,
+    ended: sseEnded || endedMs != null,
     sseMs: startedAtMs,
     startedAt: call?.startedAt,
+    endedMs,
   })
   // SSE is the sole source of truth for "call ended"; a room "ended" phase is the
   // supervisor's own connection dropping (LiveCallRoom shows a connection-lost state).
@@ -390,6 +399,9 @@ export function LiveCallModal({
               formId={call?.formId}
               progress={progress}
               verified={verified}
+              // category covers a call that ended BEFORE the modal opened — the SSE
+              // terminal frame only arrives once the stream replay catches up.
+              callEnded={callEnded || call?.category === "completed"}
               onExpand={onExpand}
             />
 
@@ -455,7 +467,10 @@ export function LiveCallModal({
                   key={`${call.id}:${mode}`}
                   callId={call.id}
                   mode={mode}
-                  ended={sseEnded}
+                  // category covers rows that ended before the modal opened: the SSE
+                  // terminal frame lags, and the join-token it would fetch meanwhile
+                  // 404s for non-owners (join-token keeps the live rule — VR2-177).
+                  ended={sseEnded || call?.category === "completed"}
                   endedStatus={terminalStatus}
                   onStatus={setRoomStatus}
                   onJoinFailed={handleJoinFailed}

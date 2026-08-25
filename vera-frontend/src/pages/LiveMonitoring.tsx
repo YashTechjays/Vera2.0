@@ -122,7 +122,7 @@ function CallHealthCell({ call, now }: { call: CallSummary; now: number }) {
 }
 
 export function LiveMonitoring() {
-  const { openFormById, openLoadedForm, formId: loadedFormId } = useIbv()
+  const { openFormById, openLoadedForm, formId: loadedFormId, dirty } = useIbv()
   const canPublish = usePermission("calls:publish")
   const location = useLocation()
   const navigate = useNavigate()
@@ -462,8 +462,12 @@ export function LiveMonitoring() {
         onOpenChange={setOverviewOpen}
         onExpand={() => {
           if (!selected) return
-          // Refetching a form the inline panel already has would drop its live answers and edits.
-          if (selected.form_id === loadedFormId) openLoadedForm()
+          // Refetching a form the inline panel already has would drop its live answers
+          // and edits — but once the call has ended, the cached snapshot's status is
+          // stale (VR2-295), so refetch then unless there are unsaved edits.
+          const ended =
+            categoryOf(selected.status) === "completed" || endedBySse.current.has(selected.id)
+          if (selected.form_id === loadedFormId && !(ended && !dirty)) openLoadedForm()
           else openFormById(selected.form_id)
         }}
         onCallEnded={markEnded}

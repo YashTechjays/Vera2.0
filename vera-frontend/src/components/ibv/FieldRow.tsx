@@ -1,9 +1,15 @@
 import { cn } from "@/lib/utils"
 import { useIbv } from "./IbvProvider"
 import { FieldRenderer } from "./FieldRenderer"
-import { CompactDisputeControls, InlineDisputeControls } from "./DisputeControls"
-import { confidenceHighlightClass, fieldConfidenceLevel } from "@/lib/ibv/disputes"
+import { DisputeStrip } from "./DisputeControls"
+import {
+  confidenceHighlightClass,
+  fieldConfidenceLevel,
+  unresolvedDispute,
+} from "@/lib/ibv/disputes"
+import { VALUE_CAP_CLASS } from "@/lib/ibv/layout"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
+import { invalidSeverity } from "@/lib/ibv/validation"
 import { phonePaths } from "@/lib/ibv/phone"
 import { warningPillClass } from "@/lib/patient-forms/display"
 import { USAGE_META } from "./usageMeta"
@@ -15,9 +21,9 @@ type Props = {
   depth: number
   /** applicable_when chain from the section down to this leaf */
   gates: Condition[]
-  /** narrow layout (the 420px rail): controls + badge overflow the narrow input,
-   *  so the badge folds into the tooltip */
-  compact?: boolean
+  /** cap the value cell's width (table-section leaves span the whole matrix width
+   *  otherwise — VR2-162); the leftover space renders as an inert filler */
+  capValue?: boolean
 }
 
 /**
@@ -26,12 +32,13 @@ type Props = {
  * Inapplicable rows (own or ancestor `applicable_when` false) gray out and show
  * the field's `inapplicable_value`.
  */
-export function FieldRow({ field, path, depth, gates, compact }: Props) {
+export function FieldRow({ field, path, depth, gates, capValue }: Props) {
   const {
     schema,
     values,
     setValue,
     errors,
+    mode,
     disputeFor,
     flagsFor,
     applyDispute,
@@ -51,16 +58,16 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
+  // VR2-206 (reopened): in create mode the message must be VISIBLE at the field —
+  // the red ring + hover tooltip alone read as a generic error.
+  const inlineError = mode === "create" ? invalidReason : undefined
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
-  // Drawn even on a gate-failed (grayed) field: the backend still counts its dispute
-  // against completion, so hiding the controls would block the form invisibly (VR2-166).
-  const showDispute = !!dispute && !flags.applied
-  const highlightClass = showDispute
+  const openDispute = unresolvedDispute(dispute, flags)
+  const highlightClass = openDispute
     ? confidenceHighlightClass(fieldConfidenceLevel(confidence))
     : undefined
-  const disputeGutter = compact ? "50px" : "150px"
 
   return (
     <div className="flex min-h-[26px]" data-field-path={path}>
@@ -90,45 +97,69 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
         )}
       </div>
 
-      <div className="relative flex min-w-0 flex-1 items-stretch">
-        <FieldRenderer
-          field={field}
-          path={path}
-          value={value}
-          onChange={(v) => setValue(path, v)}
-          disabled={!applicable}
-          placeholder={!applicable ? field.inapplicable_value : undefined}
-          title={disabledReason ?? invalidReason}
-          invalid={!!invalidReason}
-          highlightClass={highlightClass}
-          inputPaddingRight={showDispute ? disputeGutter : undefined}
-          noRightBorder
-          countrySelect={schema !== null && phonePaths(schema).has(path)}
-        />
-        {showDispute &&
-          (compact ? (
-            <CompactDisputeControls
-              dispute={dispute!}
+      <div className="flex min-w-0 flex-1 items-stretch">
+        <div
+          className={cn(
+            "flex min-w-0 flex-col",
+            // A disputed capped row keeps the CONTROL at 420px (below) but lets the
+            // tinted cell span the full row — a capped tint next to the filler read
+            // as a half-filled cell (VR2-162).
+            capValue && !openDispute ? VALUE_CAP_CLASS : "flex-1",
+            // Stacked (disputed) cells carry the cell chrome themselves so the value
+            // line and the dispute strip below it read as ONE cell.
+            openDispute && [
+              "border-b border-ibv-input-border",
+              highlightClass ?? "bg-ibv-input-bg",
+              // One common style for the ENTIRE cell while editing — no white patch
+              // inside a tinted cell (VR2-162).
+              "focus-within:bg-white",
+            ]
+          )}
+        >
+          {/* flex-1 + items-stretch: the input fills the row even when the label cell is
+              taller, so no sliver of the white section bg shows around it (VR2-162). */}
+          <div
+            className={cn(
+              "flex min-w-0 flex-1 items-stretch",
+              capValue && VALUE_CAP_CLASS
+            )}
+          >
+            <FieldRenderer
+              field={field}
+              path={path}
+              value={value}
+              onChange={(v) => setValue(path, v)}
+              disabled={!applicable}
+              placeholder={!applicable ? field.inapplicable_value : undefined}
+              title={disabledReason ?? invalidReason}
+              invalid={invalidSeverity(invalidReason, value)}
+              highlightClass={openDispute ? "bg-transparent" : highlightClass}
+              disputeTinted={openDispute !== null}
+              borderless={openDispute !== null}
+              noRightBorder={!capValue}
+              countrySelect={schema !== null && phonePaths(schema).has(path)}
+            />
+          </div>
+          {inlineError && (
+            <p className="border-b border-ibv-input-border bg-ibv-input-bg px-1 pb-1 pt-0.5 font-ibv text-[11px] leading-tight text-[#b91c1c]">
+              {inlineError}
+            </p>
+          )}
+          {openDispute && (
+            <DisputeStrip
+              dispute={openDispute}
               confidence={confidence}
               provenance={provenance}
               flags={flags}
-              className="top-1/2 right-1 -translate-y-1/2"
               canSwap={applicable}
               onSwap={() => swapDispute(path)}
               onApply={() => applyDispute(path)}
             />
-          ) : (
-            <InlineDisputeControls
-              dispute={dispute!}
-              confidence={confidence}
-              provenance={provenance}
-              flags={flags}
-              className="top-1/2 right-1.5 -translate-y-1/2"
-              canSwap={applicable}
-              onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
-            />
-          ))}
+          )}
+        </div>
+        {capValue && !openDispute && (
+          <div className="flex-1 border-b border-ibv-input-border bg-ibv-label-bg/40" />
+        )}
       </div>
     </div>
   )

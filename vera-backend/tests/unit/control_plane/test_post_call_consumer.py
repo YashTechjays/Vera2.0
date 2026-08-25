@@ -13,8 +13,10 @@ from control_plane.post_call_consumer import PostCallConsumer, build_turns
 from tests.conftest import FakeTraceLinkRedis
 from vera_core.events import PostCallJob
 from vera_core.integrations.llm import TranscriptTurn
+from vera_core.models.enums import FormStatus
 from vera_core.observability import TraceLinkStore, room_name_for_call
 from vera_core.observability.trace_link import current_traceparent
+from vera_core.services.post_call_eval import EvalOutcome
 
 
 @pytest.mark.asyncio
@@ -33,6 +35,97 @@ async def test_build_turns_enumerates_snapshot(monkeypatch: pytest.MonkeyPatch) 
     turns = await build_turns(None, None, uuid4(), uuid4())  # type: ignore[arg-type]
 
     assert turns == [TranscriptTurn(0, "user", "hello"), TranscriptTurn(1, "agent", "in network")]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pass_runs_after_the_eval_session_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """evaluate_call no longer dispatches — the consumer does, once its transaction
+    has committed. Dispatching from inside it would place calls whose Call rows the
+    worker-event consumer cannot see yet."""
+    order: list[str] = []
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            order.append("session-open")
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            order.append("session-commit")
+
+    async def fake_build_turns(*_args: Any, **_kwargs: Any) -> list[TranscriptTurn]:
+        return []
+
+    async def fake_evaluate_call(*_args: Any, **_kwargs: Any) -> EvalOutcome:
+        order.append("evaluate")
+        return EvalOutcome(status=FormStatus.EXCEPTION_REVIEW, answers_written=0)
+
+    async def fake_run_dispatch_pass(*_args: Any, **_kwargs: Any) -> None:
+        order.append("dispatch")
+
+    monkeypatch.setattr(post_call_consumer, "build_turns", fake_build_turns)
+    monkeypatch.setattr(post_call_consumer, "tenant_session", lambda sm, tid: _Session())
+    monkeypatch.setattr(post_call_consumer, "evaluate_call", fake_evaluate_call)
+    monkeypatch.setattr(post_call_consumer, "run_dispatch_pass", fake_run_dispatch_pass)
+
+    consumer = PostCallConsumer(
+        redis=None,  # type: ignore[arg-type]
+        sessionmaker=None,  # type: ignore[arg-type]
+        call_stream=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        audit=None,  # type: ignore[arg-type]
+        livekit=object(),
+    )
+    job = PostCallJob(tenant_id=uuid4(), form_id=uuid4(), call_id=uuid4())
+
+    await consumer._process_job(job)
+
+    assert order == ["session-open", "evaluate", "session-commit", "dispatch"]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_job_does_not_run_a_dispatch_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stale-job branches return without touching the form, so no slot was freed.
+    A pass there would take the per-tenant advisory lock and serialize a real one behind
+    a job that decided nothing."""
+    dispatched: list[object] = []
+
+    class _Session:
+        async def __aenter__(self) -> "_Session":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    async def fake_build_turns(*_args: Any, **_kwargs: Any) -> list[TranscriptTurn]:
+        return []
+
+    async def fake_evaluate_call(*_args: Any, **_kwargs: Any) -> EvalOutcome:
+        return EvalOutcome(status=FormStatus.AI_PROCESSING, answers_written=0, transitioned=False)
+
+    async def fake_run_dispatch_pass(*_args: Any, **_kwargs: Any) -> None:
+        dispatched.append(object())
+
+    monkeypatch.setattr(post_call_consumer, "build_turns", fake_build_turns)
+    monkeypatch.setattr(post_call_consumer, "tenant_session", lambda sm, tid: _Session())
+    monkeypatch.setattr(post_call_consumer, "evaluate_call", fake_evaluate_call)
+    monkeypatch.setattr(post_call_consumer, "run_dispatch_pass", fake_run_dispatch_pass)
+
+    consumer = PostCallConsumer(
+        redis=None,  # type: ignore[arg-type]
+        sessionmaker=None,  # type: ignore[arg-type]
+        call_stream=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        audit=None,  # type: ignore[arg-type]
+        livekit=object(),
+    )
+
+    await consumer._process_job(PostCallJob(tenant_id=uuid4(), form_id=uuid4(), call_id=uuid4()))
+
+    assert dispatched == []
 
 
 class TestPostCallEvalTraceJoin:
@@ -80,12 +173,19 @@ def _consumer(monkeypatch: pytest.MonkeyPatch, *, trace_links: TraceLinkStore) -
 
     async def _evaluate(*_args: Any, **_kwargs: Any) -> Any:
         return SimpleNamespace(
-            status=SimpleNamespace(value="done"), answers_written=0, reviewed_fields=[]
+            status=SimpleNamespace(value="done"),
+            answers_written=0,
+            reviewed_fields=[],
+            transitioned=True,
         )
+
+    async def _no_dispatch(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
     monkeypatch.setattr(post_call_consumer, "build_turns", _no_turns)
     monkeypatch.setattr(post_call_consumer, "tenant_session", _session)
     monkeypatch.setattr(post_call_consumer, "evaluate_call", _evaluate)
+    monkeypatch.setattr(post_call_consumer, "run_dispatch_pass", _no_dispatch)
     return PostCallConsumer(
         redis=None,  # type: ignore[arg-type]
         sessionmaker=None,  # type: ignore[arg-type]

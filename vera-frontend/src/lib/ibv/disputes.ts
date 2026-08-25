@@ -37,6 +37,15 @@ export function defaultFlags(): DisputeFlags {
   return { applied: false, swapped: false }
 }
 
+/** The dispute a cell still draws UI for — gate-failed cells included: the backend
+ *  still counts their disputes against completion (VR2-166). */
+export function unresolvedDispute(
+  dispute: Dispute | undefined,
+  flags: DisputeFlags
+): Dispute | null {
+  return dispute !== undefined && !flags.applied ? dispute : null
+}
+
 /** The value currently "primary" for the field (what Apply would commit). */
 export function activeDisputeValue(d: Dispute, f: DisputeFlags): string {
   return f.swapped ? d.previousValue : d.currentValue
@@ -168,18 +177,20 @@ export function confidenceLabel(c: FieldConfidence): string {
  * confidence. smart-caller-fe palette on the confidenceLevel bands: ≥95 green,
  * 85–94 yellow, 75–84 amber, <75 red; unknown → base navy. 1px border + 2px ring.
  */
+// Inset ring, never `border` or an outer glow: both draw outside the grid line and
+// leave a visible gap between the label column and the highlighted cell (VR2-162).
 export function confidenceHighlightClass(level: ConfidenceLevel): string {
   switch (level) {
     case "high":
-      return "border border-[#10b981] bg-[#F0FDF4] shadow-[0_0_0_2px_rgba(16,185,129,0.2)]"
+      return "bg-[#F0FDF4] shadow-[inset_0_0_0_1px_#10b981]"
     case "medium":
-      return "border border-[#eab308] bg-[#FEFCE8] shadow-[0_0_0_2px_rgba(234,179,8,0.2)]"
+      return "bg-[#FEFCE8] shadow-[inset_0_0_0_1px_#eab308]"
     case "low":
-      return "border border-[#f59e0b] bg-[#FFFBEB] shadow-[0_0_0_2px_rgba(245,158,11,0.2)]"
+      return "bg-[#FFFBEB] shadow-[inset_0_0_0_1px_#f59e0b]"
     case "very-low":
-      return "border border-[#ef4444] bg-[#FEF2F2] shadow-[0_0_0_2px_rgba(239,68,68,0.2)]"
+      return "bg-[#FEF2F2] shadow-[inset_0_0_0_1px_#ef4444]"
     default:
-      return "border border-[#003e64] bg-[#EFF6FF] shadow-[0_0_0_2px_rgba(25,88,247,0.2)]"
+      return "bg-[#EFF6FF] shadow-[inset_0_0_0_1px_#003e64]"
   }
 }
 

@@ -1,6 +1,10 @@
-"""Post-call eval: judge the Observer's live ai_call answers for the finished
-call, extract only the still-missing collection paths from the transcript
-(top-up), judge those too, and decide the form's terminal status. Pure helpers
+"""Post-call eval: resolve each answer's transcript evidence, judge the Observer's live
+ai_call answers for the finished call, extract only the still-missing collection paths
+from the transcript (top-up), judge those too, and decide the form's terminal status.
+
+This is the only place that holds both a form's answers and its call transcript, so it is
+where `field_answer.evidence` is filled: the live writer persists an `evidence_seq` pointer
+and nothing more (the worker is DB-less), and the judge's quote is best-effort. Pure helpers
 here; Redelivery safety comes from the status guard + single-transaction
 atomicity (a committed eval already left AI_PROCESSING; a rolled-back one left
 no partial state) — there is deliberately no answer-existence guard: the
@@ -32,7 +36,12 @@ from vera_core.forms.review import (
     unsatisfied_required_paths,
     unwrap_value,
 )
-from vera_core.integrations.llm import ExtractedField, LLMClient, TranscriptTurn
+from vera_core.integrations.llm import (
+    ExtractedField,
+    LLMClient,
+    PartialJudgeError,
+    TranscriptTurn,
+)
 from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.authoring import SchemaVersion
 from vera_core.models.call import Call
@@ -43,7 +52,6 @@ from vera_core.models.tenant import Tenant
 from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
-from vera_core.services.queue_dispatcher import try_dispatch
 
 logger = logging.getLogger("vera_core.services.post_call_eval")
 
@@ -62,6 +70,8 @@ def has_phi_token(value: str) -> bool:
 
 
 def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str | None:
+    """Text at `evidence_seq`; None when unanchored or out of snapshot (`evidence_seq` and the
+    snapshot index share one numbering — tests/unit/test_evidence_seq_parity.py)."""
     if evidence_seq is not None and 0 <= evidence_seq < len(turns):
         return turns[evidence_seq].text
     return None
@@ -76,6 +86,10 @@ def evidence_text(turns: list[TranscriptTurn], evidence_seq: int | None) -> str 
 class EvalDeps:
     llm: LLMClient
     audit: AuditSink
+    # Unread by evaluate_call since dispatching moved to PostCallConsumer._process_job;
+    # they stay only because that consumer reads them back off here to run the pass.
+    # Dropping them is a follow-up, not this change — every test in this file constructs
+    # them, so removing the fields turns each new one on dev into a merge break.
     livekit: Any
     kms: Any = None
     recording: Any = None
@@ -93,6 +107,8 @@ class EvalOutcome:
     status: FormStatus
     answers_written: int
     reviewed_fields: list[str] = field(default_factory=list)
+    # False on the stale-job branches, which return without touching the form.
+    transitioned: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +145,12 @@ async def evaluate_call(
     call_id: UUID,
     turns: list[TranscriptTurn],
 ) -> EvalOutcome:
-    """Extract, persist, judge, update status, and dispatch.
+    """Extract, persist, judge, and update status.
 
     Runs inside a caller-provided tenant-scoped session. Idempotent on redelivery.
+    Dispatching the freed concurrency slot is the CALLER's job, after this session
+    commits (see PostCallConsumer._process_job) — a pass that dials from inside this
+    transaction would place calls whose rows no consumer can yet see.
     """
     form: PatientForm = (
         await session.execute(
@@ -149,7 +168,7 @@ async def evaluate_call(
             form_id,
             form.status,
         )
-        return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+        return EvalOutcome(status=FormStatus(form.status), answers_written=0, transitioned=False)
 
     tenant: Tenant = (
         await session.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -191,7 +210,9 @@ async def evaluate_call(
                 call_id,
                 form_id,
             )
-            return EvalOutcome(status=FormStatus(form.status), answers_written=0)
+            return EvalOutcome(
+                status=FormStatus(form.status), answers_written=0, transitioned=False
+            )
     prev_status = form.status
     sm = FormStateMachine()
 
@@ -225,16 +246,6 @@ async def evaluate_call(
                 resource_id=str(form_id),
                 detail=detail,
             )
-        )
-        await try_dispatch(
-            session,
-            tenant_id,
-            deps.livekit,
-            deps.kms,
-            audit=deps.audit,
-            recording=deps.recording,
-            plan_service=deps.plan_service,
-            retry_floor=deps.floor,
         )
         return EvalOutcome(status=target, answers_written=written, reviewed_fields=reviewed)
 
@@ -298,6 +309,12 @@ async def evaluate_call(
         for row in current_rows
         if row.call_id == call_id and row.source == AnswerSource.AI_CALL.value
     ]
+    # (4a-i) Resolve each Observer answer's anchor into its transcript text (see the module
+    # docstring). Unset rows only: the top-up writer below fills its own, and a re-run must
+    # not rewrite a stored quote.
+    for _, row in observer_pairs:
+        if row.evidence is None:
+            row.evidence = evidence_text(turns, row.evidence_seq)
 
     # (4b) Top-up extraction: only paths with no current answer AT ALL — an
     # intake / human / prior-attempt answer is not missing, and the LLM must
@@ -306,6 +323,7 @@ async def evaluate_call(
     missing = [p for p in paths if p not in answered]
     extracted: list[ExtractedField] = []
     extract_failed = False
+    judge_incomplete = False
     literals = leaf_literals(doc)
     if missing:
         try:
@@ -316,12 +334,12 @@ async def evaluate_call(
             # Do NOT return yet: the Observer's answers below still deserve their
             # judge pass — forfeiting it would reproduce the "answers but no
             # verdicts" stranding this module exists to prevent.
+            # Type only, never `exc`: a provider error can embed the transcript it was sent.
             logger.error(
                 "post_call_eval: LLM extract failed for form %s — routing to "
-                "EXCEPTION_REVIEW after judging observer answers (%s: %s)",
+                "EXCEPTION_REVIEW after judging observer answers (%s)",
                 form_id,
                 type(exc).__name__,
-                exc,
             )
             extract_failed = True
     # Keep only what was asked for: a hallucinated path must not supersede an
@@ -372,13 +390,20 @@ async def evaluate_call(
     if to_judge:
         try:
             raw_verdicts = await deps.llm.judge(extracted=[ef for ef, _ in to_judge], turns=turns)
+        except PartialJudgeError as exc:
+            raw_verdicts, judge_incomplete = exc.verdicts, True
+            logger.error(
+                "post_call_eval: judge coverage incomplete for form %s — persisting %d of "
+                "%d verdict(s), then routing to EXCEPTION_REVIEW",
+                form_id,
+                len(raw_verdicts),
+                len(to_judge),
+            )
         except Exception as exc:
             logger.error(
-                "post_call_eval: LLM judge failed for form %s — routing to "
-                "EXCEPTION_REVIEW (%s: %s)",
+                "post_call_eval: LLM judge failed for form %s — routing to EXCEPTION_REVIEW (%s)",
                 form_id,
                 type(exc).__name__,
-                exc,
             )
             return await _finish(
                 FormStatus.EXCEPTION_REVIEW,
@@ -432,9 +457,10 @@ async def evaluate_call(
                 )
         await session.flush()
 
-    # (6b) A failed top-up extraction routes to review only AFTER the observer
-    # answers were judged above — their verdicts are persisted either way.
-    if extract_failed:
+    # (6b) A failed top-up extraction, or a judge pass that could not cover every answer,
+    # routes to review only AFTER the observer answers were judged above — their verdicts
+    # and the salvaged ones are persisted either way.
+    if extract_failed or judge_incomplete:
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,
             written=len(kept),
@@ -488,7 +514,7 @@ async def evaluate_call(
             call_id,
         )
 
-    # (9-12) Decide status, transition, audit, dispatch.
+    # (9-12) Decide status, transition, audit.
     if token_fields:
         return await _finish(
             FormStatus.EXCEPTION_REVIEW,

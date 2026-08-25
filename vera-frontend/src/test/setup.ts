@@ -20,3 +20,14 @@ if (!("ResizeObserver" in globalThis)) {
     disconnect() {}
   } as unknown as typeof ResizeObserver
 }
+
+// Radix Select's open/close pointer handling and item scrolling touch two more
+// APIs jsdom lacks — same never-fires-in-jsdom reasoning as ResizeObserver above.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false
+  Element.prototype.setPointerCapture = () => {}
+  Element.prototype.releasePointerCapture = () => {}
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}

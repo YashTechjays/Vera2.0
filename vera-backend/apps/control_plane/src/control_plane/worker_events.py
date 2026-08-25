@@ -97,11 +97,14 @@ _FAILURE_STATUS: dict[CallFailureReason, CallStatus] = {
 
 
 class _RetryEventLater(Exception):
-    """Control flow: a canonical-room event arrived before its Call row committed
-    (the dispatcher dials inside the dispatch transaction). Leave the entry
-    UNACKED so XAUTOCLAIM redelivers it after reclaim_idle_ms — by then the row
-    is committed. Events older than _NO_ROW_RETRY_WINDOW_S with still no row are
-    genuine voice-lab rooms and are dropped normally."""
+    """Control flow: a canonical-room event arrived before its Call row committed.
+    Leave the entry UNACKED so XAUTOCLAIM redelivers it after reclaim_idle_ms — by
+    then the row is committed. Events older than _NO_ROW_RETRY_WINDOW_S with still no
+    row are genuine voice-lab rooms and are dropped normally.
+
+    The dispatcher no longer dials inside its transaction (it stages and commits
+    first), so the SIP path should not reach here; browser-callee rooms still can,
+    because their agent dispatch happens while the staging transaction is open."""
 
 
 _NO_ROW_RETRY_WINDOW_S = 120.0
@@ -141,9 +144,9 @@ def _stream_id_key(stream_id: str) -> tuple[int, int]:
 
 def _retry_young_or_drop(room_name: str, ts_ms: int) -> None:
     """A canonical-room event whose Call row isn't there yet: retry if the event is
-    young (the dispatcher dials inside the dispatch transaction, so a fast answer/
-    failure/end can race the row's commit), else let the caller drop it as a genuine
-    voice-lab room. Raises `_RetryEventLater` in the retry case; returns otherwise."""
+    young (see `_RetryEventLater` for what can still race the commit), else let the
+    caller drop it as a genuine voice-lab room. Raises `_RetryEventLater` in the retry
+    case; returns otherwise."""
     if _event_is_young(ts_ms):
         raise _RetryEventLater(room_name)
 

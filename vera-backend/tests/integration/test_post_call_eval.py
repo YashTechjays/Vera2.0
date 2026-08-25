@@ -28,7 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from vera_core.audit import AuditRecord
 from vera_core.db import tenant_session, uuid7
 from vera_core.forms.dsl import PromotedFields
-from vera_core.integrations.llm import ExtractedField, FakeLLMClient, JudgeVerdict, TranscriptTurn
+from vera_core.integrations.llm import (
+    ExtractedField,
+    FakeLLMClient,
+    JudgeVerdict,
+    PartialJudgeError,
+    TranscriptTurn,
+)
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.call import Call
 from vera_core.models.enums import AnswerSource, CallStatus, FormStatus, InsuranceType, ReviewReason
@@ -150,6 +156,23 @@ class _SeedCtx:
         return (
             await self.session.execute(select(PatientForm).where(PatientForm.id == self.form_id))
         ).scalar_one()
+
+    async def current_ai_answers(self) -> dict[str, FieldAnswer]:
+        """The form's current ai_call answers, keyed by field_path."""
+        rows = (
+            (
+                await self.session.execute(
+                    select(FieldAnswer).where(
+                        FieldAnswer.form_id == self.form_id,
+                        FieldAnswer.is_current.is_(True),
+                        FieldAnswer.source == AnswerSource.AI_CALL.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {row.field_path: row for row in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +550,132 @@ async def test_nothing_missing_skips_extraction_and_judges_observer_answers(
     assert outcome.status == FormStatus.EXCEPTION_REVIEW
     form = await ctx.reload_form()
     assert form.review_reason == "ready_for_review"
+
+
+async def test_observer_answers_get_the_transcript_turn_their_anchor_points_at(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """Every Observer answer must end the eval carrying the turn its evidence_seq names.
+
+    The live writer can only persist the POINTER (the worker is DB-less), so before this
+    resolution an Observer answer's sole evidence was the judge's quote — and a field the
+    judge skipped showed a reviewer nothing at all. The judge here returns NO verdicts, so
+    the assertion can only pass on the resolution itself."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network", evidence_seq=1))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=3))
+    await ctx.session.flush()
+
+    turns = [
+        TranscriptTurn(0, "agent", "is the patient in network?"),
+        TranscriptTurn(1, "user", "yes, they are in network"),
+        TranscriptTurn(2, "agent", "any notes on the plan?"),
+        TranscriptTurn(3, "user", "no notes on file"),
+    ]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    by_path = await ctx.current_ai_answers()
+    assert by_path[ctx.collection_path].evidence == "yes, they are in network"
+    assert by_path[_NOTES_PATH].evidence == "no notes on file"
+
+
+async def test_an_answer_with_no_usable_anchor_keeps_null_evidence(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """No anchor (an alternatives auto-fill) and an anchor past the end of this call's
+    snapshot both leave evidence NULL — never a fabricated quote from turn 0."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network", evidence_seq=None))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=99))
+    await ctx.session.flush()
+
+    turns = [TranscriptTurn(0, "user", "yes in network, no notes")]
+    llm = FakeLLMClient(extracted=[], verdicts=[])
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    by_path = await ctx.current_ai_answers()
+    assert by_path[ctx.collection_path].evidence is None
+    assert by_path[_NOTES_PATH].evidence is None
+
+
+async def test_a_partial_judge_pass_persists_the_verdicts_it_salvaged(
+    seeded_ai_processing_form: _SeedCtx,
+    fake_audit: _FakeAuditSink,
+    fake_livekit: _FakeLiveKit,
+) -> None:
+    """A judge pass that failed to cover every field still routes the form to LLM_ERROR
+    review — but the verdicts it DID earn are written first. Discarding them cost every
+    judged answer its verdict (and its judge quote) over a failure in another chunk."""
+    ctx = seeded_ai_processing_form
+    ctx.session.add(_observer_answer(ctx, ctx.collection_path, "in-network", evidence_seq=1))
+    ctx.session.add(_observer_answer(ctx, _NOTES_PATH, "none", evidence_seq=1))
+    await ctx.session.flush()
+
+    turns = [
+        TranscriptTurn(0, "agent", "is the patient in network?"),
+        TranscriptTurn(1, "user", "yes, in network and no notes"),
+    ]
+    salvaged = [JudgeVerdict(ctx.collection_path, True, 88, "Agent: in network? Rep: yes")]
+    llm = FakeLLMClient(
+        extracted=[],
+        verdicts=[],
+        raise_on_judge=PartialJudgeError(salvaged, RuntimeError("chunk blew up")),
+    )
+    deps = EvalDeps(llm=llm, audit=fake_audit, livekit=fake_livekit)
+
+    outcome = await evaluate_call(
+        ctx.session,
+        deps,
+        tenant_id=ctx.tenant_id,
+        form_id=ctx.form_id,
+        call_id=ctx.call_id,
+        turns=turns,
+    )
+
+    assert outcome.status == FormStatus.EXCEPTION_REVIEW
+    form = await ctx.reload_form()
+    assert form.review_reason == ReviewReason.LLM_ERROR
+
+    by_path = await ctx.current_ai_answers()
+    evals = (
+        (
+            await ctx.session.execute(
+                select(FieldEvaluation).where(
+                    FieldEvaluation.answer_id.in_([row.id for row in by_path.values()])
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # The salvaged verdict survived the failure…
+    assert [e.answer_id for e in evals] == [by_path[ctx.collection_path].id]
+    assert evals[0].evidence == "Agent: in network? Rep: yes"
+    # …and the field the judge never reached still has transcript-anchored evidence.
+    assert by_path[_NOTES_PATH].evidence == "yes, in network and no notes"
 
 
 async def test_duplicate_extract_paths_dedupe_instead_of_poisoning(

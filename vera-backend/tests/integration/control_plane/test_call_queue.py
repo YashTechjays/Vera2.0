@@ -6,7 +6,8 @@ Runs against live RLS-enforcing Postgres with FakeLiveKit.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import time as dt_time
 from uuid import UUID
 
@@ -31,12 +32,12 @@ from tests.integration.control_plane.test_patient_forms_intake import (
 )
 from vera_core.config.kms import LocalDevKMS
 from vera_core.db import uuid7
-from vera_core.db.rls import tenant_session
-from vera_core.models import InsuranceProvider, PatientForm, Tenant
+from vera_core.models import Call, InsuranceProvider, PatientForm, Tenant
 from vera_core.models.authoring import FormSchema, SchemaVersion
 from vera_core.models.enums import FormStatus, InsuranceType
+from vera_core.observability.correlation import parse_room_name
 from vera_core.services import queue_dispatcher
-from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.services.queue_dispatcher import stage_and_dial
 from vera_core.telephony import LiveKitUnavailable
 
 _DIALABLE_PHONE = "+15551234567"
@@ -660,7 +661,7 @@ async def test_detail_exposes_ivr_toggle(
 
 
 # ---------------------------------------------------------------------------
-# Head-of-line blocking: the working-hours gate lives in try_dispatch's raw SQL
+# Head-of-line blocking: the working-hours gate lives in stage_dispatch's raw SQL
 # (the `provider_outside_hours` EXISTS subquery), where a quiet regression —
 # status string, name-join, NULL semantics — would silently strand every form
 # queued behind a closed provider. These tests run that SQL on real Postgres.
@@ -781,16 +782,15 @@ async def test_room_creation_failure_parks_without_spending_the_retry_budget(
     fake.room_error = LiveKitUnavailable("create_call_room failed", code="internal", status=500)
 
     async def _one_pass() -> None:
-        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
-            assert (
-                await try_dispatch(
-                    session,
-                    rbac_world.tenant_id,
-                    fake,
-                    LocalDevKMS(master_key=b"a" * 32),
-                    dial_pacing_s=0,
-                )
-            ) == 0
+        assert (
+            await stage_and_dial(
+                admin_sessionmaker,
+                rbac_world.tenant_id,
+                fake,
+                LocalDevKMS(master_key=b"a" * 32),
+                dial_pacing_s=0,
+            )
+        ) == 0
 
     async def _form_state() -> tuple[str, int]:
         async with admin_sessionmaker() as session:
@@ -847,26 +847,17 @@ async def test_closed_provider_head_does_not_block_dispatchable_form_behind_it(
             _requeue(closed_form_id, provider=_HOL_CLOSED_PROVIDER, minutes_ago=10)
         )
         await session.execute(_requeue(open_form_id, provider=_HOL_OPEN_PROVIDER, minutes_ago=5))
-        # One slot: if the closed form wins the fetch, nothing dials this pass.
-        old_max = (
-            await session.execute(
-                select(Tenant.max_concurrent_calls).where(Tenant.id == rbac_world.tenant_id)
-            )
-        ).scalar_one()
-        await session.execute(
-            update(Tenant).where(Tenant.id == rbac_world.tenant_id).values(max_concurrent_calls=1)
-        )
 
     fake = FakeLiveKit()
-    try:
-        async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
-            dispatched = await try_dispatch(
-                session,
-                rbac_world.tenant_id,
-                fake,
-                LocalDevKMS(master_key=b"a" * 32),
-                dial_pacing_s=0,
-            )
+    # One slot: if the closed form wins the fetch, nothing dials this pass.
+    async with _one_concurrency_slot(admin_sessionmaker, rbac_world.tenant_id):
+        dispatched = await stage_and_dial(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            fake,
+            LocalDevKMS(master_key=b"a" * 32),
+            dial_pacing_s=0,
+        )
         assert dispatched == 1
         assert [phone for _room, phone, _trunk in fake.sip_calls] == [_HOL_OPEN_PHONE]
 
@@ -883,13 +874,6 @@ async def test_closed_provider_head_does_not_block_dispatchable_form_behind_it(
         # The closed-provider form is skipped, not consumed: still queued for
         # a later pass inside its provider's window.
         assert statuses[closed_form_id] == FormStatus.IN_QUEUE.value
-    finally:
-        async with admin_sessionmaker() as session, session.begin():
-            await session.execute(
-                update(Tenant)
-                .where(Tenant.id == rbac_world.tenant_id)
-                .values(max_concurrent_calls=old_max)
-            )
 
 
 @pytest.mark.asyncio
@@ -916,16 +900,149 @@ async def test_open_provider_form_dispatches_through_the_sql_hours_gate(
         await session.execute(_requeue(open_form_id, provider=None, minutes_ago=5))
 
     fake = FakeLiveKit()
-    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as session:
-        dispatched = await try_dispatch(
-            session,
-            rbac_world.tenant_id,
-            fake,
-            LocalDevKMS(master_key=b"a" * 32),
-            dial_pacing_s=0,
-        )
+    dispatched = await stage_and_dial(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        fake,
+        LocalDevKMS(master_key=b"a" * 32),
+        dial_pacing_s=0,
+    )
     assert dispatched == 2
     assert sorted(phone for _room, phone, _trunk in fake.sip_calls) == [
         _HOL_CLOSED_PHONE,
         _HOL_OPEN_PHONE,
     ]
+
+
+class _DialHookLiveKit(FakeLiveKit):
+    """Runs *on_dial* with the room name at dial time, then dials as usual."""
+
+    def __init__(self, on_dial: Callable[[str], Awaitable[None]]) -> None:
+        super().__init__()
+        self._on_dial = on_dial
+
+    async def create_sip_participant(
+        self, room_name: str, phone_number: str, trunk_id: str
+    ) -> None:
+        await self._on_dial(room_name)
+        await super().create_sip_participant(room_name, phone_number, trunk_id)
+
+
+@asynccontextmanager
+async def _one_concurrency_slot(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: UUID
+) -> AsyncGenerator[None]:
+    """Clamp the tenant to a single call slot, restoring it however the body exits."""
+    async with sessionmaker() as session, session.begin():
+        old_max = (
+            await session.execute(select(Tenant.max_concurrent_calls).where(Tenant.id == tenant_id))
+        ).scalar_one()
+        await session.execute(
+            update(Tenant).where(Tenant.id == tenant_id).values(max_concurrent_calls=1)
+        )
+    try:
+        yield
+    finally:
+        async with sessionmaker() as session, session.begin():
+            await session.execute(
+                update(Tenant).where(Tenant.id == tenant_id).values(max_concurrent_calls=old_max)
+            )
+
+
+@pytest.mark.asyncio
+async def test_every_call_row_is_committed_before_its_own_dial(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_configured: None,
+    hol_form_ids: tuple[UUID, UUID],
+) -> None:
+    """Two parallel calls: NEITHER phone may ring before its Call row is committed.
+
+    The regression this guards is VR2's parallel-call status lag. When the pass
+    dialed inside its own transaction, the first-dialed call answered (a payer IVR
+    picks up in ~1s) while the pass was still staging the second form — so the
+    worker's `call.answered` found no row, parked unacked, and the call showed
+    `initiated` in live monitoring until XAUTOCLAIM redelivered it 60s later.
+    """
+    closed_form_id, open_form_id = hol_form_ids
+    # No provider names: both forms clear the working-hours EXISTS gate.
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(_requeue(closed_form_id, provider=None, minutes_ago=10))
+        await session.execute(_requeue(open_form_id, provider=None, minutes_ago=5))
+
+    row_visible_at_dial: list[bool] = []
+
+    async def _check_visibility(room_name: str) -> None:
+        call_id = parse_room_name(room_name).call_id  # type: ignore[union-attr]
+        async with admin_sessionmaker() as session:
+            found = (
+                await session.execute(select(Call.id).where(Call.id == call_id))
+            ).scalar_one_or_none()
+        row_visible_at_dial.append(found is not None)
+
+    fake = _DialHookLiveKit(_check_visibility)
+
+    dispatched = await stage_and_dial(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        fake,
+        LocalDevKMS(master_key=b"a" * 32),
+        dial_pacing_s=0,
+    )
+
+    assert dispatched == 2
+    assert row_visible_at_dial == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_a_pass_between_commit_and_dial_cannot_over_allocate_slots(
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    rbac_world: RBACWorld,
+    trunk_configured: None,
+    hol_form_ids: tuple[UUID, UUID],
+) -> None:
+    """The per-tenant advisory lock is transaction-scoped, so it now releases at the
+    staging commit rather than after the dials. That is safe only because the claimed
+    forms are already IN_CALL when it releases: a pass that squeezes into the gap
+    counts them in active_count and finds no free slot.
+    """
+    closed_form_id, open_form_id = hol_form_ids
+    async with admin_sessionmaker() as session, session.begin():
+        await session.execute(_requeue(closed_form_id, provider=None, minutes_ago=10))
+        await session.execute(_requeue(open_form_id, provider=None, minutes_ago=5))
+
+    reentrant: list[int] = []
+
+    async def _dispatch_again(_room_name: str) -> None:
+        reentrant.append(
+            await stage_and_dial(
+                admin_sessionmaker,
+                rbac_world.tenant_id,
+                FakeLiveKit(),
+                LocalDevKMS(master_key=b"a" * 32),
+                dial_pacing_s=0,
+            )
+        )
+
+    fake = _DialHookLiveKit(_dispatch_again)
+
+    async with _one_concurrency_slot(admin_sessionmaker, rbac_world.tenant_id):
+        dispatched = await stage_and_dial(
+            admin_sessionmaker,
+            rbac_world.tenant_id,
+            fake,
+            LocalDevKMS(master_key=b"a" * 32),
+            dial_pacing_s=0,
+        )
+        assert dispatched == 1
+        assert reentrant == [0]  # the one slot was already spoken for
+        async with admin_sessionmaker() as session:
+            in_call = (
+                await session.execute(
+                    select(PatientForm.id).where(
+                        PatientForm.id.in_([closed_form_id, open_form_id]),
+                        PatientForm.status == FormStatus.IN_CALL.value,
+                    )
+                )
+            ).scalars()
+        assert len(in_call.all()) == 1

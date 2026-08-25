@@ -1,9 +1,9 @@
 """Self-contained dispatch pass, run OUTSIDE any request transaction.
 
 The dispatcher makes external calls (LiveKit room + SIP dial) and sleeps between
-dials for carrier pacing — none of that may hold an HTTP request's transaction or
-row locks. Hosts: the status endpoint's post-commit detached task and the
-worker-event consumer (a call ended → a slot freed).
+dials for carrier pacing — none of that may run inside an HTTP request's transaction
+(each dial takes its own short-lived one). Hosts: the status endpoint's post-commit
+detached task and the worker-event consumer (a call ended → a slot freed).
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from vera_core.db.rls import tenant_session
 from vera_core.models import PatientForm
-from vera_core.services.queue_dispatcher import try_dispatch
+from vera_core.services.queue_dispatcher import stage_and_dial
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -98,13 +98,12 @@ async def run_dispatch_pass(
 ) -> None:
     """Await one dispatch pass, shielded from the caller's cancellation.
 
-    The pass dials INSIDE its DB transaction, so cancelling it mid-pass (the
-    consumer/sweeper tasks are cancelled on shutdown; a request handler can be
-    cancelled on client disconnect) would roll back already-dialed Call rows
-    while the SIP calls stay live — worker events would find no row and the
-    next pass would redial the same payer. The pass therefore runs as a
-    detached task in the shutdown-drained _PENDING set: the caller may be
-    cancelled, but the pass itself always runs to completion and commits."""
+    Cancelling a pass mid-flight (the consumer/sweeper tasks are cancelled on
+    shutdown; a request handler can be cancelled on client disconnect) would strand
+    committed INITIATED calls that never got their dial, and abandon live SIP legs
+    whose bookkeeping had not run yet. The pass therefore runs as a detached task in
+    the shutdown-drained _PENDING set: the caller may be cancelled, but the pass
+    itself always runs to completion."""
     task = asyncio.create_task(
         _dispatch_pass(
             sessionmaker,
@@ -134,7 +133,7 @@ async def _dispatch_pass(
     plan_service: "CallPlanService | None" = None,
     retry_floor: int | None = None,
 ) -> None:
-    """One dispatch pass in a fresh tenant-scoped session; commits on success.
+    """One dispatch pass (stage + commit, then dial) in fresh tenant-scoped sessions.
     Exception-safe: a failed pass logs and returns — queued forms are retried on
     the next triggering event."""
     try:
@@ -150,17 +149,16 @@ async def _dispatch_pass(
                     .where(PatientForm.id == wait_for_form_id)
                     .with_for_update()
                 )
-        async with tenant_session(sessionmaker, tenant_id) as session:
-            await try_dispatch(
-                session,
-                tenant_id,
-                livekit,
-                kms,
-                audit=audit,
-                recording=recording,
-                plan_service=plan_service,
-                **({} if retry_floor is None else {"retry_floor": retry_floor}),
-            )
+        await stage_and_dial(
+            sessionmaker,
+            tenant_id,
+            livekit,
+            kms,
+            audit=audit,
+            recording=recording,
+            plan_service=plan_service,
+            **({} if retry_floor is None else {"retry_floor": retry_floor}),
+        )
     except Exception as exc:
         # Type name only — SQLAlchemy statement errors embed the bound
         # parameters, and the pass touches patient_form rows (PHI).

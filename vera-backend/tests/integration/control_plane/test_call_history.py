@@ -209,11 +209,13 @@ async def test_recording_gate_owner_vs_non_owner(
     assert by_id[str(seeded.call_ids[0])] is True
     assert by_id[str(seeded.call_ids[1])] is True
     assert by_id[str(seeded.call_ids[2])] is False
-    # non-owner admin: only the published AVAILABLE call.
+    # non-owner: every call here is terminal, so its content is tenant-visible
+    # (VR2-177) — AVAILABLE recordings show regardless of owner/published.
     admin = (await _list(client, rbac_world.admin_token)).json()["data"]["items"]
     admin_by_id = {i["id"]: i["recording_available"] for i in admin}
-    assert admin_by_id[str(seeded.call_ids[0])] is False
+    assert admin_by_id[str(seeded.call_ids[0])] is True
     assert admin_by_id[str(seeded.call_ids[1])] is True
+    assert admin_by_id[str(seeded.call_ids[2])] is False
 
 
 @pytest.mark.asyncio

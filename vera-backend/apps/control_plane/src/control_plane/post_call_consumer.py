@@ -21,6 +21,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from control_plane.call_summary import snapshot_turns
+from control_plane.dispatch import run_dispatch_pass
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
 from vera_core.db.rls import tenant_session
@@ -216,6 +217,20 @@ class PostCallConsumer:
                 outcome.answers_written,
                 len(outcome.reviewed_fields),
             )
+        if not outcome.transitioned:
+            return  # stale job: the form was left untouched, so no slot was freed
+        # Outside the span above: that one joins the finished call's trace to attribute
+        # its eval cost, and dispatching the freed slot is work for the NEXT call.
+        await run_dispatch_pass(
+            self._sessionmaker,
+            job.tenant_id,
+            self._deps.livekit,
+            self._deps.kms,
+            self._deps.audit,
+            recording=self._deps.recording,
+            plan_service=self._deps.plan_service,
+            retry_floor=self._deps.floor,
+        )
 
     async def _ack(self, entry_id: str) -> None:
         await self._redis.xack(POST_CALL_STREAM, POST_CALL_GROUP, entry_id)

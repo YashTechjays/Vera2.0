@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 
-import { DisputeTooltipBody, InlineDisputeControls } from "./DisputeControls"
+import { DisputeStrip, DisputeTooltipBody } from "./DisputeControls"
 import { defaultFlags, resolveConfidence, type Dispute } from "@/lib/ibv/disputes"
 import { modeBadgeClass } from "@/lib/patient-forms/display"
 
@@ -198,19 +198,18 @@ describe("attempt attribution in the tooltip", () => {
   })
 })
 
-describe("InlineDisputeControls", () => {
+describe("DisputeStrip", () => {
   it("exposes the chip as a button whose name carries the value", () => {
     // Two guards on one element. The chip must be a <button>: it is the only keyboard
     // path to the tooltip now that the label-cell (i) is gone, and a <span> trigger
     // would silently make the evidence mouse-only. And its aria-label REPLACES that
     // text, so the value has to be in the label or a screen reader never hears it.
     render(
-      <InlineDisputeControls
+      <DisputeStrip
         dispute={dispute()}
         confidence={resolveConfidence(90, null)}
         provenance={null}
         flags={defaultFlags()}
-        className=""
         canSwap
         onSwap={vi.fn()}
         onApply={vi.fn()}
@@ -218,5 +217,50 @@ describe("InlineDisputeControls", () => {
     )
     expect(screen.getByRole("button", { name: /dispute details/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /Prior: BCBS TX/ })).toBeInTheDocument()
+  })
+
+  it("orders the controls chip → swap → apply (reviewers swap first, then accept)", () => {
+    const onApply = vi.fn()
+    render(
+      <DisputeStrip
+        dispute={dispute()}
+        confidence={resolveConfidence(90, null)}
+        provenance={null}
+        flags={defaultFlags()}
+        canSwap
+        onSwap={vi.fn()}
+        onApply={onApply}
+      />
+    )
+    const swap = screen.getByRole("button", { name: "Swap with prior value" })
+    const apply = screen.getByTitle("Apply captured value")
+    expect(swap.compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(apply)
+    expect(onApply).toHaveBeenCalledOnce()
+  })
+
+  it("puts the disabled swap's reason on a non-disabled tooltip trigger", () => {
+    // Chrome excludes disabled controls from pointer hit-testing, so a title on the
+    // button itself never shows — the hover target must be the wrapper span (the
+    // withReasonTooltip pattern). Radix portals don't settle under jsdom, so this
+    // pins the trigger structure rather than hovering.
+    render(
+      <DisputeStrip
+        dispute={dispute()}
+        confidence={resolveConfidence(90, null)}
+        provenance={null}
+        flags={defaultFlags()}
+        canSwap={false}
+        onSwap={vi.fn()}
+        onApply={vi.fn()}
+      />
+    )
+    const swap = screen.getByRole("button", {
+      name: "Swap is unavailable while this field is not applicable",
+    })
+    expect(swap).toBeDisabled()
+    const trigger = swap.closest('[data-slot="tooltip-trigger"]')
+    expect(trigger).not.toBeNull()
+    expect(trigger).not.toBe(swap)
   })
 })
