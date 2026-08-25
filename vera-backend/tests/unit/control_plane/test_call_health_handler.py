@@ -92,6 +92,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> _Wired:
         object(),
         cast(Any, object()),
         cast(Any, object()),
+        review_floor=70,
         notifications=cast(Any, notifications),
     )
     return _Wired(consumer=consumer, session=session, notifications=notifications)

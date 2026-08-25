@@ -1636,6 +1636,7 @@ async def update_patient_form_status(
             wait_for_form_id=form_id,
             recording=recording_config_from(settings),
             plan_service=call_plans,
+            retry_floor=settings.post_call_review_floor,
         )
 
     return ok(

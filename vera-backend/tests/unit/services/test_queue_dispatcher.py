@@ -29,7 +29,7 @@ from vera_core.forms.call_plan import CallPlan, fuse_prefill
 from vera_core.forms.call_plan import compile_call_plan as real_compile_call_plan
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import FACTORY_SESSION, PromptDocument, numbered_questions
-from vera_core.forms.review import FieldStatus
+from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR, FieldStatus
 from vera_core.models import (
     Call,
     CallEvent,
@@ -354,6 +354,7 @@ async def _dispatch(
     livekit: FakeLiveKit,
     *,
     plan_service: Any = None,
+    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
 ) -> int:
     """try_dispatch(), casting the fakes to their real types — mypy-strict clean,
     mirroring the `cast(AsyncSession, fake)` convention used elsewhere in the
@@ -364,6 +365,7 @@ async def _dispatch(
         livekit,
         cast(KeyManagementService, object()),
         plan_service=cast(CallPlanService | None, plan_service),
+        retry_floor=retry_floor,
     )
 
 
@@ -1167,6 +1169,75 @@ class TestCallPlanStaging:
         staged = {f.path for t in plan.tasks for f in t.fields}
         assert staged < _ALL_IBV_PATHS  # narrowed
         assert form.retry_count == 0  # the gate is the reference number, not the counter
+
+    async def test_a_field_between_the_two_floors_is_asked_only_at_the_higher_floor(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The wiring defect, at the ask-set level: an authoritative call confirmed this
+        field at confidence 78, between the module default (70) and an injected floor (85).
+        At 70 it counts as call-confirmed and drops out of the focused ask set, so the retry
+        it triggered never asks it; at 85 it stays in. Each floor gets its own form and
+        session — dispatching transitions the form to IN_CALL, which must not leak into what
+        the second dispatch observes."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+
+        ref = "sections.insurance_representative.call_reference_number"
+        target = "sections.deductibles.individual.total"
+        met = "sections.deductibles.individual.met_amount"
+        remaining = "sections.deductibles.individual.remaining"
+        call_id = uuid7()
+
+        def _confirmed(confidence: int) -> FieldStatus:
+            return FieldStatus(
+                source="ai_call", ai_supported=True, ai_confidence=confidence, call_id=call_id
+            )
+
+        status = {
+            ref: _confirmed(96),
+            target: _confirmed(78),  # the field the bug drops from the ask set
+            met: _confirmed(96),
+            remaining: _confirmed(96),
+        }
+        values = {ref: "ABC-123", target: "$1,000", met: "$500", remaining: "$500"}
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            return status
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return values
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        async def _staged(floor: int) -> set[str]:
+            form = _form(tenant.id, schema_version_id=sv.id)
+            session = FakeSession(
+                tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+            )
+            livekit = FakeLiveKit()
+            plans = FakeCallPlanService()
+            dispatched = await _dispatch(
+                session, tenant.id, livekit, plan_service=plans, retry_floor=floor
+            )
+            assert dispatched == 1
+            _room, plan = plans.puts[0]
+            return {f.path for t in plan.tasks for f in t.fields}
+
+        staged_at_module_default = await _staged(70)
+        staged_at_injected_floor = await _staged(85)
+
+        assert target not in staged_at_module_default  # 78 >= 70: call-confirmed, dropped
+        assert target in staged_at_injected_floor  # 78 < 85: not confirmed, asked again
 
     async def test_a_form_with_no_captured_reference_dispatches_the_full_plan(
         self, _stub_credentials: dict[str, dict[str, Any] | None]

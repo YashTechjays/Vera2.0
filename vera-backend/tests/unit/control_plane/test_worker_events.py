@@ -12,7 +12,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -249,13 +249,24 @@ class _SpyAudit:
         self.records.append(record)
 
 
+class _DispatchCall(NamedTuple):
+    """One recorded `run_dispatch_pass` refill — named so a test asserts on the argument
+    it means, not on a tuple position that shifts when another argument is added."""
+
+    tenant_id: Any
+    livekit: Any
+    kms: Any
+    audit: Any
+    retry_floor: int | None
+
+
 @dataclass
 class _Wired:
     consumer: WorkerEventConsumer
     session: _FakeSession
     audit: _SpyAudit
     call_stream: _FakeCallStream
-    dispatch_calls: list[tuple[Any, ...]] = field(default_factory=list)
+    dispatch_calls: list[_DispatchCall] = field(default_factory=list)
 
 
 def _consumer(
@@ -267,6 +278,7 @@ def _consumer(
     call_stream: _FakeCallStream | None = None,
     form_auto_retry_enabled: bool = False,
     post_call_bus: Any = None,
+    review_floor: int = 70,
 ) -> _Wired:
     """Wire a consumer to a fake DB seam and a fake dispatch pass. `tenant_session`
     is monkeypatched in `worker_events` (the answered handler), `call_closeout` (the
@@ -277,7 +289,7 @@ def _consumer(
     fake_session = session if session is not None else _FakeSession()
     fake_audit = _SpyAudit()
     fake_call_stream = call_stream if call_stream is not None else _FakeCallStream()
-    dispatch_calls: list[tuple[Any, ...]] = []
+    dispatch_calls: list[_DispatchCall] = []
 
     def _fake_tenant_session(sm: Any, tid: Any) -> _FakeSessionCtx:
         return _FakeSessionCtx(fake_session)
@@ -296,8 +308,9 @@ def _consumer(
         *,
         recording: Any = None,
         plan_service: Any = None,
+        retry_floor: int | None = None,
     ) -> None:
-        dispatch_calls.append((tenant_id, lk, kms, aud))
+        dispatch_calls.append(_DispatchCall(tenant_id, lk, kms, aud, retry_floor))
 
     monkeypatch.setattr(worker_events, "run_dispatch_pass", _fake_run_dispatch_pass)
 
@@ -308,6 +321,7 @@ def _consumer(
         object(),
         fake_audit,
         fake_call_stream,  # type: ignore[arg-type]
+        review_floor=review_floor,
         teardown_grace_ms=0,
         form_auto_retry_enabled=form_auto_retry_enabled,
         post_call_bus=post_call_bus,
@@ -631,8 +645,31 @@ async def test_call_ended_routes_form_through_ai_processing_to_review(
     ]
 
     assert len(wired.dispatch_calls) == 1
-    assert wired.dispatch_calls[0][0] == tenant_id  # refill ran for the freed tenant
+    assert wired.dispatch_calls[0].tenant_id == tenant_id  # refill ran for the freed tenant
     assert redis.acked == ["1-0"]
+
+
+@pytest.mark.asyncio
+async def test_call_ended_refill_forwards_the_injected_review_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The consumer's injected `review_floor` must reach the refill's `run_dispatch_pass`
+    as `retry_floor` — 85, not the module default 70, so a passing assertion can only mean
+    this consumer's own value travelled."""
+    tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
+    room = room_name_for_call(tenant_id, call_id)
+    call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
+    form = _form_row(tenant_id, form_id, status=FormStatus.IN_CALL.value, completion_pct=100.0)
+    tenant = _tenant(id=tenant_id, max_retries=3)
+    session = _FakeSession(call=call, form=form, tenant=tenant)
+    redis, livekit = _FakeRedis(), _FakeLiveKit()
+    wired = _consumer(monkeypatch, redis, livekit, session=session, review_floor=85)
+
+    event = CallEndedEvent(room_name=room, ts=1)
+    await wired.consumer._process("1-0", {"event": event.model_dump_json()})
+
+    assert len(wired.dispatch_calls) == 1
+    assert wired.dispatch_calls[0].retry_floor == 85
 
 
 @pytest.mark.asyncio
@@ -931,7 +968,7 @@ async def test_call_failed_maps_reason_updates_rows_and_tears_room_down(
     assert len(session.inserted) == 1  # call.failed is a terminal closeout too — finalizes
     assert call_stream.cleared == [room]
     assert len(wired.dispatch_calls) == 1
-    assert wired.dispatch_calls[0][0] == tenant_id
+    assert wired.dispatch_calls[0].tenant_id == tenant_id
     assert redis.acked == ["1-0"]
 
 

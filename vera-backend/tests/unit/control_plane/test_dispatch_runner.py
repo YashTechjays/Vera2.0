@@ -75,6 +75,41 @@ async def test_forwards_plan_service_to_try_dispatch(monkeypatch: Any) -> None:
     assert seen["plan_service"] is plans
 
 
+def _capture_try_dispatch_kwargs(monkeypatch: Any) -> dict[str, object]:
+    """Stub the tenant session and `try_dispatch`, returning the dict of keyword arguments
+    the pass actually passed. `**kwargs` (not named parameters with defaults) is what makes
+    an omitted kwarg distinguishable from one explicitly passed as its default."""
+    seen: dict[str, object] = {}
+
+    async def fake_try_dispatch(
+        session: Any, tenant_id: Any, livekit: Any, kms: Any, **kwargs: object
+    ) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())
+    monkeypatch.setattr(dispatch_mod, "try_dispatch", fake_try_dispatch)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_forwards_retry_floor_to_try_dispatch(monkeypatch: Any) -> None:
+    """The kwarg-plumbing half only. That the ask set actually changes with the floor is
+    the paired test in test_queue_dispatcher.py::TestCallPlanStaging."""
+    seen = _capture_try_dispatch_kwargs(monkeypatch)
+    await run_dispatch_pass(object(), uuid4(), object(), object(), None, retry_floor=85)  # type: ignore
+    assert seen["retry_floor"] == 85
+
+
+@pytest.mark.asyncio
+async def test_omitted_retry_floor_does_not_reach_try_dispatch(monkeypatch: Any) -> None:
+    """`None` means "use try_dispatch's own default", so it must not be forwarded at all —
+    that is what keeps every caller predating this parameter behaving as before."""
+    seen = _capture_try_dispatch_kwargs(monkeypatch)
+    await run_dispatch_pass(object(), uuid4(), object(), object(), None)  # type: ignore
+    assert "retry_floor" not in seen
+
+
 @pytest.mark.asyncio
 async def test_swallows_and_logs_dispatch_errors(monkeypatch: Any, caplog: Any) -> None:
     monkeypatch.setattr(dispatch_mod, "tenant_session", lambda sm, tid: _FakeSessionCtx())

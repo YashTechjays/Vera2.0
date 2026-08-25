@@ -158,6 +158,7 @@ class WorkerEventConsumer:
         audit: AuditSink,
         call_stream: CallStreamService,
         *,
+        review_floor: int,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
         max_close_deliveries: int = 3,
@@ -175,6 +176,7 @@ class WorkerEventConsumer:
         self._kms = kms
         self._audit = audit
         self._call_stream = call_stream
+        self._review_floor = review_floor
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._max_close_deliveries = max_close_deliveries
@@ -842,6 +844,7 @@ class WorkerEventConsumer:
                 self._audit,
                 recording=self._recording,
                 plan_service=self._call_plans,
+                retry_floor=self._review_floor,
             )
 
     async def _enqueue_post_call_eval(self, ref: "RoomRef") -> None:

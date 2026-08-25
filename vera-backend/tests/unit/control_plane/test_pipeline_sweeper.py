@@ -143,6 +143,7 @@ async def test_sweep_once_continues_past_a_failing_tenant(
         interval_s=60,
         stuck_grace_s=300,
         max_call_duration_s=10_800,
+        review_floor=70,
     )
 
     async def fake_sweep_tenant(tenant_id: UUID) -> None:

@@ -43,6 +43,7 @@ def schedule_dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
+    retry_floor: int | None = None,
 ) -> None:
     """Fire-and-forget a dispatch pass on the running loop. See run_dispatch_pass
     for why this is a detached task and not fastapi.BackgroundTasks: background
@@ -59,6 +60,7 @@ def schedule_dispatch_pass(
                 wait_for_form_id=wait_for_form_id,
                 recording=recording,
                 plan_service=plan_service,
+                retry_floor=retry_floor,
             )
         )
     )
@@ -92,6 +94,7 @@ async def run_dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
+    retry_floor: int | None = None,
 ) -> None:
     """Await one dispatch pass, shielded from the caller's cancellation.
 
@@ -112,6 +115,7 @@ async def run_dispatch_pass(
             wait_for_form_id=wait_for_form_id,
             recording=recording,
             plan_service=plan_service,
+            retry_floor=retry_floor,
         )
     )
     _track(task)
@@ -128,6 +132,7 @@ async def _dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
+    retry_floor: int | None = None,
 ) -> None:
     """One dispatch pass in a fresh tenant-scoped session; commits on success.
     Exception-safe: a failed pass logs and returns — queued forms are retried on
@@ -154,6 +159,7 @@ async def _dispatch_pass(
                 audit=audit,
                 recording=recording,
                 plan_service=plan_service,
+                **({} if retry_floor is None else {"retry_floor": retry_floor}),
             )
     except Exception as exc:
         # Type name only — SQLAlchemy statement errors embed the bound

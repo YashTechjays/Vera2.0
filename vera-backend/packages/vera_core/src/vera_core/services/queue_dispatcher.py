@@ -159,9 +159,12 @@ async def try_dispatch(
         Optional ``AuditSink``. When provided, ``QUEUE_DISPATCH`` and
         ``QUEUE_EXPIRED`` events are emitted for HIPAA evidence.
     retry_floor:
-        Confidence floor for which field labels to embed in RETRY room
-        metadata. Best-effort prompt guidance only — the authoritative
-        retry-vs-review decision happened earlier in ``evaluate_call``.
+        Confidence floor for `is_call_confirmed`. Selects the FOCUSED retry ask
+        set (`focus_paths`, below) and the field labels embedded in RETRY room
+        metadata. Must be the same value the post-call eval uses
+        (`settings.post_call_review_floor`) or the two gates measure different
+        populations: a field between the two floors triggers a retry that then
+        never asks it.
     recording:
         Optional ``RecordingConfig``. When provided, audio egress is started
         for each successfully dialed call (fail-open — a recording failure
