@@ -369,10 +369,10 @@ async def try_dispatch(
             sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
             continue
 
-        # Whether the question tree was narrowed — decided below, never from
-        # retry_count: a manual requeue resets that budget, so it can't tell us the
-        # call's shape.
-        focused = False
+        # `mode` describes THIS call: "retry" means the question tree was narrowed (set below),
+        # never derived from retry_count — a manual requeue resets that budget, so it cannot
+        # tell us the call's shape. A budgeted retry that runs FRESH is honestly a full call.
+        call_mode = CallMode.FULL
         # Real-call dispatch metadata: the worker must wait for the SIP callee to
         # answer and publish envelope events for live monitoring. IVR navigation is
         # the operator's per-form queue-time choice (voice-lab-style toggle) — when
@@ -430,12 +430,7 @@ async def try_dispatch(
                         focus_call_plan(plan, focus, answers=values),
                         plan_prompt_version_id,
                     )
-                    focused = True
-
-        # `mode` describes THIS call: "retry" means the question tree was narrowed, which is
-        # what the attempt timeline reports. A budgeted retry that runs FRESH (no reference
-        # number on file) is honestly a full call.
-        call_mode = CallMode.RETRY if focused else CallMode.FULL
+                    call_mode = CallMode.RETRY
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-dispatched calls earlier in the same pass.

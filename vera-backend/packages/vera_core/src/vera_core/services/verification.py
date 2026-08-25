@@ -1,8 +1,15 @@
 """The one place the verified fraction is computed from a live session.
 
 `verified_pct` is the fraction of required, applicable, collectable leaves an AUTHORITATIVE
-call confirmed. Both retry gates read it through here, so they cannot drift onto different
-populations (spec E3). Values are PHI — passed to the pure helper, never logged.
+call confirmed. The fallback gate (`control_plane.post_call.resolve_ai_processing`) reads it
+through here instead of `completion_pct`, which is what stopped the park-vs-redial decision
+depending on which consumer closed the call (spec E3). Values are PHI — passed to the pure
+helper, never logged.
+
+NOT yet the single source: `post_call_eval.evaluate_call` still hand-composes the same
+sequence inline, because it already holds the parsed doc and an in-memory values map and
+routing it here would re-query both. Until it does, the two gates agree only because both
+call the same primitives with the same arguments — see the spec's deferred list.
 
 Deliberately not part of `field_status.py`: that module scopes itself to PHI-free reads (no
 value columns). Confirming a leaf requires the real answer values (`current_values_by_path`),

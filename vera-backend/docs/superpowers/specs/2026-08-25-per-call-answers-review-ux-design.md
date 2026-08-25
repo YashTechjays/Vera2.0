@@ -272,6 +272,15 @@ of the two heading rows in `build_workbook`.
 Five read-only fields on `PatientFormDetail`: `verified_pct`, `review_reason`, `retry_count`,
 `max_retries`, `review_floor` (the effective `settings.post_call_review_floor`, non-PHI).
 
+> **Correction, found during implementation.** `verified_pct` is
+> `Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)`
+> (`models/patient_form.py:89`), so the DTO field is **`float | None`**, not `float`. Null means
+> **"the post-call eval has never run on this form"** — which is a *different fact* from 0%
+> verified, and the two must never be conflated. F0's `answeredNotCounted` and F4's summary strip
+> must render an absent `verified_pct` as "not evaluated", never as 0% — showing "0% verified" on
+> a form nothing has evaluated is exactly the class of misleading display this spec exists to
+> remove. Follow `calls.py`'s existing `_pct()` / `CallSummary.verified_pct` precedent.
+
 ### B6. One retry gate, one number
 
 `post_call.py` computes the verified fraction **on the spot** at call close and gates on it,

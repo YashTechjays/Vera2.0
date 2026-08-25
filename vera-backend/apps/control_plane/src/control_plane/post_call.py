@@ -92,18 +92,25 @@ async def resolve_ai_processing(
         # A supervisor-ended or rule-terminated call never auto-retries, whatever the
         # fill — the shared never-redial policy (call_lifecycle.no_retry_reason).
         no_retry = no_retry_reason(call)
-        # ONE gate, ONE number: the eval path compares the verified fraction against this same
-        # threshold (post_call_eval), so reading completion_pct here made the decision depend on
-        # which consumer closed the call. Computed fresh — the stored verified_pct column is a
-        # display value that `recompute_form_projection` deliberately does not maintain.
-        threshold = float(tenant.retry_fill_threshold)
-        fraction = await load_verified_fraction(session, form, floor=review_floor)
-        low_fill = (
-            fraction < threshold
-            if fraction is not None
-            else float(form.completion_pct) < threshold * 100
-        )
-        if tenant.allows_auto_retry(auto_retry_enabled) and low_fill and no_retry is None:
+        # The fill gate costs four queries, so it is computed only once the free checks have
+        # already agreed a retry is possible at all — with the deployment kill-switch off (the
+        # default) or a never-redial cause on the call, its answer is never read.
+        low_fill = False
+        if tenant.allows_auto_retry(auto_retry_enabled) and no_retry is None:
+            # ONE gate, ONE number: the eval path compares the verified fraction against this
+            # same threshold (post_call_eval), so reading completion_pct here made the decision
+            # depend on which consumer closed the call. Computed fresh — the stored
+            # verified_pct column is a display value `recompute_form_projection` does not
+            # maintain. A `None` fraction means the schema is legacy v1, which declares no
+            # reference-number field, so "authoritative" is undefined and completion stands in.
+            threshold = float(tenant.retry_fill_threshold)
+            fraction = await load_verified_fraction(session, form, floor=review_floor)
+            low_fill = (
+                fraction < threshold
+                if fraction is not None
+                else float(form.completion_pct) < threshold * 100
+            )
+        if low_fill:
             # Auto-retry while retries remain; fall through to human review when exhausted.
             with contextlib.suppress(InvalidTransitionError):
                 sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)

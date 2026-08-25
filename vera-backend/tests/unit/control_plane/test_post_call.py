@@ -481,7 +481,11 @@ async def test_resolve_ai_processing_forwards_review_floor_to_the_verified_fract
     """The injected `review_floor` must reach `load_verified_fraction`'s `floor` — 85, not the
     module default 70, so a passing assertion can only mean this call's own value travelled.
     Without this, a regression that silently dropped `floor=review_floor` and fell back to the
-    hard-coded default would pass every other test in this file undetected."""
+    hard-coded default would pass every other test in this file undetected.
+
+    `auto_retry_enabled=True` is load-bearing: the gate is computed only once the free checks
+    agree a retry is possible, so with the deployment switch off the floor never travels
+    because nothing would read the answer."""
     tenant_id, call_id, form_id, ref = _ids()
     form = _form_row(tenant_id, form_id, completion_pct=100.0, retry_count=0)
     session = _FakeSession(
@@ -498,6 +502,8 @@ async def test_resolve_ai_processing_forwards_review_floor_to_the_verified_fract
 
     monkeypatch.setattr(post_call, "load_verified_fraction", _capture)
 
-    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended", review_floor=85)
+    await resolve_ai_processing(
+        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True, review_floor=85
+    )
 
     assert seen_floors == [85]

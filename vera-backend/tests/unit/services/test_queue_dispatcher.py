@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.unit.services.stmt_fakes import bound_value as _bound_value
 from vera_core.config.kms import KeyManagementService
 from vera_core.db import uuid7
 from vera_core.forms.call_plan import CallPlan, fuse_prefill
@@ -140,18 +141,6 @@ class _Result:
         # `load_authoritative_call_ids` iterates `.scalars()` directly (no `.all()`),
         # mirroring real SQLAlchemy's `ScalarResult`.
         return iter(self._rows)
-
-
-def _bound_value(stmt: Any, column_name: str) -> Any:
-    """Pull a bound literal (e.g. `InsuranceProvider.name == "Acme"`) out of a
-    statement's WHERE clause by column name — lets the fake resolve which
-    provider a `select(InsuranceProvider).where(...)` is asking for."""
-    where = stmt.whereclause
-    clauses = where.clauses if hasattr(where, "clauses") else [where]
-    for clause in clauses:
-        if getattr(clause.left, "name", None) == column_name:
-            return clause.right.value
-    return None
 
 
 class _NestedTransaction:

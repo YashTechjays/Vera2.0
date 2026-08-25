@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.unit.services.stmt_fakes import bound_value as _bound_value
 from vera_core.forms.intake import required_intake_fields
 from vera_core.forms.review import retryable_required_paths
 from vera_core.models import PatientForm, SchemaVersion
@@ -48,17 +49,6 @@ class _Answer:
     supported: bool | None = None
     eval_confidence: int | None = None
     is_current: bool = True
-
-
-def _bound_value(stmt: Any, column_name: str) -> Any:
-    """Pull a bound literal (e.g. `FieldAnswer.field_path == reference_field`) out of a
-    statement's WHERE clause by column name."""
-    where = stmt.whereclause
-    clauses = where.clauses if hasattr(where, "clauses") else [where]
-    for clause in clauses:
-        if getattr(clause.left, "name", None) == column_name:
-            return clause.right.value
-    return None
 
 
 class _Result:

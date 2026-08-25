@@ -671,7 +671,8 @@ async def test_call_ended_refill_forwards_the_injected_review_floor(
     """The consumer's injected `review_floor` must reach the refill's `run_dispatch_pass`
     as `retry_floor`, and `resolve_ai_processing`'s own `load_verified_fraction` call, as
     `floor` — 85, not the module default 70, so a passing assertion can only mean this
-    consumer's own value travelled."""
+    consumer's own value travelled. `form_auto_retry_enabled=True` is load-bearing: the
+    verified-fraction gate is computed only once the free checks agree a retry is possible."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
@@ -679,7 +680,14 @@ async def test_call_ended_refill_forwards_the_injected_review_floor(
     tenant = _tenant(id=tenant_id, max_retries=3)
     session = _FakeSession(call=call, form=form, tenant=tenant)
     redis, livekit = _FakeRedis(), _FakeLiveKit()
-    wired = _consumer(monkeypatch, redis, livekit, session=session, review_floor=85)
+    wired = _consumer(
+        monkeypatch,
+        redis,
+        livekit,
+        session=session,
+        review_floor=85,
+        form_auto_retry_enabled=True,
+    )
 
     event = CallEndedEvent(room_name=room, ts=1)
     await wired.consumer._process("1-0", {"event": event.model_dump_json()})
