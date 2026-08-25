@@ -20,7 +20,9 @@ dependencies = [
     "tzdata>=2025.1",
     # Fault-tolerant out-of-pipeline LLM calls (vera_core.llm.ResilientLLM) wrap
     # livekit-agents' FallbackAdapter; google = Vertex Gemini, openai = GPT fallback.
-    "livekit-agents[google,openai]>=1.5.17",
+    # deepgram = whisper STT (vera_core.stt) — needed by the control-plane image,
+    # whose closure otherwise lacks the plugin (VR2-230).
+    "livekit-agents[deepgram,google,openai]>=1.5.17",
     # stt.py imports this directly; floor is a SECURITY bound (test_dependency_floors.py)
     "aiohttp>=3.14.3",
     "openpyxl>=3.1",
