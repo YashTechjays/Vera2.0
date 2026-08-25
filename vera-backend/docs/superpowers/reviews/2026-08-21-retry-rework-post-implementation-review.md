@@ -761,3 +761,53 @@ seed script, not by an Observer run. Establishing that needs a full (non-focused
 **Recommended next step:** re-run with Langfuse up (`langfuse-adc` skill's command, not
 `just langfuse-up`) and take one more retry, then read the introduction task's Observer span. This is
 a voice-pipeline defect, separate from the retry-scoping branch, and belongs in its own issue.
+
+### 15.3 Root cause found, from the Langfuse trace — and a correction to §15.2
+
+Trace `4a5f111f034f76d2cf28ce596b60c198`, 623 observations, **zero WARNING or ERROR spans**.
+
+The chain, established end to end:
+
+1. **The question was asked** — transcript seq 2, and the reconstructed focused plan confirms the
+   path was in `task.fields` AND in the spoken questions (`fields == spoken`).
+2. **The extraction LLM returned it correctly, TWICE** — `llm_request` at `06:51:58.922` and again at
+   `06:52:38.853`, each returning exactly:
+   `[{"field_path": "sections.patient_verification.is_insurance_active", "value": …, "confidence": 100}]`
+3. **The Observer discarded both**, at `apps/agent_worker/src/agent_worker/observer.py:557`:
+
+```python
+if self._on_file.get(answer.field_path) == answer.value:
+    # Unchanged — skip the write and the emit either way, so a rep merely confirming
+    # a prefilled value still leaves no ai_call row (the INTAKE row stays current).
+    return
+```
+
+`_on_file` is seeded from `plan.prefilled` (`observer.py:407`). The seeded prior call had left "Yes"
+at that path, the rep said the same thing, so the answer compared equal and was skipped.
+
+**This is a genuine interaction between Plan A's marker and a pre-existing Observer optimisation.**
+That optimisation was written for INTAKE prefills — its own comment says "the INTAKE row stays
+current" — and it predates the notion of a per-call field. Plan A marked these three paths
+`collected_per="call"` *precisely so they are re-collected on every call*, and the Observer silently
+discards the re-collection whenever the value repeats. Six review rounds did not catch it because it
+only manifests at runtime, with a repeating value.
+
+#### CORRECTION to §15.2
+I wrote that "a 'No' would have been missed the same way." **That is wrong.** `_on_file` holds "Yes",
+so a "No" does not compare equal, would be written, and the `insurance_not_active` flow rule would
+fire normally. **The call-termination safety case is intact.** I over-stated the severity; the
+correct consequence is narrower:
+
+- a call-scoped field whose value REPEATS is not attributed to the current call;
+- so the per-attempt view under-reports what that attempt collected, and `is_call_confirmed` for that
+  path keeps pointing at the older call.
+
+For `is_insurance_active` the scoping harm is nil — it is call-scoped, so it is in the focus set and
+gets re-asked every retry regardless. The harm is attribution and reporting.
+
+**Not fixed here.** The obvious fix — exempt `collected_per="call"` paths from the unchanged-skip —
+is blocked by a real constraint: the agent worker has no `FormSchemaDoc` at runtime, so the call-scoped
+set would have to be carried on the `CallPlan`. A lighter candidate worth considering first: have
+`focus_call_plan` drop call-scoped paths from `plan.prefilled` the way it already clears
+`on_file_values`, so `_on_file` never holds them and the skip cannot fire. Either way it is a design
+decision, not a cleanup, and it belongs in its own change.
