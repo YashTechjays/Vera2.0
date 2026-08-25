@@ -247,11 +247,17 @@ class FakeSession:
             return _Result(scalar=self.voice_model)
         if entity is Call:
             # The parent-call lookup for CallLineage, now unconditional (Task 2) rather than
-            # RETRY-only. `self.added` preserves insertion order and the just-added current
-            # call is always its last Call entry for this form_id, so excluding it leaves the
-            # prior calls — mirroring `Call.id != call.id` without needing to parse it.
+            # RETRY-only. Filters by the query's own predicates — form_id equality AND the
+            # excluded call id — rather than assuming the current call is always the last
+            # match by insertion order, so this stays correct even if a future test adds
+            # more than one Call for a form before this lookup fires.
             form_id = _bound_value(stmt, "form_id")
-            prior = [o for o in self.added if isinstance(o, Call) and o.form_id == form_id][:-1]
+            exclude_id = _bound_value(stmt, "id")
+            prior = [
+                o
+                for o in self.added
+                if isinstance(o, Call) and o.form_id == form_id and o.id != exclude_id
+            ]
             return _Result(scalar=prior[-1].id if prior else None)
         # select(func.count()) / the per-tenant advisory lock — neither has a mapped entity.
         return _Result(scalar=self.active_count)
@@ -1502,6 +1508,39 @@ class TestCallPlanStaging:
         assert dispatched_second == 1
         child = session.calls_added()[1]
         assert child.mode == CallMode.FULL.value  # unfocused, but still a retry of the first
+
+        lineage = session.lineage_added()
+        assert len(lineage) == 1
+        assert lineage[0].parent_call_id == parent.id
+        assert lineage[0].retry_call_id == child.id
+
+    async def test_a_budgeted_retry_with_no_reference_on_file_runs_full_and_still_writes_lineage(
+        self, _stub_credentials: dict[str, dict[str, Any] | None]
+    ) -> None:
+        """`retry_count > 0` alone must NOT flip `call_mode` to RETRY — only `focused` does.
+        A real staged plan is present (so the retry-focus block actually runs) but no
+        reference number is on file, so `has_call_reference` gates it off and the call runs
+        FULL. Lineage must still land on a second dispatch — proving the mode label and the
+        lineage row are decoupled, not accidentally aligned on the same signal."""
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id, retry_count=1)  # budgeted, no ref on file
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        dispatched_first = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+        assert dispatched_first == 1
+        parent = session.calls_added()[0]
+        assert parent.mode == CallMode.FULL.value  # budgeted, but never focused
+
+        dispatched_second = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+        assert dispatched_second == 1
+        child = session.calls_added()[1]
+        assert child.mode == CallMode.FULL.value
 
         lineage = session.lineage_added()
         assert len(lineage) == 1
