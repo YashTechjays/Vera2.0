@@ -7,12 +7,14 @@ demoting or hiding the answer itself (Task 2 brief: FLAG, nothing else).
 """
 
 from collections.abc import AsyncGenerator
+from io import BytesIO
 from typing import Any
 from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import delete, select
+from openpyxl import load_workbook
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from scripts.seed import _seed_form_schemas
@@ -27,6 +29,7 @@ from vera_core.models.enums import (
     InsuranceType,
     VersionStatus,
 )
+from vera_core.models.export_artifact import ExportArtifact
 from vera_core.models.field_answer import FieldAnswer
 from vera_core.models.patient_form import PatientForm
 
@@ -146,6 +149,8 @@ async def two_call_form(
     yield form_id, good_id, bad_id
 
     async with admin_sessionmaker() as s, s.begin():
+        # export_artifact before patient_form: the export test below writes one row here.
+        await s.execute(delete(ExportArtifact).where(ExportArtifact.form_id == form_id))
         await s.execute(delete(FieldAnswer).where(FieldAnswer.form_id == form_id))
         await s.execute(delete(Call).where(Call.form_id == form_id))
         await s.execute(delete(PatientForm).where(PatientForm.id == form_id))
@@ -163,6 +168,18 @@ async def _get_detail(client: httpx.AsyncClient, token: str, form_id: UUID) -> d
     assert resp.status_code == 200, resp.text
     data: dict[str, Any] = resp.json()["data"]
     return data
+
+
+async def _mark_completed(
+    admin_sessionmaker: async_sessionmaker[AsyncSession], form_id: UUID
+) -> None:
+    """The export endpoint rejects a non-COMPLETED form; `two_call_form` seeds AI_PROCESSING."""
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(
+            update(PatientForm)
+            .where(PatientForm.id == form_id)
+            .values(status=FormStatus.COMPLETED.value)
+        )
 
 
 async def test_an_attempt_with_no_reference_number_is_flagged_unauthoritative(
@@ -188,3 +205,34 @@ async def test_an_attempt_with_no_reference_number_is_flagged_unauthoritative(
     # Non-authoritative answers stay `is_current` — flagged, never demoted or hidden.
     fields_by_path = {f["field_path"]: f for f in detail["fields"]}
     assert fields_by_path[COPAY]["value"] is not None
+
+
+async def test_export_reports_a_call_that_captured_no_reference_number(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    two_call_form: tuple[UUID, UUID, UUID],
+) -> None:
+    """Regression for the real defect: the endpoint passed authoritative_calls=None, so the
+    loaders' dataclass default made every Provenance row claim payer-side proof (spec E7)."""
+    form_id, _good_id, _bad_id = two_call_form
+    await _mark_completed(admin_sessionmaker, form_id)  # export rejects a non-COMPLETED form
+    resp = await client.post(
+        f"/api/v1/patient-forms/{form_id}/export", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    prov = load_workbook(BytesIO(resp.content))["Provenance"]
+    rows = {r[0]: r for r in prov.iter_rows(values_only=True) if r[0]}
+    # COPAY was answered by the call that captured no reference number.
+    assert rows[COPAY][7] is False
+    # DEDUCTIBLE was answered by the call that did — proves the column is computed, not constant.
+    assert rows[DEDUCTIBLE][7] is True
+
+    # The Call-history block (keyed by attempt number, so its rows land in the same dict)
+    # must independently agree. This is the assertion that actually guards the
+    # load_call_attempts call site: the two per-field rows above are populated by
+    # load_field_provenance alone and would stay green even if load_call_attempts
+    # dropped authoritative_calls on its own.
+    history = {r[1]: r for r in rows.values() if isinstance(r[0], int)}
+    assert history["retry"][5] is False
+    assert history["full"][5] is True

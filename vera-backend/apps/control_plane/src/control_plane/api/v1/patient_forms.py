@@ -1337,9 +1337,14 @@ async def export_patient_form(
     ).scalar_one()
     values = await current_values_by_path(session, form_id)
     sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
-    attempts = await load_call_attempts(session, form_id)
+    doc = _v2_doc(version.schema_json)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, doc)
+    attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     prov = await load_field_provenance(
-        session, form_id, {a.id: (a.attempt, a.mode) for a in attempts}
+        session,
+        form_id,
+        {a.id: (a.attempt, a.mode) for a in attempts},
+        authoritative_calls=authoritative_calls,
     )
     data = build_workbook(version.schema_json, values, sources, prov, attempts)
 
