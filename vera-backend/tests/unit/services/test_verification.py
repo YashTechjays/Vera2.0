@@ -182,3 +182,17 @@ async def test_a_call_with_no_reference_number_verifies_nothing() -> None:
         floor=70,
     )
     assert fraction == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_call_with_a_reference_number_verifies_everything() -> None:
+    """The mirror of the above: every required, applicable, askable leaf answered by a
+    call that also captured the reference number is fully verified, not just non-zero —
+    this is the branch a mutation returning a constant 0.0 for every v2 form would still
+    pass unless this exact assertion runs it."""
+    fraction = await load_verified_fraction(
+        _session(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=True)),
+        _form(),
+        floor=70,
+    )
+    assert fraction == 1.0

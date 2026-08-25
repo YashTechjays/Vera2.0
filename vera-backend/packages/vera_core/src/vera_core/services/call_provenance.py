@@ -93,10 +93,10 @@ def snapshot_changed_paths(
 
 
 def _authoritative(call_id: UUID, authoritative_calls: Collection[UUID] | None) -> bool:
-    """`None` means "the caller never computed the set" (a v1/legacy form, or a caller — e.g.
-    the export endpoint — that has no use for the flag): the dataclass default (`True`) stands
-    rather than reading as "confirmed non-authoritative". A concrete set means every call not
-    in it is known, not merely unproven-by-omission, so it IS `False`."""
+    """`None` means "the caller never computed the set" — a legacy v1 schema, which declares no
+    reference-number field, so "authoritative" is undefined: the dataclass default (`True`)
+    stands rather than reading as "confirmed non-authoritative". A concrete set means every call
+    not in it is known, not merely unproven-by-omission, so it IS `False`."""
     return authoritative_calls is None or call_id in authoritative_calls
 
 

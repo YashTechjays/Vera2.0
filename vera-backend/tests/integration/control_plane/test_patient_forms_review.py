@@ -601,6 +601,62 @@ async def test_resolve_persists_recomputed_completion(
     assert stored == returned  # persisted, not just echoed from the in-memory object
 
 
+async def _make_form_with_stale_verified_pct(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    schema_version_id: UUID,
+) -> UUID:
+    """A bare form (no field answers, no calls) whose stored `verified_pct` is a
+    deliberately implausible value — nothing about this form could recompute to it,
+    so a resolve that leaves it in place is easy to catch."""
+    async with sm() as s, s.begin():
+        form = PatientForm(
+            tenant_id=tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.EXCEPTION_REVIEW.value,
+            intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
+            patient_name="jane doe",
+            completion_pct=0,
+            retry_count=0,
+            verified_pct=42.0,
+        )
+        s.add(form)
+        await s.flush()
+        return form.id
+
+
+async def test_resolve_refreshes_stale_verified_pct(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """`verified_pct` must be recomputed on every resolve, not left as whatever the last
+    post-call eval wrote: a resolve demotes the current answer and inserts a human one, so
+    a previously-confirmed leaf can stop being confirmed while a stale number stays displayed
+    as current. The seeded 42.0 cannot be the real answer for a form with no calls at all, so
+    the assertion cannot pass by coincidence."""
+    form_id = await _make_form_with_stale_verified_pct(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+    resp = await client.post(
+        f"/api/v1/patient-forms/{form_id}/disputes:resolve",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_data": {}, "dispute_fields": [], "reasked_fields": []},
+    )
+    assert resp.status_code == 200, resp.text
+    returned = resp.json()["data"]["verified_pct"]
+    assert returned != 42.0
+    async with admin_sessionmaker() as s:
+        stored = (
+            await s.execute(select(PatientForm.verified_pct).where(PatientForm.id == form_id))
+        ).scalar_one()
+    assert stored is not None
+    assert float(stored) == returned  # persisted, not just echoed from the in-memory object
+
+
 async def test_resolve_reask_does_not_change_status(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

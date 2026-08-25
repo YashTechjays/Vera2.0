@@ -83,10 +83,6 @@ async def resolve_ai_processing(
             await session.execute(select(Tenant).where(Tenant.id == ref.tenant_id))
         ).scalar_one()
 
-        # completion_pct is already current here: the Observer's ai_call answers are
-        # stream-ordered before call.ended and, under the consumer's per-room sequential
-        # dispatch, each recomputed the projection as it landed — so this reads the fresh
-        # value with no recompute needed on this path.
         sm = FormStateMachine()
         requeued = False
         # A supervisor-ended or rule-terminated call never auto-retries, whatever the
@@ -108,6 +104,8 @@ async def resolve_ai_processing(
             low_fill = (
                 fraction < threshold
                 if fraction is not None
+                # Legacy v1 only: completion_pct is already current — Observer answers land
+                # stream-ordered before call.ended, so no recompute is needed on this path.
                 else float(form.completion_pct) < threshold * 100
             )
         if low_fill:

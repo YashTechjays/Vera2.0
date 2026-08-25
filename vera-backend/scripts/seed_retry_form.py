@@ -8,14 +8,17 @@ RETRY dispatches from — a second call that should ask only the still-missing f
 The seeded form carries one prior COMPLETED call that captured the rep name AND the
 call reference number, judge-supported `ai_call` answers for every collect section
 except the ones left missing, one judge-REJECTED answer (so a filled section still
-owes a field), and `retry_count = 1`. Those three facts are what the dispatcher's
-retry branch reads: `retry_count > 0` selects `CallMode.RETRY`, and a current answer
-at the schema's `rep_call_reference_number_field` selects FOCUSED over FRESH.
+owes a field), and `retry_count = 1`. What the dispatcher's retry branch actually
+reads is the current answer at the schema's `rep_call_reference_number_field`: with
+one on file, the plan is narrowed to what no authoritative call confirmed, and
+staging that narrowed plan is what selects `CallMode.RETRY` — `retry_count` plays no
+part in the mode choice.
 
-`arm` transitions EXCEPTION_REVIEW → IN_QUEUE with `manual=False` deliberately: the
-operator endpoint passes `manual=True`, which resets `retry_count` to 0 and so
-dispatches the next call as a FULL one. Arming here is the only way to exercise the
-focused-retry path without waiting on the auto-retry kill-switch.
+`arm` transitions EXCEPTION_REVIEW → IN_QUEUE with `manual=False` so `retry_count`
+survives the requeue unreset (the operator endpoint's `manual=True` would zero it) —
+it no longer picks the call's mode, but it still gates the tenant's auto-retry
+budget. Arming here is the only way to exercise the focused-retry path without
+waiting on the auto-retry kill-switch.
 
 Idempotent: keyed to a fixed `chart_number` marker, so re-running replaces the
 previously-seeded form. Requires the baseline schemas (`just seed`).
@@ -451,9 +454,10 @@ async def arm(actor_email: str | None) -> None:
         form.enqueued_by_id = owner
         await session.flush()
 
-        mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
         print(f"armed patient_form {form.id}: {form.status}, retry_count={form.retry_count}")
-        print(f"  next dispatch is a {mode.value.upper()} call")
+        # Mode isn't retry_count-derived — the dispatcher picks RETRY only if it narrows the
+        # plan to a captured call reference number's still-unconfirmed fields (queue_dispatcher).
+        print("  next dispatch mode (FULL vs RETRY) is decided by the dispatcher at call time")
         print(f"  call owner: {actor_email or 'none (visible to every calls:read login)'}")
         print(
             "  the control plane's pipeline sweeper dispatches within its interval "

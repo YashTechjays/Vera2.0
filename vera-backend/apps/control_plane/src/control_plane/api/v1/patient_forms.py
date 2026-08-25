@@ -116,6 +116,7 @@ from vera_core.services.field_answers import (
 from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
+from vera_core.services.verification import load_verified_fraction
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -609,10 +610,9 @@ class PatientFormDetail(BaseModel):
     # preserves "not yet evaluated" (mirrors CallSummary.verified_pct) — a real 0.0 would
     # misread as "0% verified" for a pre-eval form.
     verified_pct: float | None
-    # Why the form parked (vera_core ReviewReason). On the worklist row too; here so the review
-    # modal can say it where the reviewer actually decides.
+    # Repeated from the worklist row so the review modal can show it where the reviewer
+    # actually decides.
     review_reason: str | None
-    # Retry budget: how many auto-redials this enqueue episode has consumed, and the tenant cap.
     retry_count: int
     max_retries: int
     # The confidence floor `is_call_confirmed` applies (settings.post_call_review_floor). The UI
@@ -1279,6 +1279,15 @@ async def resolve_disputes(
         if doc is not None
         else completion_pct(set(current_values), version.schema_json)
     )
+    # A resolve demotes the current answer and inserts a human one, so a previously-confirmed
+    # leaf can stop being confirmed — verified_pct must be refreshed alongside completion_pct or
+    # the displayed number goes stale exactly when it moves. None (legacy v1) leaves the column
+    # untouched: it means "authoritative is undefined here", never "recompute to zero".
+    verified_fraction = await load_verified_fraction(
+        session, form, floor=settings.post_call_review_floor
+    )
+    if verified_fraction is not None:
+        form.verified_pct = round(verified_fraction * 100, 2)
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
     # attribute changes — without this flush the completion update was silently
     # lost. The refresh then reloads server-updated columns (updated_at onupdate)
