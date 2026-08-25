@@ -267,6 +267,7 @@ class _Wired:
     audit: _SpyAudit
     call_stream: _FakeCallStream
     dispatch_calls: list[_DispatchCall] = field(default_factory=list)
+    verified_fraction_floors: list[int] = field(default_factory=list)
 
 
 def _consumer(
@@ -290,6 +291,7 @@ def _consumer(
     fake_audit = _SpyAudit()
     fake_call_stream = call_stream if call_stream is not None else _FakeCallStream()
     dispatch_calls: list[_DispatchCall] = []
+    verified_fraction_floors: list[int] = []
 
     def _fake_tenant_session(sm: Any, tid: Any) -> _FakeSessionCtx:
         return _FakeSessionCtx(fake_session)
@@ -299,11 +301,14 @@ def _consumer(
     monkeypatch.setattr(transcript_finalizer, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(post_call, "tenant_session", _fake_tenant_session)
 
-    async def _fake_load_verified_fraction(*_a: object, **_kw: object) -> None:
+    async def _fake_load_verified_fraction(*_a: object, floor: int, **_kw: object) -> None:
         # `resolve_ai_processing` now calls this unconditionally; it runs its own
         # SchemaVersion query that `_FakeSession` doesn't route (no test here seeds a
         # schema). Default to the legacy fallback (None) so every existing test keeps
-        # exercising completion_pct, exactly as before this seam existed.
+        # exercising completion_pct, exactly as before this seam existed. `floor` is
+        # captured (not just swallowed) so a test can prove the consumer's own
+        # `review_floor` reaches this call rather than a hard-coded default.
+        verified_fraction_floors.append(floor)
         return None
 
     monkeypatch.setattr(post_call, "load_verified_fraction", _fake_load_verified_fraction)
@@ -341,6 +346,7 @@ def _consumer(
         audit=fake_audit,
         call_stream=fake_call_stream,
         dispatch_calls=dispatch_calls,
+        verified_fraction_floors=verified_fraction_floors,
     )
 
 
@@ -663,8 +669,9 @@ async def test_call_ended_refill_forwards_the_injected_review_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The consumer's injected `review_floor` must reach the refill's `run_dispatch_pass`
-    as `retry_floor` — 85, not the module default 70, so a passing assertion can only mean
-    this consumer's own value travelled."""
+    as `retry_floor`, and `resolve_ai_processing`'s own `load_verified_fraction` call, as
+    `floor` — 85, not the module default 70, so a passing assertion can only mean this
+    consumer's own value travelled."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
@@ -679,6 +686,7 @@ async def test_call_ended_refill_forwards_the_injected_review_floor(
 
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0].retry_floor == 85
+    assert wired.verified_fraction_floors == [85]
 
 
 @pytest.mark.asyncio
@@ -844,9 +852,8 @@ async def test_call_ended_low_completion_auto_requeues_form(
 async def test_call_ended_low_completion_defaults_to_review_when_flag_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default wiring (auto-retry flag OFF): low completion goes to
-    EXCEPTION_REVIEW without consuming the retry budget — no form-filling
-    mechanism exists yet, so a redial could never improve completion."""
+    """Default wiring (auto-retry flag OFF): low fill goes to EXCEPTION_REVIEW
+    without consuming the retry budget."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)

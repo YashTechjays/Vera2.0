@@ -472,3 +472,32 @@ async def test_a_legacy_v1_form_falls_back_to_completion(
     # completion 100 >= 80, so no low_fill and no redial — the v1 fallback still works.
     assert requeued is False
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
+
+
+@pytest.mark.asyncio
+async def test_resolve_ai_processing_forwards_review_floor_to_the_verified_fraction_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The injected `review_floor` must reach `load_verified_fraction`'s `floor` — 85, not the
+    module default 70, so a passing assertion can only mean this call's own value travelled.
+    Without this, a regression that silently dropped `floor=review_floor` and fell back to the
+    hard-coded default would pass every other test in this file undetected."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=100.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        tenant=_tenant(tenant_id),
+    )
+    audit = _wire(monkeypatch, session)
+    seen_floors: list[int] = []
+
+    async def _capture(*_args: object, floor: int, **_kwargs: object) -> None:
+        seen_floors.append(floor)
+        return None
+
+    monkeypatch.setattr(post_call, "load_verified_fraction", _capture)
+
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended", review_floor=85)
+
+    assert seen_floors == [85]

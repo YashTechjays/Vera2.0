@@ -3,6 +3,10 @@
 `verified_pct` is the fraction of required, applicable, collectable leaves an AUTHORITATIVE
 call confirmed. Both retry gates read it through here, so they cannot drift onto different
 populations (spec E3). Values are PHI — passed to the pure helper, never logged.
+
+Deliberately not part of `field_status.py`: that module scopes itself to PHI-free reads (no
+value columns). Confirming a leaf requires the real answer values (`current_values_by_path`),
+so this module — not that one — is where PHI enters the retry decision.
 """
 
 from __future__ import annotations
