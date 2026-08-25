@@ -685,3 +685,79 @@ so both sides read one document; the frontend pins 39/5/13 while the backend der
 so removing the role filter fails on either side. What it cannot catch is divergence in a dimension
 neither number depends on — rounding (already known) and `isSatisfied`'s alternative-sibling rule,
 which is mirrored by hand with no fixture asserting the two implementations agree on one input.
+
+---
+
+## 15. The live focused retry — the merge gate, taken
+
+Call `01a037af-c077-7af0-b266-5587eca6384a`, form `TEST-SEED-RETRY`, armed with
+`just arm-retry-form`. 4m41s, `completed`, `mode=retry`, `completion_pct` 100.00.
+
+### 15.1 The retry scoping is verified correct on a live call
+
+| check | result |
+| --- | --- |
+| questions spoken | **16** — exactly the 16 Plan C predicted (down from 25) |
+| greeting + recording disclosure | spoken **once**, at seq 0 |
+| `male_partner_coverage` questions | **0** |
+| `general_coverage` / office-visit questions | **0** |
+| `enrollment` / PBM / TPA questions | **0** |
+| the 2 "infertility" mentions | both `lifetime_maximum` questions — in scope |
+| rep name + call reference captured | **yes** — the wrap-up task survived the narrowing |
+| `CallLineage` row | **written** (parent `01a023e8-…`) |
+| snapshot | finalized, 169 → 178 keys |
+| answers written | 34 rows, 27 current, across exactly the 5 focused sections |
+
+Every section the retry should have skipped, it skipped. Every section in the focus set, it asked.
+**This is the evidence the eval harness could not give, and it confirms P7 is closed in production.**
+
+Note `mode=retry` here, so §14.2's mislabelling did NOT trigger: `arm-retry-form` preserves
+`retry_count=1` by design. §14.2's scenario needs the OPERATOR surface
+(`PUT /patient-forms/{id}/status`, `manual=True`), which resets `retry_count`. **The finding stands
+and remains untested — this call did not exercise it.**
+
+### 15.2 One real defect, and it is NOT the narrowing
+
+`sections.patient_verification.is_insurance_active` — a `collected_per="call"` leaf — was **asked and
+answered but never recorded**:
+
+```
+seq 2  agent  Great, thank you. Can you confirm the patient's insurance is currently active?
+seq 3  user   Yes. It is active.
+seq 4  agent  Great, let me pull up my questions...
+```
+
+No `field_answer` row exists for that path from this call. The no-op guard at
+`services/field_answers.py:110` cannot explain it — it requires `current.call_id == call_id`, and the
+only existing row belongs to the seeded prior call, so a write would have happened.
+
+**Ruled out — the narrowing.** Rebuilding this form's focused plan from the live DB state shows the
+Plan C invariant held: the path is in the focus set, the `introduction` task is retained, the path is
+in `task.fields` **and** in the spoken questions, and `fields == spoken` for that task. The question
+was both tracked and asked. This is not a P7-class regression.
+
+**Where it was lost.** The first answer written by the whole call is `06:52:58` in
+`diagnostic_testing` — the SECOND task. The call started `06:51:15`. **No extraction produced a write
+during the introduction task at all.** `patient_verification` has exactly one collectable leaf, and
+it is the one that went missing.
+
+**Why it matters more than one field.** `is_insurance_active` arms the `insurance_not_active` flow
+rule, which TERMINATES the call when the policy is not active. That is the exact reason Plan A marked
+this leaf `collected_per="call"` — so a retry re-verifies it and a policy that lapsed since the last
+attempt ends the call instead of proceeding on a stale "Yes". **The marker did its job (the question
+was asked); the extraction did not, so the rule cannot arm.** On this call the rep said "Yes", so
+nothing was harmed — a "No" would have been missed the same way.
+
+**What I could not determine.** Why the introduction task's extraction produced nothing. The dev
+stack ships no container logs and Langfuse was stopped during this session, so there is no worker
+trace to read. Candidates worth checking with tracing on: an extraction window that closes at task
+handoff (the agent moved on at seq 4, one turn after the answer), or the Observer's per-task pass not
+running for a task whose only collectable field is a flow-rule gate.
+
+**Whether it is new.** Not caused by the narrowing — that is proven above. Whether extraction ever
+worked for this leaf on a real call is unknown: the only other row at this path was written by the
+seed script, not by an Observer run. Establishing that needs a full (non-focused) call with tracing.
+
+**Recommended next step:** re-run with Langfuse up (`langfuse-adc` skill's command, not
+`just langfuse-up`) and take one more retry, then read the introduction task's Observer span. This is
+a voice-pipeline defect, separate from the retry-scoping branch, and belongs in its own issue.
