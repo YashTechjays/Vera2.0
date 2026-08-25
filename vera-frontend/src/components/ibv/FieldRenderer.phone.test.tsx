@@ -26,13 +26,13 @@ function renderPhone(value: string, onChange = vi.fn()) {
 describe("FieldRenderer phone country select", () => {
   it("renders a country dropdown plus the number input", () => {
     renderPhone("+12125551234")
-    expect(screen.getByRole("combobox", { name: "Country code" })).toHaveValue("US")
+    expect(screen.getByRole("combobox", { name: "Country code" })).toHaveTextContent("US +1")
     expect(screen.getByRole("textbox")).toHaveValue("2125551234")
   })
 
   it("preselects the country the value belongs to", () => {
     renderPhone("+919876543210")
-    expect(screen.getByRole("combobox", { name: "Country code" })).toHaveValue("IN")
+    expect(screen.getByRole("combobox", { name: "Country code" })).toHaveTextContent("IN +91")
     expect(screen.getByRole("textbox")).toHaveValue("9876543210")
   })
 
@@ -43,11 +43,26 @@ describe("FieldRenderer phone country select", () => {
     expect(onChange).toHaveBeenLastCalledWith("+12")
   })
 
-  it("recomposes when the country changes", async () => {
+  // 15s: opening the Radix menu renders ~250 options — legitimately slow in jsdom
+  // under full-suite parallel load, and it flaked at the default 5s.
+  it("recomposes when the country changes", { timeout: 15_000 }, async () => {
     const user = userEvent.setup()
     const onChange = renderPhone("+12125551234")
-    await user.selectOptions(screen.getByRole("combobox", { name: "Country code" }), "IN")
+    // Radix menu, not a native <select>: the OS option list cannot be contained
+    // and sprawled over the form modal (VR2-288) — open it and pick like a user.
+    // getByText, not role+name: computing accessible names across ~250 options
+    // blows the test timeout under full-suite load.
+    await user.click(screen.getByRole("combobox", { name: "Country code" }))
+    await screen.findByRole("listbox")
+    await user.click(screen.getByText("IN +91"))
     expect(onChange).toHaveBeenLastCalledWith("+912125551234")
+  })
+
+  it("opens the countries in a floating listbox (never a native OS popup)", { timeout: 15_000 }, async () => {
+    const user = userEvent.setup()
+    renderPhone("+12125551234")
+    await user.click(screen.getByRole("combobox", { name: "Country code" }))
+    expect(await screen.findByRole("listbox")).toBeInTheDocument()
   })
 
   it("clears the value when the digits are emptied", async () => {

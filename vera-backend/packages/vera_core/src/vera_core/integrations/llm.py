@@ -38,6 +38,18 @@ class JudgeVerdict:
     evidence: str
 
 
+class PartialJudgeError(Exception):
+    """A judge pass that scored only some fields, carrying the verdicts it did collect — a bare
+    error would discard them, so one failed chunk costs every answer its verdict and evidence.
+
+    The message names the cause's TYPE only, and the cause is not chained: a provider error can
+    embed the transcript it was sent."""
+
+    def __init__(self, verdicts: list[JudgeVerdict], cause: Exception) -> None:
+        super().__init__(f"judge coverage incomplete ({type(cause).__name__})")
+        self.verdicts = verdicts
+
+
 #: Authored literals the requested paths accept, keyed by field_path — an extractor never shown
 #: them declines to write a non-numeric answer at all, so the sentinel is dropped rather than
 #: mis-spelled (`forms.extraction_prompt.special_values_hint`).
@@ -59,7 +71,8 @@ class LLMClient(Protocol):
         """Return one verdict per extracted field (best-effort). A dropped verdict
         strands its answer with no FieldEvaluation, so downstream reads it as
         unsatisfied and re-asks it — an implementation MUST push coverage as close
-        to complete as it can, not fire one lossy batch."""
+        to complete as it can, not fire one lossy batch. Incomplete coverage raises
+        `PartialJudgeError`, never a bare error."""
         ...
 
 
@@ -74,10 +87,12 @@ class FakeLLMClient:
         extracted: list[ExtractedField],
         verdicts: list[JudgeVerdict],
         raise_on_extract: Exception | None = None,
+        raise_on_judge: Exception | None = None,
     ) -> None:
         self._extracted = extracted
         self._verdicts = verdicts
         self._raise_on_extract = raise_on_extract
+        self._raise_on_judge = raise_on_judge
         self.extract_calls: list[list[str]] = []
         self.extract_special_values: list[SpecialValues | None] = []
         self.judge_calls: list[list[ExtractedField]] = []
@@ -99,4 +114,6 @@ class FakeLLMClient:
         self, *, extracted: list[ExtractedField], turns: list[TranscriptTurn]
     ) -> list[JudgeVerdict]:
         self.judge_calls.append(list(extracted))
+        if self._raise_on_judge is not None:
+            raise self._raise_on_judge
         return list(self._verdicts)

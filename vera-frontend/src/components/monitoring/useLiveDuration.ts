@@ -7,7 +7,7 @@ import { elapsed, startMs } from "@/lib/monitoring/liveTimer"
  * (`sseMs`) starts the clock the instant the callee answers; the polled
  * `startedAt` seeds a call already live when the modal opened. It ticks once a
  * second while the modal is open and the call is live, then freezes on a terminal
- * status (the interval stops and `now` holds its last value).
+ * status — at `endedMs` when the end time is known, else at the last tick.
  *
  * `running` is true once a start is known — the modals tint the status dot
  * emerald (live) rather than amber (still dialing).
@@ -17,11 +17,14 @@ export function useLiveDuration({
   ended,
   sseMs,
   startedAt,
+  endedMs,
 }: {
   open: boolean
   ended: boolean
   sseMs: number | null
   startedAt: string | null | undefined
+  /** Epoch ms the call reached a terminal status — the frozen end of the timer (VR2-213). */
+  endedMs: number | null
 }): { label: string; running: boolean } {
   const started = startMs(sseMs, startedAt)
   const [now, setNow] = useState(() => Date.now())
@@ -30,5 +33,6 @@ export function useLiveDuration({
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [open, ended])
-  return { label: elapsed(started, now), running: started != null }
+  const end = ended && endedMs != null ? endedMs : now
+  return { label: elapsed(started, end), running: started != null }
 }

@@ -4,6 +4,13 @@ import type { Country } from "react-phone-number-input"
 
 import { cn } from "@/lib/utils"
 import { composePhoneValue } from "@/lib/ibv/phone"
+import {
+  RichSelect,
+  RichSelectContent,
+  RichSelectItem,
+  RichSelectTrigger,
+  RichSelectValue,
+} from "@/components/ui/rich-select"
 
 const DEFAULT_COUNTRY: Country = "US"
 
@@ -52,19 +59,29 @@ export function PhoneCell({ value, onChange, disabled, placeholder, padStyle, cl
 
   return (
     <span className={cn("flex h-full w-full min-w-0 items-stretch", className)}>
-      <select
-        aria-label="Country code"
+      {/* RichSelect, not a native <select>: the OS paints a native option list wherever
+          it fits — it cannot be contained, and its 200-entry sprawl over the modal is
+          VR2-288. Radix clamps the menu to the available viewport and scrolls it. */}
+      <RichSelect
         value={country}
         disabled={disabled}
-        onChange={(e) => selectCountry(e.target.value as Country)}
-        className="w-[70px] shrink-0 cursor-pointer border-r border-ibv-input-border bg-transparent px-[3px] font-ibv text-[12px] font-bold text-black outline-none disabled:cursor-not-allowed"
+        onValueChange={(v) => selectCountry(v as Country)}
       >
-        {COUNTRIES.map((c) => (
-          <option key={c.code} value={c.code}>
-            {c.label}
-          </option>
-        ))}
-      </select>
+        <RichSelectTrigger
+          aria-label="Country code"
+          className="h-full w-[70px] shrink-0 justify-between gap-0 rounded-none border-0 border-r border-ibv-input-border bg-transparent px-[3px] py-0 font-ibv text-[12px] font-bold text-black shadow-none focus-visible:ring-0"
+        >
+          <RichSelectValue />
+        </RichSelectTrigger>
+        {/* max-h-60 caps the list well inside the modal; the viewport scrolls the rest. */}
+        <RichSelectContent className="max-h-60 font-ibv text-[12px]">
+          {COUNTRIES.map((c) => (
+            <RichSelectItem key={c.code} value={c.code}>
+              {c.label}
+            </RichSelectItem>
+          ))}
+        </RichSelectContent>
+      </RichSelect>
       <input
         type="tel"
         inputMode="tel"

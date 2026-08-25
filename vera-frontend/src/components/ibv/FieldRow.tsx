@@ -31,6 +31,7 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
     values,
     setValue,
     errors,
+    mode,
     disputeFor,
     flagsFor,
     applyDispute,
@@ -50,6 +51,9 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
   const disabledReason =
     !applicable && schema !== null ? applicabilityReason(schema, gates, values) : null
   const invalidReason = errors[path]
+  // VR2-206 (reopened): in create mode the message must be VISIBLE at the field —
+  // the red ring + hover tooltip alone read as a generic error.
+  const inlineError = mode === "create" ? invalidReason : undefined
   // Voice-call participation tint on the label cell (see UsageLegend).
   const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
 
@@ -81,45 +85,52 @@ export function FieldRow({ field, path, depth, gates, compact }: Props) {
         )}
       </div>
 
-      <div className="relative flex min-w-0 flex-1 items-stretch">
-        <FieldRenderer
-          field={field}
-          path={path}
-          value={value}
-          onChange={(v) => setValue(path, v)}
-          disabled={!applicable}
-          placeholder={!applicable ? field.inapplicable_value : undefined}
-          title={disabledReason ?? invalidReason}
-          invalid={!!invalidReason}
-          highlightClass={highlightClass}
-          inputPaddingRight={showDispute ? disputeGutter : undefined}
-          noRightBorder
-          countrySelect={schema !== null && phonePaths(schema).has(path)}
-        />
-        {showDispute &&
-          (compact ? (
-            <CompactDisputeControls
-              dispute={dispute!}
-              confidence={confidence}
-              provenance={provenance}
-              flags={flags}
-              className="top-1/2 right-1 -translate-y-1/2"
-              canSwap={applicable}
-              onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
-            />
-          ) : (
-            <InlineDisputeControls
-              dispute={dispute!}
-              confidence={confidence}
-              provenance={provenance}
-              flags={flags}
-              className="top-1/2 right-1.5 -translate-y-1/2"
-              canSwap={applicable}
-              onSwap={() => swapDispute(path)}
-              onApply={() => applyDispute(path)}
-            />
-          ))}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 items-stretch">
+          <FieldRenderer
+            field={field}
+            path={path}
+            value={value}
+            onChange={(v) => setValue(path, v)}
+            disabled={!applicable}
+            placeholder={!applicable ? field.inapplicable_value : undefined}
+            title={disabledReason ?? invalidReason}
+            invalid={!!invalidReason}
+            highlightClass={highlightClass}
+            inputPaddingRight={showDispute ? disputeGutter : undefined}
+            noRightBorder
+            countrySelect={schema !== null && phonePaths(schema).has(path)}
+          />
+          {showDispute &&
+            (compact ? (
+              <CompactDisputeControls
+                dispute={dispute!}
+                confidence={confidence}
+                provenance={provenance}
+                flags={flags}
+                className="top-1/2 right-1 -translate-y-1/2"
+                canSwap={applicable}
+                onSwap={() => swapDispute(path)}
+                onApply={() => applyDispute(path)}
+              />
+            ) : (
+              <InlineDisputeControls
+                dispute={dispute!}
+                confidence={confidence}
+                provenance={provenance}
+                flags={flags}
+                className="top-1/2 right-1.5 -translate-y-1/2"
+                canSwap={applicable}
+                onSwap={() => swapDispute(path)}
+                onApply={() => applyDispute(path)}
+              />
+            ))}
+        </div>
+        {inlineError && (
+          <p className="border-b border-ibv-input-border bg-ibv-input-bg px-1 pb-1 pt-0.5 font-ibv text-[11px] leading-tight text-[#b91c1c]">
+            {inlineError}
+          </p>
+        )}
       </div>
     </div>
   )

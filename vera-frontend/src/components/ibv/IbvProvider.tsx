@@ -87,6 +87,8 @@ type IbvContextValue = {
     dispute?: LiveDispute | null,
   ) => void
   errors: ValidationErrors
+  /** Which surface the form serves — create mode renders errors inline at the field (VR2-206). */
+  mode: Mode
   /** Required fields the reviewer emptied this session — saving is blocked on these. */
   clearedRequired: string[]
   disputes: DisputeMap
@@ -804,6 +806,7 @@ export function IbvProvider({
     setValue,
     applyLiveAnswer,
     errors,
+    mode,
     clearedRequired,
     disputes,
     disputeFor,
