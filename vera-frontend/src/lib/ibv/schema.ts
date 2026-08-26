@@ -227,7 +227,7 @@ export function suggestionsOf(field: LeafField): string[] {
  * - `noop`: UI-only — never in the prompt, never asked (role input/readonly).
  * - `asked`: collected on the call (role ask/confirm).
  */
-export type FieldUsage = "system" | "context" | "noop" | "asked"
+export type FieldUsage = "system" | "context" | "noop" | "asked" | "perCall"
 
 const _systemPathsBySchema = new WeakMap<FormSchema, Set<string>>()
 
@@ -244,13 +244,19 @@ export function systemFieldPaths(schema: FormSchema): Set<string> {
 export function fieldUsageOf(
   schema: FormSchema,
   path: string,
-  field: LeafField
+  field: LeafField,
+  callScopedPaths?: ReadonlySet<string>
 ): FieldUsage {
   if (systemFieldPaths(schema).has(path)) return "system"
   // A ui_only SECTION is never voice-touched, whatever its leaves' roles say.
   if (schema.sections[path.split(".")[1]]?.role === "ui_only") return "noop"
   if (field.role === "context") return "context"
   if (field.role === "input" || field.role === "readonly") return "noop"
+  // After the role checks, before the "asked" default: a per-call leaf IS asked, so this
+  // narrows that bucket rather than competing with it. The set is server-resolved (see
+  // PatientFormDetail.call_scoped_paths) and never re-derived from `collected_per` here,
+  // because that marker inherits through groups and sections.
+  if (callScopedPaths?.has(path)) return "perCall"
   return "asked"
 }
 

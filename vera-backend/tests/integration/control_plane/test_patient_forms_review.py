@@ -456,6 +456,35 @@ async def test_detail_returns_fields_and_dispute(
     assert "Blue Cross" not in rows[0][1]  # never the value
 
 
+async def test_detail_sends_the_resolved_call_scoped_paths(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    dispute_form: UUID,
+) -> None:
+    """The UI marks these fields to explain why they never dispute, and it must not re-derive
+    the set: `collected_per` inherits leaf -> groups -> section, so a client reading the leaf
+    marker alone misses `is_insurance_active`. Sending the SAME set that drives the exemption in
+    `build_field_views` is what keeps the marking and the behaviour from drifting apart."""
+    resp = await client.get(
+        f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    paths = resp.json()["data"]["call_scoped_paths"]
+    assert paths == sorted(paths), "sorted for a stable body"
+    # The two leaves that declare `collected_per` themselves...
+    assert "sections.insurance_representative.rep_name" in paths
+    assert "sections.insurance_representative.call_reference_number" in paths
+    # ...and the one that only inherits it. This is the assertion that fails if the endpoint
+    # ever starts sending raw leaf markers instead of the resolved set.
+    assert "sections.patient_verification.is_insurance_active" in paths
+    # Every marked path must be exempt from disputes — the property the marking claims.
+    fields = {f["field_path"]: f for f in resp.json()["data"]["fields"]}
+    for p in paths:
+        present = fields.get(p) or fields.get(p.removeprefix("sections."))
+        if present is not None:
+            assert present["dispute"] is None, f"{p} is marked call-scoped but shows a dispute"
+
+
 async def test_detail_cross_tenant_is_404(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,

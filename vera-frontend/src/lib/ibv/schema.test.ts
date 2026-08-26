@@ -365,6 +365,21 @@ describe("fieldUsageOf", () => {
     expect(usage("sections.patient_information.patient_name")).toBe("system")
   })
 
+  it("marks a path in the server-resolved call-scoped set as perCall", () => {
+    const path = "sections.insurance_information.plan_type"
+    expect(usage(path)).toBe("asked")
+    expect(fieldUsageOf(schema, path, leaf(path).field, new Set([path]))).toBe("perCall")
+  })
+
+  it("narrows only the asked bucket — a system or UI-only field stays what it is", () => {
+    // perCall is a narrowing of "asked", not a competing category: if it were checked first
+    // it would mask the system binding, which decides how the field is treated everywhere else.
+    const sys = "sections.patient_information.chart_number"
+    const uiOnly = "sections.form_information.practice"
+    expect(fieldUsageOf(schema, sys, leaf(sys).field, new Set([sys]))).toBe("system")
+    expect(fieldUsageOf(schema, uiOnly, leaf(uiOnly).field, new Set([uiOnly]))).toBe("noop")
+  })
+
   it("classifies bot context, UI-only and asked fields", () => {
     expect(usage("sections.patient_information.spouse_gender")).toBe("context")
     expect(usage("sections.form_information.practice")).toBe("noop")

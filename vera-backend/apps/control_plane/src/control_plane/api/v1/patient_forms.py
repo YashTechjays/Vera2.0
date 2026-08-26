@@ -632,6 +632,13 @@ class PatientFormDetail(BaseModel):
     # toggle pre-loads from here so an operator's earlier choice round-trips.
     ivr_navigation_enabled: bool
     fields: list[FieldView]
+    # The schema's `collected_per="call"` leaves — the SAME set that suppresses their disputes in
+    # `build_field_views`, so the marking the UI shows and the exemption it explains cannot drift.
+    # Sent RESOLVED rather than re-derived client-side: `collected_per` inherits leaf → enclosing
+    # groups nearest-first → section → document default, and a client reading only the leaf marker
+    # silently misses `is_insurance_active`, which declares none of its own
+    # (test_the_shipped_ibv_schema_relies_on_section_inheritance pins that).
+    call_scoped_paths: list[str]
 
 
 class CallAttemptView(BaseModel):
@@ -838,6 +845,8 @@ async def _build_detail(
         insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[_field_view(view, prov.get(view["field_path"])) for view in views],
+        # Sorted for a stable response body; the set itself is unordered.
+        call_scoped_paths=sorted(call_scoped_paths),
     )
 
 

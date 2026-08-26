@@ -6,6 +6,8 @@ import { leafByPath } from "@/lib/ibv/schema"
 import type { FormValues } from "@/lib/ibv/types"
 import type { FieldProvenance } from "@/lib/patient-forms/types"
 
+import { USAGE_META } from "./usageMeta"
+
 const PATH = vi.hoisted(() => "sections.male_partner_coverage.male_partner_covered")
 // Mutable so a test can satisfy the male-partner gates instead of failing them, switch
 // the provider mode, inject validation errors, or set the provenance a specific row's
@@ -15,6 +17,7 @@ const state = vi.hoisted(() => ({
   provenance: undefined as FieldProvenance | undefined,
   mode: "mock" as string,
   errors: {} as Record<string, string>,
+  callScopedPaths: new Set<string>() as ReadonlySet<string>,
 }))
 
 vi.mock("./IbvProvider", async () => {
@@ -34,6 +37,7 @@ vi.mock("./IbvProvider", async () => {
       swapDispute: vi.fn(),
       provenanceFor: () => state.provenance,
       confidenceFor: () => resolveConfidence(dispute.confidence, null),
+      callScopedPaths: state.callScopedPaths,
       isPathRequired: () => false,
     }),
   }
@@ -57,6 +61,7 @@ function renderRow(values: FormValues, provenance?: FieldProvenance) {
 beforeEach(() => {
   state.mode = "mock"
   state.errors = {}
+  state.callScopedPaths = new Set()
 })
 
 describe("FieldRow dispute visibility on a gate-failed field (VR2-166)", () => {
@@ -122,5 +127,26 @@ describe("FieldRow inline validation message (VR2-206)", () => {
     state.mode = "create"
     renderRow(GATES_PASS)
     expect(screen.queryByText(MESSAGE)).not.toBeInTheDocument()
+  })
+})
+
+describe("FieldRow per-call marking", () => {
+  it("tints the label cell and explains the dispute exemption on hover", () => {
+    state.callScopedPaths = new Set([PATH])
+    renderRow(GATES_PASS)
+    const label = screen.getByText(leafByPath(schema).get(PATH)!.field.title)
+    // The tooltip has to say WHY there is no dispute — that is the whole point of the
+    // marking. Asserting the exact copy would pin prose, so assert the two claims a
+    // reviewer needs: it is asked every call, and it is never disputed.
+    expect(label.getAttribute("title")).toMatch(/every call/i)
+    expect(label.getAttribute("title")).toMatch(/dispute/i)
+    expect(label.closest("div")?.className).toContain(USAGE_META.perCall.labelCellClass)
+  })
+
+  it("leaves an ordinary asked field untinted and untooltipped", () => {
+    renderRow(GATES_PASS) // callScopedPaths empty
+    const label = screen.getByText(leafByPath(schema).get(PATH)!.field.title)
+    expect(label.getAttribute("title")).toBeNull()
+    expect(label.closest("div")?.className).not.toContain(USAGE_META.perCall.labelCellClass)
   })
 })

@@ -1,5 +1,6 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -912,6 +913,20 @@ class TestCollectedPer:
         assert _doc(section_mark="call").collected_per_call_paths() == frozenset(
             {"sections.basics.plan_type", "sections.basics.rep_name"}
         )
+
+    def test_the_shipped_ibv_schema_relies_on_section_inheritance(self) -> None:
+        """The reason the API sends `call_scoped_paths` RESOLVED instead of letting the client
+        derive it. `is_insurance_active` is call-scoped only through its section — its own leaf
+        declares no `collected_per` — so a consumer reading the leaf marker alone would mark the
+        rep name and the reference number and silently miss it. If this ever stops being true,
+        the client-side shortcut becomes safe and this test should say so."""
+        doc = FormSchemaDoc.model_validate(
+            json.loads((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8"))
+        )
+        active = "sections.patient_verification.is_insurance_active"
+        assert active in doc.collected_per_call_paths()
+        leaf = dict(doc.leaf_items())[active]
+        assert leaf.collected_per is None, "leaf now declares it — the inheritance case is gone"
 
     def test_section_marker_skips_a_confirm_leaf(self) -> None:
         """A confirm leaf is on file precisely to be read back — `gating_seed` keeps confirm

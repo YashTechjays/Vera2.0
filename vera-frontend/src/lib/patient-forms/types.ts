@@ -123,6 +123,12 @@ export type PatientFormDetail = {
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
+  /** Schema paths with `collected_per="call"` — asked on every call, so their value
+   *  describes ONE call and is never compared against a form baseline. This is the same
+   *  set the server uses to suppress their disputes, sent resolved rather than re-derived:
+   *  `collected_per` inherits leaf → groups → section → document default, and a client
+   *  reading only the leaf marker misses `is_insurance_active`, which declares none. */
+  call_scoped_paths: string[]
 }
 
 /** Active insurance-provider option for the send-to-queue picker

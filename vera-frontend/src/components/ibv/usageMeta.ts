@@ -31,6 +31,16 @@ export const USAGE_META: Record<
     labelCellClass: "",
     swatchClass: "border-ibv-input-border bg-ibv-input-bg",
   },
+  // Amber, distinct from the violet system tint and the green context tint. Deliberately not
+  // red: red means low-confidence dispute here, and a per-call field is the opposite of a
+  // problem — it is working as designed.
+  perCall: {
+    label: "Per-call field",
+    description:
+      "Asked on every call. Its value describes THAT call — the representative's name, the call reference number — so it has no form-level baseline to diverge from and never raises a dispute.",
+    labelCellClass: "bg-amber-100",
+    swatchClass: "border-amber-300 bg-amber-100",
+  },
   // Diagonal gray hatching ("not in use"), not another hue — flat gray was
   // indistinguishable from the default label cells.
   noop: {
@@ -45,4 +55,4 @@ export const USAGE_META: Record<
 }
 
 /** Legend display order. */
-export const USAGE_ORDER: FieldUsage[] = ["system", "context", "asked", "noop"]
+export const USAGE_ORDER: FieldUsage[] = ["system", "context", "asked", "perCall", "noop"]
