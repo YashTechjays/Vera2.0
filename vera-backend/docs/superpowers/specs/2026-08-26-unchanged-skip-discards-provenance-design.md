@@ -79,18 +79,48 @@ exactly what pushing to `_recorded` already does. The two rules are behaviourall
 every case — prior-call prefill, intake prefill (`call_id IS NULL`), no prefill, repeat, and
 revert-to-prefill — so the local structure is preferred.
 
-### 2.3 `_on_file` is untouched
+### 2.3 `_on_file`'s contents are untouched — its invocation is not
 
-`_on_file` keeps all three of its other jobs, unchanged:
+`_on_file` keeps all three of its other jobs, unchanged in what they read:
 
-* the rule engine — `self._rule_engine.evaluate(self._on_file)` (`observer.py:620`);
+* the rule engine — `self._rule_engine.evaluate(self._on_file)` (`observer.py:616`);
 * `_derive_remaining_locked`'s "a rep-stated or prefilled remaining wins" guard
-  (`observer.py:669`);
+  (`observer.py:667`);
 * the canonical everything-on-file map, including the canonicalization applied at seed time.
 
+That is true of the map's CONTENTS. It is false of the map's INVOCATION. The deleted early return
+used to skip both `_derive_remaining_locked` and `RuleEngine.evaluate` entirely whenever the
+extracted value matched what was already on file — the `return` sat before either was reached
+(§2.1). Now that dedup keys on `_recorded`, which starts empty for THIS call, a confirmation-only
+pass reaches both.
+
+Concretely: prefilled `total` and `met`, a blank `remaining`, and the rep merely confirms the
+`total`. Pre-fix, `self._on_file.get('total') == answer.value` was true, so the branch returned
+before the write — `records == []`. Post-fix, `_recorded` has nothing for `total` yet this call, so
+the write proceeds, `_rule_engine.evaluate` runs, and `_derive_remaining_locked` fires: `remaining`
+is blank in `_on_file`, so its own guard does not short-circuit, and it derives `total - met` and
+records it under THIS call's id — `records == [total, remaining]`. `remaining` is a DERIVED value,
+written against this call, computed from a `met` the rep never stated on this call; it came from
+`plan.prefilled`, i.e. from `_on_file`'s inherited prior-call/intake contents.
+
+The rule engine has the same shape (`observer.py:616`): a fire-once `terminate_call` /
+`skip_to_task` flow rule, a `Contradiction`, or a `NumericConsistency` `ReAsk` whose `when` rests
+purely on inherited prior-call/intake state can now fire on a focused retry where pre-fix the
+engine never ran for that pass. `focus_call_plan` clears `on_file_values` but deliberately leaves
+`prefilled` untouched (`call_plan.py:482`), so the full prior-call/intake state is present in
+`_on_file` on every focused retry — nothing about narrowing to a focused retry narrows what the
+rule engine sees.
+
 `_derive_remaining_locked` routes its derived value through `_record_locked`, so it inherits the
-new dedup. Its own `_on_file` guard runs first and is unaffected: a non-blank prefilled remaining
-still short-circuits before any write.
+new dedup, and its own `_on_file` guard is unaffected in what it checks — a non-blank prefilled
+remaining still short-circuits before any write. What changed is that the guard is now REACHED on
+a confirmation pass where before it never ran at all.
+
+These are live-call effects of the dedup swap, not merely map bookkeeping, and were not called out
+in §2.1. They are not asserted as bugs — a derived value backfilled under the retrying call, or a
+stale rule finally getting to evaluate against confirmed-fresh state, are both plausibly cures for
+staleness the retry exists to fix. But they were unrecorded, and the live gate (§5.3) must now
+watch for them specifically.
 
 ### 2.4 The change can only add writes, never remove one
 
@@ -119,7 +149,7 @@ blast radius — no field can start being written *less*.
 The last row resolves the brief's open question 6 and review §15.3: it is the same skip, so the
 same fix covers it.
 
-### 3.2 Row volume is bounded, and unchanged from today's bound
+### 3.2 Row volume is bounded — but the post-call judge is what actually scales
 
 Today the write branch ends with `self._on_file[path] = value`, so a second identical extraction in
 the same call re-enters the skip. Keying on `_recorded` reproduces that bound exactly: **at most
@@ -131,6 +161,23 @@ repeated value is rewritten on each attempt, so ~170 paths × 5 attempts. Bounde
 Nothing downstream assumes one row per `(form, path, call)`; the `fa_current_uq` partial-unique
 index constrains *current* rows only, and `record_answer`'s demote-then-flush-then-insert maintains
 it through the swap.
+
+That bounds DB row growth, but row growth isn't the quantity that costs anything — the post-call
+judge is. `post_call_eval.py:297-311` builds `observer_pairs` from EVERY current `ai_call` row this
+call owns (`row.call_id == call_id and row.source == AnswerSource.AI_CALL.value`); `to_judge =
+observer_pairs + kept` (`post_call_eval.py:389`) goes to `judge()`, which chunks at
+`_JUDGE_CHUNK_SIZE = 50` (`llm.py:167`) and fires the chunks concurrently under a process-wide
+`Semaphore(max_concurrency=8)` (`llm.py:209`) — each chunk resending the full transcript block.
+Before this fix a confirmation-heavy retry wrote roughly zero new `ai_call` rows for confirmed
+prefills, so the judge saw roughly one chunk; after it, every confirmed path becomes a row this
+call owns, so a ~180-path form (the size the chunker was already sized for, `llm.py:164-166`) goes
+from ~1 chunk to ~4: roughly 4x the judge tokens, and 4x the chunk-failure surface. A chunk not
+salvaged after `_JUDGE_MAX_ATTEMPTS = 3` (`llm.py:163`) raises `PartialJudgeError`, which routes the
+form to `EXCEPTION_REVIEW` / `ReviewReason.LLM_ERROR` (`post_call_eval.py:393`, `463-469`).
+
+This is within the ceiling the chunker was already sized for, so it is **not a defect** — it is a
+bounded, watch-this consequence. Watch judge latency, Vertex cost, and the `LLM_ERROR` rate on the
+first retry-heavy day in production.
 
 ### 3.3 No dispute opens on current data; one legacy case must be pinned
 
@@ -165,19 +212,43 @@ therefore moves an `ask`-role field from unconditionally trusted to judge-condit
 `unsatisfied_required_paths` (the auto-complete gate) and `retryable_required_paths`
 (retry-worthiness) through `_unsatisfied`.
 
+**In principle, this can cause the very redial it exists to prevent.** The judge is asked whether
+the transcript SUPPORTS the extracted value, not merely whether it matches (`llm.py:125`) — and a
+terse read-back confirmation ("Yes, that's correct") is weaker textual support than the rep stating
+the value cold. `supported=False`, or `confidence` under the floor, turns a field that was
+unconditionally satisfied as `intake` (`review.py:263-265`) into unsatisfied. If that tips
+`unsatisfied_required_paths` non-empty, the form misses the `READY_FOR_REVIEW` park and falls
+through to the fill-threshold gate instead (`post_call_eval.py:531-545`) — the same gate a genuine
+shortfall would fail. So a confirmed value can, in principle, trigger a redial for a field the rep
+already confirmed correctly.
+
 Bounding this precisely:
 
+* **Not a new category of exposure.** `policy_number` — required, `role="confirm"` — already
+  depends on exactly this judge-support outcome on every `ibv_standard` form, with or without this
+  change (§1.1): a confirm-role leaf is never satisfied by intake, only by a supported `ai_call`
+  judgment, so `unsatisfied_required_paths` was already liable to include it whenever the judge
+  withheld support. This fix broadens the judge-conditional population; it does not introduce the
+  possibility of a judge-driven spurious redial where none existed before.
 * **`completion_pct` is unaffected** — `completion_pct_v2` is value-presence only (`review.py:149`).
-* **`verified_pct` improves** — it routes through `is_call_confirmed`, which is the thing being
-  fixed.
+* **`verified_pct` only ever improves** — it routes through `is_call_confirmed`, which is the thing
+  being fixed, and this change can only gain it satisfied paths, never lose one.
+* **`retry_fill_threshold` defaults to 0.50** (`tenant.py:44`) — one spurious unsatisfied path out
+  of a ~180-path form rarely tips an otherwise well-filled form below half.
 * **No transient window on the normal path.** `evaluate_call` is "extract, persist, judge, and
   update status" in one transaction (`post_call_eval.py:148`), so `ai_supported` is written before
   `unsatisfied` is computed.
-* **The real exposure is the fallback path.** `resolve_ai_processing` runs no judge, so
-  `ai_supported` stays `NULL` and `load_field_status` maps that to `ai_supported=None`, which
-  "already fails the gate" (`field_status.py:69`). That path is reached when
-  `post_call_eval_ready` is false (`settings.gcp_project is None`) — a configuration in which
-  `verified_pct` is already unreliable.
+* **Confined to the eval path.** `unsatisfied_required_paths` and `retryable_required_paths` — the
+  only callers of `is_field_satisfied` — run exclusively inside `evaluate_call`
+  (`post_call_eval.py`). The fallback path's own gate, `resolve_ai_processing` →
+  `load_verified_fraction` → `satisfied_required_fraction`, uses `is_call_confirmed`
+  (`review.py:445`) instead of `is_field_satisfied`, so this asymmetry cannot reach the fallback
+  path at all — see the corrected §7 F-c (an earlier pass at this document had that backwards).
+* **Either outcome still parks in `EXCEPTION_REVIEW`.** A spurious redial converges on the same
+  review queue a genuine one would: retries are capped (`sm.can_retry`), and every exhausted-retry
+  or gate-declined branch of `evaluate_call` also ends in `EXCEPTION_REVIEW`
+  (`RETRIES_EXHAUSTED` / `UNSATISFIED_UNASKABLE` / `AUTO_RETRY_DISABLED`) — the worst case is one
+  extra call, never a state nothing reviews.
 * **The mechanism is not new.** A *changed* value already flips source today; what changes is the
   population, from "fields whose value changed" to "every confirmed prefill."
 
@@ -238,7 +309,7 @@ attributed to the backend not writing versus the UI not updating.
   engine compares byte-exact, but it proves that only through the dedup side-effect
   (`records == []`). Once dedup stops keying on `_on_file`, the assertion can no longer fail if
   snapping breaks — the test goes vacuous. It must instead observe `_on_file` through the rule
-  engine (`observer.py:620`), which is the consumer its own docstring names. Assert on the engine's
+  engine (`observer.py:616`), which is the consumer its own docstring names. Assert on the engine's
   directive, so an unsnapped seed fails the comparison the test exists to protect.
 
 That last item is not optional. This branch's history includes eight tests that passed with their
@@ -284,6 +355,14 @@ in the ledger.
   call.
 * **Secondary live observation** (same call, no extra setup): confirm `policy_number` is written
   when the rep confirms the read-back member ID rather than contradicting it (§1.1).
+* **Judge-verdict observation** (§3.5, same call): check the `field_evaluation` row's VERDICT for
+  each confirmed prefill, not merely that the row landed — a `supported=False` or under-floor
+  confirmation is the mechanism §3.5 now documents as a possible spurious-redial trigger, and it
+  will not surface just because *some* `ai_call` row was written.
+* **Rule-engine observation** (§2.3, same call, on a FOCUSED retry specifically): watch for an
+  unexpected early `terminate_call` / `skip_to_task`, or a spurious `Contradiction` /
+  `NumericConsistency` `ReAsk` — the rule engine now runs on a confirmation pass where it
+  previously never did, and its input (`_on_file`) still carries the full prior-call/intake state.
 
 ### 5.4 Known traps
 
@@ -311,5 +390,26 @@ in the ledger.
   values agree.
 * **F-b** — realtime Unverified clearing (§4.1): provenance on the answer envelope plus a
   became-authoritative signal or targeted refetch.
-* **F-c** — the fallback path (`post_call_eval_ready == False`) leaves every `ai_call` row
-  permanently unjudged, so §3.5's consequence is permanent there.
+* **F-c** — *corrected*: the fallback path (`post_call_eval_ready == False`) does leave every
+  `ai_call` row permanently unjudged, but that is not where §3.5's consequence lands.
+  `resolve_ai_processing` (`control_plane/post_call.py:95-110`) never calls
+  `unsatisfied_required_paths`; its only gate is `load_verified_fraction` →
+  `satisfied_required_fraction`, which uses `is_call_confirmed` (`review.py:445`) — a check that
+  already required `source == ai_call` before this fix, so an intake row was already excluded, and
+  an `ai_call` row with `ai_supported=None` fails the same check either way. The fraction was
+  already pinned at whatever it was pre-fix; this change does not move it there. The demotion's
+  real reach is the eval path (`evaluate_call`), the only caller of `unsatisfied_required_paths` /
+  `retryable_required_paths` — see the corrected §3.5.
+* **F-d** — every new `ai_call` row this fix writes for a value that agrees with a **non-canonical**
+  legacy baseline opens a fresh dispute (§3.3's narrow exception, generalized): disputes are the
+  only gate on the human `→ COMPLETED` transition (`api/v1/patient_forms.py:1604-1613`), and
+  `canonical_answer` landed 2026-08-15 (`c59da163`) with no backfill migration — every form whose
+  intake predates that commit carries non-canonical rows this change will re-record canonically and
+  dispute. Likely a dev-data-only exposure (pre-prod at time of writing), but worth a data check
+  before wide rollout.
+* **F-e** — `_push_recorded` now has exactly one call site (§2.4), which runs only after
+  `record_answer` AND the bus emit both succeed. A Redis/bus failure mid-extraction-pass leaves
+  that field "owed" for the rest of the call AND drops the remaining answers in that same
+  extraction pass (the `for` loop in `TaskObserver._one_pass` propagates the exception, caught only
+  by `_run_passes`'s outer handler). Self-heals on the next rep turn once a fresh pass re-extracts;
+  only bites when Redis/the bus is already down.

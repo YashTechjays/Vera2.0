@@ -33,7 +33,9 @@ deepened by nested `CLAUDE.md` files that load only when you touch the relevant 
 - **`mypy --strict` covers `tests/` too** (see `[tool.mypy] files` in `pyproject.toml`), so a test
   helper needs full annotations like any other function. Run mypy on EVERY file you changed, named
   explicitly — scoping it to the production module is how an unannotated test helper reached the
-  gate.
+  gate. Running mypy on a SINGLE FILE in this repo reports a spurious Protocol-signature error at
+  `apps/agent_worker/tests/unit/test_observer.py:195` that the project gate does not have, so
+  always run `uv run mypy --strict` with no path argument.
 - **A test must be able to fail. Prove it.** After writing a test for a behaviour, delete or invert
   the behaviour, confirm the test FAILS, then restore it. This is not paranoia: one branch shipped
   eight tests that passed with their feature fully removed — a "narrowing" test whose assertion held

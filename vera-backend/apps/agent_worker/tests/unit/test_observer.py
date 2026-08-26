@@ -927,6 +927,25 @@ class TestDerivedRemaining:
         derived = [r for r in run_state.records if r[1] == REMAINING]
         assert len(derived) == 1
 
+    @pytest.mark.asyncio
+    async def test_confirming_a_prefilled_total_still_derives_remaining(self) -> None:
+        """Behaviour change from the dedup swap in `_record_locked` (now keyed on `_recorded`,
+        not `_on_file`): pre-fix, the rep merely confirming the prefilled total short-circuited
+        on the unchanged-value skip before `_derive_remaining_locked` ever ran, so a blank
+        remaining stayed unfilled even with total and met already on file. Now a confirmation
+        reaches derivation like any other write."""
+        extractor = FakeExtractor([ExtractedAnswer(TOTAL, "$25,000", 90)])
+        manager, run_state, _, controller = _manager(
+            _plan(
+                numeric_consistencies=[TRIPLET_RULE],
+                prefilled={TOTAL: "$25,000", MET: "$5,000"},
+            ),
+            extractor,
+        )
+        await _feed(manager, _rep("Yes, the total is $25,000, that's correct."))
+        assert controller.answers[REMAINING] == "$20,000.00"
+        assert any(path == REMAINING for _, path, _, _ in run_state.records)
+
 
 def test_extraction_instructions_carry_the_routing_note() -> None:
     """Without it the extractor writes `No` for the branch the rep did not take."""
