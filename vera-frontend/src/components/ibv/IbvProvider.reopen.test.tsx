@@ -28,6 +28,7 @@ const mockedProviders = vi.mocked(listInsuranceProviders)
 const FORM_ID = "44444444-4444-4444-4444-444444444444"
 const VERSION_ID = "55555555-5555-5555-5555-555555555555"
 const REP_NAME = "sections.insurance_representative.rep_name"
+const UNVERIFIED_FIELD = "sections.insurance_information.plan_name"
 
 const DETAIL = {
   id: FORM_ID,
@@ -41,7 +42,24 @@ const DETAIL = {
   chart_number: null,
   appointment_date: null,
   insurance_provider: null,
-  fields: [],
+  fields: [
+    {
+      field_path: UNVERIFIED_FIELD,
+      value: "Aetna PPO",
+      source: "ai_call" as const,
+      confidence: 91,
+      evidence: null,
+      dispute: null,
+      // authoritative:false is what FieldRow renders the "Unverified" pill from; the judge
+      // verdict is what confidenceFor prefers over the capture score.
+      provenance: {
+        attempt: 1,
+        mode: "full" as const,
+        judge: { confidence: 44, supported: false },
+        authoritative: false,
+      },
+    },
+  ],
   ivr_navigation_enabled: false,
   call_scoped_paths: [REP_NAME],
 }
@@ -54,10 +72,13 @@ const DETAIL = {
  * of the session, while `formId`, `schema` and `values` deliberately survive.
  */
 function Harness() {
-  const { loadFormById, openLoadedForm, closeForm, callScopedPaths, schema } = useIbv()
+  const { loadFormById, openLoadedForm, closeForm, callScopedPaths, schema, provenanceFor } =
+    useIbv()
+  const prov = provenanceFor(UNVERIFIED_FIELD)
   return (
     <div>
       <span data-testid="scoped">{callScopedPaths.size}</span>
+      <span data-testid="authoritative">{prov === null ? "absent" : String(prov.authoritative)}</span>
       <span data-testid="schema">{schema ? "loaded" : "none"}</span>
       <button type="button" onClick={() => loadFormById(FORM_ID)}>
         expand panel
@@ -110,6 +131,31 @@ describe("reopening an already-loaded form from Live Monitoring", () => {
     // keeping the form loaded made the per-call tint and its legend row vanish on reopen and
     // never come back, because Live Monitoring reopens via openLoadedForm and never refetches.
     expect(screen.getByTestId("scoped")).toHaveTextContent("1")
+    expect(mockedDetail).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps field provenance across close and reopen", async () => {
+    const user = userEvent.setup()
+    render(
+      <IbvProvider>
+        <Harness />
+      </IbvProvider>,
+    )
+
+    await user.click(screen.getByText("expand panel"))
+    await waitFor(() => expect(screen.getByTestId("schema")).toHaveTextContent("loaded"))
+    expect(screen.getByTestId("authoritative")).toHaveTextContent("false")
+
+    await user.click(screen.getByText("open modal"))
+    await user.click(screen.getByText("close modal"))
+    await user.click(screen.getByText("open modal"))
+
+    // Same reasoning as the call-scoped set above, and the same reopen path: dropping this
+    // while keeping the form loaded took the FieldRow "Unverified" pill and confidenceFor's
+    // judge verdict out for the rest of the session, since Live Monitoring reopens through
+    // openLoadedForm and never refetches. "absent" here is that regression.
+    expect(screen.getByTestId("schema")).toHaveTextContent("loaded")
+    expect(screen.getByTestId("authoritative")).toHaveTextContent("false")
     expect(mockedDetail).toHaveBeenCalledTimes(1)
   })
 })
