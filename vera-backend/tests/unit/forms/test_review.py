@@ -206,6 +206,39 @@ class TestDisputeView:
             "reasoning": None,
         }
 
+    def test_an_ai_call_row_repeating_the_intake_value_is_not_disputed(self) -> None:
+        """The Observer now writes a row when the rep confirms a prefilled value unchanged.
+        That must not manufacture a dispute: `baseline_value` filters on source and NOT on
+        is_current, so the demoted intake row is still the baseline, and equal values compare
+        equal. A spurious dispute would block form completion."""
+        assert (
+            dispute_view(
+                source="ai_call",
+                value={"value": "Alpha"},
+                confidence=90,
+                baseline_value={"value": "Alpha"},
+            )
+            is None
+        )
+
+    def test_a_pre_canonicalization_baseline_can_still_dispute_on_money_format(self) -> None:
+        """Known, accepted edge. `canonical_answer` folds currency ($0.00 -> $0) but
+        `normalize_value` only strips and lowercases, so a baseline stored BEFORE the writers
+        canonicalized can diverge from the canonical value the Observer now writes. Both
+        writers canonicalize today (patient_forms.py:262, observer.py:141), so this reaches
+        legacy rows only. Pinned so the behaviour is chosen rather than discovered in prod."""
+        assert dispute_view(
+            source="ai_call",
+            value={"value": "$0"},
+            confidence=90,
+            baseline_value={"value": "$0.00"},
+        ) == {
+            "previous_value": "$0.00",
+            "current_value": "$0",
+            "confidence": 90,
+            "reasoning": None,
+        }
+
 
 class TestRequiredPathsAndCompletion:
     def test_all_required_paths(self) -> None:
