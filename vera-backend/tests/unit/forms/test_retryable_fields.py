@@ -82,6 +82,31 @@ def test_is_field_satisfied_rules() -> None:
     assert is_field_satisfied(FieldStatus("ai_call", None, 95), floor=FLOOR) is False
 
 
+def test_a_confirmed_intake_value_becomes_unsatisfied_when_no_judge_runs() -> None:
+    """The isolated `is_field_satisfied` pin above does not reach the consequence: the field
+    lands back in `unsatisfied_required_paths`, which is the auto-complete gate. So a rep
+    merely repeating a value intake already held can move a form from "nothing outstanding"
+    to "outstanding" on the no-judge path.
+
+    Accepted trade-off, decided with the product owner (spec §3.5, "Accepted regression:
+    `ask`-role intake fields become judge-conditional") — pinned at the level where it bites,
+    not to reargue it. If this ever needs to change, the spec changes with it.
+    """
+    path = "sections.cov.network_status"
+    intake = FieldStatus(source=AnswerSource.INTAKE.value, ai_supported=None, ai_confidence=None)
+    # `unsatisfied_required_paths` spans every role, so the readonly leaf is filled too —
+    # otherwise it masks the one field under test.
+    on_file = {path: intake, "sections.cov.plan_name": intake}
+    assert unsatisfied_required_paths(on_file, V2, floor=FLOOR) == []
+    # Same value, now owned by the call that confirmed it, with no evaluation row behind it.
+    confirmed_unjudged = FieldStatus(
+        source=AnswerSource.AI_CALL.value, ai_supported=None, ai_confidence=95
+    )
+    assert unsatisfied_required_paths({**on_file, path: confirmed_unjudged}, V2, floor=FLOOR) == [
+        path
+    ]
+
+
 def test_retryable_only_unsatisfied_askable_required() -> None:
     p = "sections.cov.network_status"
     # unfilled (absent from the status map) required askable -> retryable
