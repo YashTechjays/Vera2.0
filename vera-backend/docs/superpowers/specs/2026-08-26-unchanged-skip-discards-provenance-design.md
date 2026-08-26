@@ -152,9 +152,17 @@ same fix covers it.
 ### 3.2 Row volume is bounded — but the post-call judge is what actually scales
 
 Today the write branch ends with `self._on_file[path] = value`, so a second identical extraction in
-the same call re-enters the skip. Keying on `_recorded` reproduces that bound exactly: **at most
-one row per (path, distinct value) per call**, which is what the existing
-`test_unchanged_value_is_recorded_once` already pins.
+the same call re-enters the skip. Keying on `_recorded` reproduces that bound exactly: **a
+CONSECUTIVE repeat of the value a path currently holds is skipped**, which is what the existing
+`test_unchanged_value_is_recorded_once` pins.
+
+Stated precisely, because an earlier draft of this section overstated it as "at most one row per
+(path, distinct value) per call" — that is **not** what either key guarantees. Both `_recorded` and
+the old `_on_file` hold only the LAST value written, so an oscillation `A → B → A` writes `A`
+twice. Confirmed on the live gate (call `01a03d24-c701`): `insurance_information.group_name`
+recorded `alpha → Alpha → alpha → Alpha` across four rows at evidence seqs 12/14/16/36. That is
+unchanged from pre-fix behaviour — only the description was wrong. It also surfaced a PRE-EXISTING
+extractor instability this change neither causes nor can fix — see follow-up F-f.
 
 The worst case is a form that never captures a reference number across its full retry budget: every
 repeated value is rewritten on each attempt, so ~170 paths × 5 attempts. Bounded and acceptable.
@@ -407,6 +415,12 @@ in the ledger.
   intake predates that commit carries non-canonical rows this change will re-record canonically and
   dispute. Likely a dev-data-only exposure (pre-prod at time of writing), but worth a data check
   before wide rollout.
+* **F-f** — the extractor returns unstable spellings for free-text leaves across passes within a
+  single call (`alpha`/`Alpha`, `5 cycles per year`/`5 cycle per year`), observed on the live gate.
+  `canonical_answer` cannot fold either, because those leaves declare no authored literals to snap
+  onto. Pre-existing and unrelated to this change, which only makes it visible by writing more
+  rows. Costs churn rows and a longer superseded trail, not correctness: the last write wins and
+  is the one the judge evaluates.
 * **F-e** — `_push_recorded` now has exactly one call site (§2.4), which runs only after
   `record_answer` AND the bus emit both succeed. A Redis/bus failure mid-extraction-pass leaves
   that field "owed" for the rest of the call AND drops the remaining answers in that same
