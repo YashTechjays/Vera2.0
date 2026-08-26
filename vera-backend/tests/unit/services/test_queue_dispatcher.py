@@ -1579,6 +1579,51 @@ class TestCallPlanStaging:
         assert form.retry_count == 0  # the budget was reset, not spent
         assert session.calls_added()[0].mode == CallMode.RETRY.value
 
+    async def test_a_human_edit_to_the_reference_number_does_not_lose_the_focus(
+        self,
+        _stub_credentials: dict[str, dict[str, Any] | None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reviewer editing Call Reference Number writes `source=human, call_id=None`, which
+        supersedes the call's row. The scope gate must still see the CALL that captured it:
+        `load_field_status` filters `is_current` and `load_authoritative_call_ids` does not, so
+        reading the gate off the current row demoted a 152-answer form back to a FULL call.
+        """
+        tenant = _tenant()
+        sv = _schema_version(IBV_SCHEMA_JSON)
+        pv = _prompt_version(sv)
+        form = _form(tenant.id, schema_version_id=sv.id, retry_count=1)
+        session = FakeSession(
+            tenant=tenant, candidates=[form], schema_version=sv, prompt_version=pv
+        )
+        livekit = FakeLiveKit()
+        plans = FakeCallPlanService()
+
+        ref = "sections.insurance_representative.call_reference_number"
+        call_id = uuid7()
+
+        async def _status(_session: Any, _form_id: Any) -> dict[str, FieldStatus]:
+            # The post-resolve state: the human row is current, the call's row is not.
+            return {ref: FieldStatus(source="human", ai_supported=None, ai_confidence=None)}
+
+        async def _values(_session: Any, _form_id: Any) -> dict[str, Any]:
+            return {ref: "ABC-123"}
+
+        async def _authoritative(
+            _session: Any, _form_id: Any, *, reference_field: str
+        ) -> frozenset[Any]:
+            # Unfiltered by `is_current`, so the demoted call is still authoritative.
+            return frozenset({call_id})
+
+        monkeypatch.setattr(queue_dispatcher, "load_field_status", _status)
+        monkeypatch.setattr(queue_dispatcher, "current_values_by_path", _values)
+        monkeypatch.setattr(queue_dispatcher, "load_authoritative_call_ids", _authoritative)
+
+        dispatched = await _dispatch(session, tenant.id, livekit, plan_service=plans)
+
+        assert dispatched == 1
+        assert session.calls_added()[0].mode == CallMode.RETRY.value
+
     async def test_a_prior_call_always_writes_lineage_even_when_the_plan_was_not_narrowed(
         self, _stub_credentials: dict[str, dict[str, Any] | None]
     ) -> None:
@@ -1610,7 +1655,8 @@ class TestCallPlanStaging:
     ) -> None:
         """`retry_count > 0` alone must NOT flip `call_mode` to RETRY — only `focused` does.
         A real staged plan is present (so the retry-focus block actually runs) but no
-        reference number is on file, so `has_call_reference` gates it off and the call runs
+        reference number is on file, so no call is authoritative, the focus block is gated off
+        and the call runs
         FULL. Lineage must still land on a second dispatch — proving the mode label and the
         lineage row are decoupled, not accidentally aligned on the same signal."""
         tenant = _tenant()

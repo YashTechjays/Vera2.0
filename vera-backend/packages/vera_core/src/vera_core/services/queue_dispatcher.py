@@ -47,11 +47,7 @@ from vera_core.forms.call_plan import (
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
-from vera_core.forms.review import (
-    REVIEW_CONFIDENCE_FLOOR,
-    focus_paths,
-    has_call_reference,
-)
+from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR, focus_paths
 from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
     Call,
@@ -458,9 +454,9 @@ async def stage_dispatch(
         # snapshot below both need the form's current values.
         values = await current_values_by_path(session, form.id)
 
-        # Retry scope: with a call reference number captured, this is a FOCUSED retry — stage a
+        # Retry scope: when a CALL captured a reference number, this is a FOCUSED retry — stage a
         # plan narrowed to what no authoritative call has confirmed, so the agent asks ONLY those
-        # and never announces a prior call. Without a reference number it runs FRESH.
+        # and never announces a prior call. Otherwise it runs FRESH.
         #
         # Gated on the captured reference number, NOT on `call_mode`: the operator surface passes
         # `manual=True`, which resets `retry_count`, so a form with 152 confirmed answers and a
@@ -474,16 +470,25 @@ async def stage_dispatch(
                     )
                 ).scalar_one()
                 schema_versions[form.schema_version_id] = version
-            doc = FormSchemaDoc.model_validate(version.schema_json)
-            status_by_path = await load_field_status(session, form.id)
-            if has_call_reference(status_by_path, doc):
+            # The authoritative-call set IS the scope gate — never the current answer at the
+            # reference path. A reviewer editing that field writes `source=human, call_id=None`,
+            # which supersedes the call's row, and gating on the current row demoted a fully
+            # confirmed form back to a FULL call. A human-typed reference carries no `call_id`,
+            # so it still cannot open the focused set on what is really a first call (spec D8).
+            # Read off the raw dict: a first call has no reference and must not pay for the
+            # document parse or the field-status join to discover that.
+            reference_field = version.schema_json.get("rep_call_reference_number_field")
+            authoritative = (
+                await load_authoritative_call_ids(session, form.id, reference_field=reference_field)
+                if reference_field
+                else frozenset()
+            )
+            if authoritative:
                 plan, plan_prompt_version_id = staged_plan
-                authoritative = await load_authoritative_call_ids(
-                    session, form.id, reference_field=doc.rep_call_reference_number_field
-                )
+                doc = FormSchemaDoc.model_validate(version.schema_json)
                 focus = focus_paths(
                     doc,
-                    status_by_path,
+                    await load_field_status(session, form.id),
                     version.schema_json,
                     floor=retry_floor,
                     values=values,

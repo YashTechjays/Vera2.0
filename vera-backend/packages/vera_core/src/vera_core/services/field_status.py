@@ -86,10 +86,12 @@ async def load_authoritative_call_ids(
     so the answers it collected carry no proof and a retry still owes those fields (spec D8).
 
     Deliberately NOT filtered on `is_current`: attempt 2's reference supersedes attempt 1's, but
-    attempt 1 was still authoritative — filtering would demote it and re-ask what it collected.
+    attempt 1 was still authoritative — filtering would demote it and re-ask what it collected. A
+    reviewer editing the reference number demotes it the same way, which is why this set — never
+    the current answer at that path — is also the dispatcher's FOCUSED-vs-FRESH scope gate.
 
     `Call.call_reference_no` is not consulted: nothing in the pipeline writes that column, which is
-    why `has_call_reference` reads `field_answer` too.
+    why the reference is read from `field_answer` here.
     """
     rows = await session.execute(
         select(FieldAnswer.call_id).where(

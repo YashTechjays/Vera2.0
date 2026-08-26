@@ -474,24 +474,6 @@ def field_labels(schema_json: Mapping[str, Any], paths: Sequence[str]) -> list[s
     return [titles.get(p, p) for p in paths]
 
 
-def has_call_reference(status_by_path: Mapping[str, "FieldStatus"], doc: FormSchemaDoc) -> bool:
-    """True when a CALL — never intake or a human edit — captured the schema's
-    `rep_call_reference_number_field` leaf. The retry-SCOPE gate: with a reference number
-    captured BY A CALL, a retry is FOCUSED (asks only what no authoritative call confirmed);
-    without one it starts FRESH (a full call from the top). Source-only, deliberately not
-    `is_call_confirmed`'s authoritative-call-id check: an operator can type a reference number
-    into the form (`source=human`, no `call_id`) for a form that was never dialed, and that must
-    not open the focused (required-only) set on what would otherwise be its first call — see spec
-    D8. Takes a parsed doc so the caller validates the schema once and shares it across the retry
-    helpers."""
-    status = status_by_path.get(doc.rep_call_reference_number_field)
-    return (
-        status is not None
-        and status.source == AnswerSource.AI_CALL.value
-        and status.call_id is not None
-    )
-
-
 def expand_to_groups(doc: FormSchemaDoc, paths: Collection[str]) -> list[str]:
     """Grow *paths* so a field inside a group pulls in ALL collectable leaves of
     that group (a partial group reads oddly on a call). For each group whose
