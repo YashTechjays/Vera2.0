@@ -95,10 +95,15 @@ still short-circuits before any write.
 ### 2.4 The change can only add writes, never remove one
 
 `_push_recorded` has exactly two call sites (`observer.py:564`, `observer.py:588`). The first is
-the skip branch being deleted; the second runs only after a successful write. Therefore
-`_recorded[p] == v` implies a write of `v` happened during this call, which implies
-`_on_file[p] == v`. Every path that writes today still writes. This is a strict superset, which
-bounds the blast radius: no field can start being written *less*.
+the skip branch being deleted; the second runs only after a successful write.
+
+The full argument, tightened during review from a call-site count into a proof: `_on_file` has
+exactly ONE mutation site in the file, and it sits immediately beside `_push_recorded` in the
+post-write block. So `_recorded[p] = v` and `_on_file[p] = v` are always set together for the same
+`(p, v)`, giving `_recorded[p] == v` ⟹ `_on_file[p] == v` throughout a call. The contrapositive is
+the property that matters: **whenever the old guard did not skip, the new guard does not skip
+either.** Every path that writes today still writes. This is a strict superset, which bounds the
+blast radius — no field can start being written *less*.
 
 ## 3. Consequences
 
