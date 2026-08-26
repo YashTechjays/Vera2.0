@@ -1,6 +1,7 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
 import json
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,6 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
-from vera_core.forms.catalog.disease_only import build_disease_only
-from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
     COLLECTED_ROLES,
@@ -41,6 +40,13 @@ PROMOTED_COLUMNS: tuple[str, ...] = (
     "insurance_provider",
     "insurance_provider_phone_number",
 )
+
+
+def _catalog_builders() -> list[Callable[[], FormSchemaDoc]]:
+    """Every REGISTERED catalog builder, never a hardcoded pair. `SCHEMAS` is the registry a
+    new insurance type is added to, so driving the whole-catalog invariants off it is what
+    makes a new type inherit them instead of silently escaping every one."""
+    return [build for _filename, build in SCHEMAS.values()]
 
 
 def minimal_doc(**overrides: Any) -> dict[str, Any]:
@@ -750,7 +756,7 @@ class TestNumericConsistencyValidation:
 def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None:
     """The completion guard walks questions; a path no question targets can never be
     asked for, and a path two questions target would be double-counted (spec §8)."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         assert validate_question_coverage(doc) == []
 
@@ -794,7 +800,7 @@ def test_a_routing_questions_target_does_not_count_as_coverage(
 def test_no_catalog_uses_an_end_of_task_confirm() -> None:
     """`validate_question_coverage` exempts them (spoken by the end_confirms block, not the
     tree), so an authored one would be invisible to any tree-walking owed set — see Task 3."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         assert [
             path
             for path, leaf, _ in leaf_gates(build())
@@ -806,7 +812,7 @@ def test_no_catalog_gates_on_a_defaulted_confirm_leaf() -> None:
     """`gating_seed` keeps confirm-role prefills authoritative (the member-ID read-back), so a
     `default` on one would still settle its gate and delete the questions behind it — the
     exact failure removed for ask-role leaves."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         assert validate_confirm_defaults(build()) == []
 
 
@@ -956,14 +962,15 @@ class TestCollectedPer:
 
 def test_every_catalog_marks_its_reference_number_leaf() -> None:
     """A retry that never logs its OWN reference number breaks the next retry's focus gate
-    (`has_call_reference`), and the wrap-up task survives a focused retry only because it holds
-    a call-scoped leaf. Nothing else in the system can infer that from the document.
+    (`load_authoritative_call_ids`), and the wrap-up task survives a focused retry only
+    because it holds a call-scoped leaf. Nothing else in the system can infer that from the
+    document.
 
     Enforced here rather than in a `FormSchemaDoc` validator: that runs on every dispatch
     against the PINNED schema version, and rows published before this marker existed have no
     declaration to find.
     """
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         assert doc.rep_call_reference_number_field in doc.collected_per_call_paths(), (
             f"{doc.insurance_type}: rep_call_reference_number_field is not collected_per=call"
@@ -973,7 +980,7 @@ def test_every_catalog_marks_its_reference_number_leaf() -> None:
 def test_every_catalog_marks_the_rep_name_beside_it() -> None:
     """The rep's name is as per-call as the reference number: a retry that keeps the prior rep's
     name attributes this call's answers to someone who was never on it."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         section = doc.rep_call_reference_number_field.rsplit(".", 1)[0]
         call_scoped = doc.collected_per_call_paths()
@@ -1012,7 +1019,7 @@ def test_a_task_carrying_the_calls_opening_is_always_retained() -> None:
     Vacuous for a schema whose opening task has no `intro` (`disease_only` starts straight into
     questions): nothing rides on it, and dropping it when it owes nothing is correct.
     """
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         if doc.tasks[0].intro is None:
             continue
@@ -1026,6 +1033,6 @@ def test_the_closing_task_is_always_retained() -> None:
     """`_closing_task_index` is `len(plan.tasks) - 1` and the gap pass stops before it, so the
     closer is where the reference number and the goodbye happen. Dropping it would break the NEXT
     retry's focus gate as well as this call's sign-off."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         assert doc.tasks[-1].task_key in _always_run_task_keys(doc), doc.insurance_type
