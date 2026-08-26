@@ -1,9 +1,10 @@
-"""`load_verified_fraction` — the one seam both retry gates read (spec E3).
+"""`load_verified_fraction` — the dispute-resolve gate's number (spec E3).
 
 Session faked exactly like `test_queue_dispatcher.py`'s `FakeSession`: this module drives the
-identical `load_field_status` / `load_authoritative_call_ids` / `current_values_by_path` combo
-(queue_dispatcher's focused-retry read), so routing `execute()` by entity + column shape is the
-established seam rather than a new one.
+identical `load_field_status` / `load_authoritative_call_ids` pair (queue_dispatcher's
+focused-retry read), so routing `execute()` by entity + column shape is the established seam
+rather than a new one. The doc, its raw json and the values are passed in by the caller, so
+`_fraction` below assembles them the way `resolve_disputes` does.
 """
 
 import json
@@ -17,10 +18,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.services.stmt_fakes import bound_value as _bound_value
+from vera_core.forms.conditions import is_v2
+from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.intake import required_intake_fields
 from vera_core.forms.review import retryable_required_paths
-from vera_core.models import PatientForm, SchemaVersion
-from vera_core.models.enums import AnswerSource, FormStatus
+from vera_core.models import SchemaVersion
+from vera_core.models.enums import AnswerSource
 from vera_core.services.verification import load_verified_fraction
 
 FLOOR = 70
@@ -111,20 +114,21 @@ def _session(schema_json: dict[str, Any], *, answers: Sequence[_Answer] = ()) ->
     return cast(AsyncSession, _FakeSession(schema_json, answers=answers))
 
 
-def _form(**overrides: Any) -> PatientForm:
-    defaults: dict[str, Any] = {
-        "id": uuid4(),
-        "tenant_id": uuid4(),
-        "schema_version_id": uuid4(),
-        "status": FormStatus.AI_PROCESSING.value,
-        "patient_name": "Jane Doe",
-        "insurance_provider_phone_number": "+15551234567",
-        "retry_count": 0,
-        "completion_pct": 100.0,
-        "enqueued_at": None,
-    }
-    defaults.update(overrides)
-    return PatientForm(**defaults)
+async def _fraction(
+    schema_json: dict[str, Any], *, answers: Sequence[_Answer] = (), floor: int = FLOOR
+) -> float | None:
+    """Call the loader the way `resolve_disputes` does: the parsed doc (None for a legacy v1
+    schema), its raw json, and the post-write values it already holds."""
+    doc = FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
+    values = {a.field_path: a.value for a in answers if a.is_current}
+    return await load_verified_fraction(
+        _session(schema_json, answers=answers),
+        uuid4(),
+        floor=floor,
+        doc=doc,
+        schema_json=schema_json,
+        values=values,
+    )
 
 
 def _population(schema_json: dict[str, Any], *, floor: int) -> list[str]:
@@ -170,17 +174,13 @@ def _all_askable_answered(*, authoritative: bool) -> list[_Answer]:
 async def test_returns_none_for_a_legacy_v1_schema() -> None:
     """v1 declares no rep_call_reference_number_field, so there is nothing to be authoritative
     ABOUT — the caller must fall back rather than read 0.0 as 'nothing verified'."""
-    assert await load_verified_fraction(_session(V1_SCHEMA), _form(), floor=70) is None
+    assert await _fraction(V1_SCHEMA) is None
 
 
 @pytest.mark.asyncio
 async def test_a_call_with_no_reference_number_verifies_nothing() -> None:
     """Spec S3: the same answers read completion 100% and verified 0%."""
-    fraction = await load_verified_fraction(
-        _session(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=False)),
-        _form(),
-        floor=70,
-    )
+    fraction = await _fraction(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=False))
     assert fraction == 0.0
 
 
@@ -190,9 +190,5 @@ async def test_a_call_with_a_reference_number_verifies_everything() -> None:
     call that also captured the reference number is fully verified, not just non-zero —
     this is the branch a mutation returning a constant 0.0 for every v2 form would still
     pass unless this exact assertion runs it."""
-    fraction = await load_verified_fraction(
-        _session(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=True)),
-        _form(),
-        floor=70,
-    )
+    fraction = await _fraction(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=True))
     assert fraction == 1.0

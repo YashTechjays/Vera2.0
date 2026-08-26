@@ -497,5 +497,7 @@ async def test_detail_exposes_the_retry_decision_inputs(
     assert body["completion_pct"] == pytest.approx(100.0)
     assert body["review_reason"] == ReviewReason.FILL_THRESHOLD_MET.value
     assert body["retry_count"] == 2
-    assert body["max_retries"] == 5
     assert body["review_floor"] == authz_app.state.settings.post_call_review_floor
+    # max_retries lives on Tenant, so serving it costs a per-request query; it comes back
+    # with the UI that renders "retries used of N", not before.
+    assert "max_retries" not in body

@@ -616,10 +616,14 @@ class PatientFormDetail(BaseModel):
     # actually decides.
     review_reason: str | None
     retry_count: int
-    max_retries: int
     # The confidence floor `is_call_confirmed` applies (settings.post_call_review_floor). The UI
     # renders confidence scores, and their meaning is defined entirely by this boundary.
     review_floor: int
+    # The four above are staged ahead of their consumer, per the F0-F5 plan in
+    # specs/2026-08-25-per-call-answers-review-ux-design.md §272 — each rides on `form` or
+    # `settings`, so they cost nothing. `max_retries` is deliberately NOT here: it lives on
+    # Tenant, so serving it means a per-request query, and "retries used of N" should bring
+    # that query back together with the UI that renders it.
     created_at: datetime
     updated_at: datetime
     patient_name: str | None
@@ -706,14 +710,36 @@ def _baseline_query(form_id: UUID) -> Any:
 
 
 async def _v2_doc_for(session: TenantSession, form: PatientForm) -> FormSchemaDoc | None:
-    """The form's pinned schema document, fetched and parsed once — the shared resolution
-    point behind `_call_scoped_paths` and `_authoritative_call_ids`."""
+    """The form's pinned schema document, fetched and parsed once. Only for callers that need
+    the whole document — `_call_scoped_paths` walks every leaf. A caller that needs just the
+    reference-number field wants `_reference_field_for` instead."""
     version = (
         await session.execute(
             select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
         )
     ).scalar_one()
     return _v2_doc(version.schema_json)
+
+
+async def _reference_field_for(session: TenantSession, form: PatientForm) -> str | None:
+    """The pinned schema's `rep_call_reference_number_field`, read straight off the JSON —
+    `None` for a document predating it. Parsing the whole ~5k-line document to reach one
+    top-level string cost hundreds of pydantic models per request."""
+    # `.as_string()` (`->>`) rather than a bare index: `schema_json` is generic JSON, and `->`
+    # hands back the value still JSON-encoded, so the path would arrive wrapped in quotes.
+    reference_field: str | None = (
+        await session.execute(
+            select(SchemaVersion.schema_json["rep_call_reference_number_field"].as_string()).where(
+                SchemaVersion.id == form.schema_version_id
+            )
+        )
+    ).scalar_one()
+    return reference_field
+
+
+def _reference_field(doc: FormSchemaDoc | None) -> str | None:
+    """The reference-number field of an already-parsed doc, or None for a legacy v1 schema."""
+    return doc.rep_call_reference_number_field if doc is not None else None
 
 
 def _call_scoped_paths(doc: FormSchemaDoc | None) -> frozenset[str]:
@@ -723,15 +749,13 @@ def _call_scoped_paths(doc: FormSchemaDoc | None) -> frozenset[str]:
 
 
 async def _authoritative_call_ids(
-    session: TenantSession, form_id: UUID, doc: FormSchemaDoc | None
+    session: TenantSession, form_id: UUID, reference_field: str | None
 ) -> frozenset[UUID] | None:
-    """The form's authoritative call ids, or `None` when the schema predates the v2 marker —
-    see `_authoritative`."""
-    if doc is None:
+    """The form's authoritative call ids, or `None` when the schema declares no
+    reference-number field — see `_authoritative`."""
+    if reference_field is None:
         return None
-    return await load_authoritative_call_ids(
-        session, form_id, reference_field=doc.rep_call_reference_number_field
-    )
+    return await load_authoritative_call_ids(session, form_id, reference_field=reference_field)
 
 
 async def _field_views(
@@ -805,12 +829,11 @@ async def _build_detail(
         )
     ).one()
     doc = _v2_doc(version.schema_json)
-    tenant = (await session.execute(select(Tenant).where(Tenant.id == form.tenant_id))).scalar_one()
 
     call_scoped_paths = _call_scoped_paths(doc)
     views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
 
-    authoritative_calls = await _authoritative_call_ids(session, form.id, doc)
+    authoritative_calls = await _authoritative_call_ids(session, form.id, _reference_field(doc))
     attempts = await load_call_attempts(session, form.id, authoritative_calls=authoritative_calls)
     # No calls → no ai_call answers → nothing to join; skip the provenance query
     # (this runs on every form-detail GET, incl. intake-only forms).
@@ -834,7 +857,6 @@ async def _build_detail(
         verified_pct=float(form.verified_pct) if form.verified_pct is not None else None,
         review_reason=form.review_reason,
         retry_count=form.retry_count,
-        max_retries=tenant.max_retries,
         review_floor=settings.post_call_review_floor,
         created_at=form.created_at,
         updated_at=form.updated_at,
@@ -1105,8 +1127,8 @@ async def list_form_calls(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    doc = await _v2_doc_for(session, form)
-    authoritative_calls = await _authoritative_call_ids(session, form_id, doc)
+    reference_field = await _reference_field_for(session, form)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, reference_field)
     attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     await emit_phi_read_audit(
         get_audit(request),
@@ -1295,7 +1317,12 @@ async def resolve_disputes(
     # the displayed number goes stale exactly when it moves. None (legacy v1) leaves the column
     # untouched: it means "authoritative is undefined here", never "recompute to zero".
     verified_fraction = await load_verified_fraction(
-        session, form, floor=settings.post_call_review_floor
+        session,
+        form_id,
+        floor=settings.post_call_review_floor,
+        doc=doc,
+        schema_json=version.schema_json,
+        values=current_values,
     )
     if verified_fraction is not None:
         form.verified_pct = round(verified_fraction * 100, 2)
@@ -1383,7 +1410,7 @@ async def export_patient_form(
     values = await current_values_by_path(session, form_id)
     sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
     doc = _v2_doc(version.schema_json)
-    authoritative_calls = await _authoritative_call_ids(session, form_id, doc)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, _reference_field(doc))
     attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     prov = await load_field_provenance(
         session,
