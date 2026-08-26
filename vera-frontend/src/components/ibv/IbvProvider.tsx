@@ -464,7 +464,13 @@ export function IbvProvider({
   const closeForm = useCallback(() => {
     setModalOpen(false)
     setProvenance({})
-    setCallScoped(new Set())
+    // `callScoped` is deliberately NOT cleared here, unlike `provenance` above. This keeps
+    // `formId`, `schema` and `values` loaded so `openLoadedForm` can reopen without a
+    // refetch, and Live Monitoring always takes that branch for a call still in progress
+    // (`LiveMonitoring.tsx:470`) — so anything dropped here is gone for the rest of the
+    // session. Clearing it made the per-call tint and its legend row vanish on the first
+    // reopen and never return. It is reset where a DIFFERENT form is loaded instead:
+    // `loadFormById` and `openCreate`.
   }, [])
 
   // Create path: step 1 (picker) has no schema; beginCreate loads the published
