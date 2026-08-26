@@ -233,6 +233,16 @@ class TestTaskText:
         disease = next(t for t in disease_only_prompts().tasks if t.task_key == "disease_coverage")
         assert COVERAGE_CONFIRMATION_RULE in disease.prompt
 
+    def test_the_rule_names_the_closed_set_of_coverage_answers(self) -> None:
+        """The fix the second reopen needed: the rule states WHICH three answers exist, so a
+        reply outside them is a non-answer however often it is repeated. Pinned separately from
+        the presence check above, which compares against the constant and so cannot notice a
+        reword that drops the answer set."""
+        for answer in ("covered", "not covered", "not applicable"):
+            assert answer in COVERAGE_CONFIRMATION_RULE, answer
+        assert "exactly three answers" in COVERAGE_CONFIRMATION_RULE
+        assert "hearing one twice does not make it one" in COVERAGE_CONFIRMATION_RULE
+
     def test_the_coverage_rule_stays_off_the_active_coverage_question(self) -> None:
         """`policy_basics` asks whether coverage is "active" — the one place that word IS the
         answer, so the rule listing it as a non-answer must not land there and contradict it."""
