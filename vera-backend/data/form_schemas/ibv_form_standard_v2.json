@@ -5137,7 +5137,7 @@
       "title": "Infertility Coverage",
       "intro": "Now I'd like to verify some infertility coverage details.",
       "outro": "Thank you, that's really helpful. One moment while I organize these details.",
-      "prompt": "Work through infertility treatment one service at a time, and move between services with a short transition naming the next one. \"Valid\", \"billable\", \"active\" or \"on file\" describe the CODE, not the benefit, and never answer a coverage question. Never accept one, thank them for it, or move on: say you still need to know whether the plan PAYS for the service, and ask again — reworded, not repeated — until they say covered, not covered, or not applicable.",
+      "prompt": "Work through infertility treatment one service at a time, and move between services with a short transition naming the next one. A coverage question has exactly three answers: covered, not covered, or not applicable. \"Valid\", \"billable\", \"active\", \"on file\" and every other description of the CODE are not among them, and hearing one twice does not make it one. Until you have one of the three, do not accept it and do not move to any other question — not its copay, not its prior authorization, not the next service. Say you still need to know whether the service is COVERED, and ask again, reworded each time.",
       "sections": [
         "infertility_treatment"
       ]
@@ -5147,7 +5147,7 @@
       "title": "Diagnostic Coverage",
       "intro": "Now I'd like to verify some diagnostic coverage details.",
       "outro": "Thank you. One moment while I organize these details.",
-      "prompt": "Read the codes as a natural group rather than one at a time, unless the representative asks you to slow down and take them individually. \"Valid\", \"billable\", \"active\" or \"on file\" describe the CODE, not the benefit, and never answer a coverage question. Never accept one, thank them for it, or move on: say you still need to know whether the plan PAYS for the service, and ask again — reworded, not repeated — until they say covered, not covered, or not applicable.",
+      "prompt": "Read the codes as a natural group rather than one at a time, unless the representative asks you to slow down and take them individually. A coverage question has exactly three answers: covered, not covered, or not applicable. \"Valid\", \"billable\", \"active\", \"on file\" and every other description of the CODE are not among them, and hearing one twice does not make it one. Until you have one of the three, do not accept it and do not move to any other question — not its copay, not its prior authorization, not the next service. Say you still need to know whether the service is COVERED, and ask again, reworded each time.",
       "sections": [
         "diagnostic_testing"
       ]
@@ -5157,7 +5157,7 @@
       "title": "General Office Coverage",
       "intro": "Now I'd like to verify some general office visits coverage.",
       "outro": "Thanks. One moment while I organize these details.",
-      "prompt": "Work through general office visit coverage one service at a time. \"Valid\", \"billable\", \"active\" or \"on file\" describe the CODE, not the benefit, and never answer a coverage question. Never accept one, thank them for it, or move on: say you still need to know whether the plan PAYS for the service, and ask again — reworded, not repeated — until they say covered, not covered, or not applicable.",
+      "prompt": "Work through general office visit coverage one service at a time. A coverage question has exactly three answers: covered, not covered, or not applicable. \"Valid\", \"billable\", \"active\", \"on file\" and every other description of the CODE are not among them, and hearing one twice does not make it one. Until you have one of the three, do not accept it and do not move to any other question — not its copay, not its prior authorization, not the next service. Say you still need to know whether the service is COVERED, and ask again, reworded each time.",
       "sections": [
         "general_coverage"
       ]
@@ -5180,7 +5180,7 @@
       "title": "Male Partner Coverage",
       "intro": "Now I'd like to ask about male partner fertility coverage.",
       "outro": "Thanks, that covers the male partner benefits. Just a moment.",
-      "prompt": "Establish whether male partner fertility services are covered before asking any per-service question. \"Valid\", \"billable\", \"active\" or \"on file\" describe the CODE, not the benefit, and never answer a coverage question. Never accept one, thank them for it, or move on: say you still need to know whether the plan PAYS for the service, and ask again — reworded, not repeated — until they say covered, not covered, or not applicable.",
+      "prompt": "Establish whether male partner fertility services are covered before asking any per-service question. A coverage question has exactly three answers: covered, not covered, or not applicable. \"Valid\", \"billable\", \"active\", \"on file\" and every other description of the CODE are not among them, and hearing one twice does not make it one. Until you have one of the three, do not accept it and do not move to any other question — not its copay, not its prior authorization, not the next service. Say you still need to know whether the service is COVERED, and ask again, reworded each time.",
       "sections": [
         "male_partner_coverage"
       ]

@@ -38,13 +38,17 @@ YES_NO_NA = ["Yes", "No", "N/A"]
 DATE_VALIDATION = Validation(date_format="M/D/YYYY")
 
 
-# A first version told the agent to "ask again" and it did — once — then took the repeated
-# "valid" as an answer and moved on. Naming the missing thing is what makes the re-ask land.
+# Two earlier versions lost the same way: told to "ask again" the agent did — once — then took
+# the REPEATED "valid" as an answer and moved on. So the answer set is stated as a closed three
+# up front, any other reply is named a non-answer however often it is given, and "do not move
+# on" spells out what it covers — the old phrasing left asking the copay next looking legal.
 COVERAGE_CONFIRMATION_RULE = (
-    '"Valid", "billable", "active" or "on file" describe the CODE, not the benefit, and '
-    "never answer a coverage question. Never accept one, thank them for it, or move on: say "
-    "you still need to know whether the plan PAYS for the service, and ask again — reworded, "
-    "not repeated — until they say covered, not covered, or not applicable."
+    "A coverage question has exactly three answers: covered, not covered, or not applicable. "
+    '"Valid", "billable", "active", "on file" and every other description of the CODE are not '
+    "among them, and hearing one twice does not make it one. Until you have one of the three, "
+    "do not accept it and do not move to any other question — not its copay, not its prior "
+    "authorization, not the next service. Say you still need to know whether the service is "
+    "COVERED, and ask again, reworded each time."
 )
 
 
