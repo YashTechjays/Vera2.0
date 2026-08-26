@@ -239,19 +239,61 @@ class TestRecording:
         assert len(bus.events) == 1
 
     @pytest.mark.asyncio
-    async def test_confirming_an_ask_role_prefill_still_reaches_the_controller(self) -> None:
-        # sections.a.x is `ask`-role (see `_field`), which `gating_seed` drops from the
-        # controller's baseline — the dedup branch below is the only place left that can
-        # still tell the controller the call stated it.
+    async def test_confirming_an_ask_role_prefill_reaches_the_controller_and_the_row(self) -> None:
+        """`sections.a.x` is `ask`-role (see `_field`), and `gating_seed` drops those from the
+        controller's baseline — so `_push_recorded` on the write path is the only thing left
+        that tells it this call stated the value; the row is what supersedes the prefill."""
         extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
         manager, run_state, bus, controller = _manager(
             _plan(prefilled={"sections.a.x": "Family"}), extractor
         )
         await _feed(manager, _rep("It's family coverage."))
         assert controller.answers["sections.a.x"] == "Family"
-        # No new ai_call row and no emit — a mere confirmation leaves the INTAKE row current.
-        assert run_state.records == []
-        assert bus.events == []
+        assert run_state.records == [(ROOM, "sections.a.x", "Family", 0)]
+        assert len(bus.events) == 1
+
+    @pytest.mark.asyncio
+    async def test_repeating_a_prior_calls_value_is_recorded_under_this_call(self) -> None:
+        """The filed defect: `plan.prefilled` carries PRIOR-CALL values on a retry (built from
+        `current_values_by_path`, every source), so a rep confirming one must write a row under
+        THIS call rather than leave the previous, possibly non-authoritative, call owning it."""
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Individual", 90)])
+        manager, run_state, bus, controller = _manager(
+            _plan(prefilled={"sections.a.x": "Individual"}), extractor
+        )
+        await _feed(manager, _rep("Individual coverage, yes."))
+        assert run_state.records == [(ROOM, "sections.a.x", "Individual", 0)]
+        assert len(bus.events) == 1 and bus.events[0].field_path == "sections.a.x"
+        assert controller.answers["sections.a.x"] == "Individual"
+
+    @pytest.mark.asyncio
+    async def test_confirming_a_confirm_role_prefill_is_recorded(self) -> None:
+        """An intake value never satisfies a `confirm` leaf (proven by
+        tests/unit/forms/test_retryable_fields.py::test_intake_does_not_satisfy_a_confirm_leaf),
+        so a rep confirming the read-back value must write a row or the field whose whole
+        purpose is payer confirmation stays unsatisfied forever."""
+        member_id = _field("sections.a.member_id", role="confirm")
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.member_id", "XYZ123", 90)])
+        manager, run_state, bus, _ = _manager(
+            _plan(fields=[member_id], prefilled={"sections.a.member_id": "XYZ123"}), extractor
+        )
+        await _feed(manager, _rep("Yes, XYZ123 is correct."))
+        assert run_state.records == [(ROOM, "sections.a.member_id", "XYZ123", 0)]
+        assert len(bus.events) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_prefill_still_writes_only_one_row_per_call(self) -> None:
+        """The one-row-per-call bound has to hold for a prefilled path too, or every
+        re-extraction of the same confirmation writes another row."""
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
+        manager, run_state, bus, _ = _manager(
+            _plan(prefilled={"sections.a.x": "Family"}), extractor
+        )
+        await _feed(manager, _rep("Family."))
+        await _feed(manager, _rep("Still family."))
+        await _feed(manager, _rep("Yes, family."))
+        assert len(run_state.records) == 1
+        assert len(bus.events) == 1
 
     @pytest.mark.asyncio
     async def test_a_prefill_is_snapped_before_it_seeds_the_rule_engine(self) -> None:

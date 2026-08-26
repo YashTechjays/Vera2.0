@@ -398,9 +398,9 @@ class ObserverManager:
         self._drain_timeout = _DRAIN_TIMEOUT_S if drain_timeout is None else drain_timeout
         self._rule_engine = RuleEngine(plan)
         # Everything on file for this form — intake included, all roles. NOT the controller's
-        # gate-evaluation set: three behaviours here need the intake values, namely the dedup in
-        # `_record_locked`, `_derive_remaining_locked`'s "a prefilled remaining wins", and the
-        # rule engine, whose terminate rules read ask-role paths a clinic may fill.
+        # gate-evaluation set: two behaviours here need the intake values, namely
+        # `_derive_remaining_locked`'s "a prefilled remaining wins", and the rule engine, whose
+        # terminate rules read ask-role paths a clinic may fill.
         # Snapped on the way in: the rule engine compares byte-exact, and a prefill written
         # before the writers canonicalized carries whatever spelling its source used.
         literals = {f.path: literals_of(f) for t in plan.tasks for f in t.fields}
@@ -554,14 +554,10 @@ class ObserverManager:
             await self._record_locked(answer, evidence_seq)
 
     async def _record_locked(self, answer: ExtractedAnswer, evidence_seq: int | None) -> None:
-        if self._on_file.get(answer.field_path) == answer.value:
-            # Unchanged — skip the write and the emit either way, so a rep merely confirming
-            # a prefilled value still leaves no ai_call row (the INTAKE row stays current).
-            # But the controller must still learn it: `gating_seed` drops ask-role prefills
-            # from its baseline, so this is the only place left that can tell it the call
-            # itself stated the value — otherwise the field is owed for the rest of the call.
-            if self._recorded.get(answer.field_path) != answer.value:
-                self._push_recorded(answer.field_path, answer.value)
+        # Dedup against what THIS CALL wrote, never against `_on_file`: that map is seeded from
+        # `plan.prefilled`, which carries intake and prior-call values, so keying on it discarded
+        # the rep confirming one and left the earlier source owning the row.
+        if self._recorded.get(answer.field_path) == answer.value:
             return
         ts = self._now_ms()
         await self._run_state.record_answer(
@@ -582,7 +578,7 @@ class ObserverManager:
                 ts=ts,
             )
         )
-        # Mark dedup only after the write+emit land, so a failed emit is retried on the
+        # Both maps update only after the write+emit land, so a failed emit is retried on the
         # next pass (the CP consumer is idempotent under the redelivery).
         self._on_file[answer.field_path] = answer.value
         self._push_recorded(answer.field_path, answer.value)
