@@ -415,12 +415,29 @@ in the ledger.
   intake predates that commit carries non-canonical rows this change will re-record canonically and
   dispute. Likely a dev-data-only exposure (pre-prod at time of writing), but worth a data check
   before wide rollout.
-* **F-f** — the extractor returns unstable spellings for free-text leaves across passes within a
-  single call (`alpha`/`Alpha`, `5 cycles per year`/`5 cycle per year`), observed on the live gate.
-  `canonical_answer` cannot fold either, because those leaves declare no authored literals to snap
-  onto. Pre-existing and unrelated to this change, which only makes it visible by writing more
-  rows. Costs churn rows and a longer superseded trail, not correctness: the last write wins and
-  is the one the judge evaluates.
+* **F-f** — **the extractor returns unstable spellings for free-text leaves across passes within a
+  single call.** Pre-existing; this change neither causes it nor can fix it, and only makes it
+  visible by writing more rows. Seen on three of the four live-gate calls, on three fields:
+
+  | call | field | sequence | rows |
+  | --- | --- | --- | --- |
+  | 2 | `insurance_information.group_name` | `alpha → Alpha → alpha → Alpha` (seqs 12/14/16/36) | 4 |
+  | 2 | `…ovulation_induction.cycle_limit` | `5 cycles per year ⇄ 5 cycle per year` | 4 |
+  | 3 | `insurance_representative.rep_name` | `Jack S → Jack S. → Jack S` | 3 |
+  | 4 | `insurance_representative.rep_name` | `Jack → Jack S → Jack S.` (two at the SAME seq 12) | 3 |
+
+  `canonical_answer` cannot fold any of these: all four leaves declare no authored literals, so it
+  only strips whitespace (`answers.py:70-71`). Two writes landing at the **same** `evidence_seq`
+  shows this is re-extraction churn within one pass, not the rep restating an answer.
+
+  **Impact is churn, not correctness** — the last write wins and is the one the judge evaluates,
+  and every one of these fields ended `supported=True`. It does inflate the judge fan-out described
+  in §3.2, and it lengthens the superseded-row trail a reviewer reads.
+
+  Candidate fixes, both needing their own spec: extend `canonical_answer` to fold a value onto the
+  spelling already current for that path when the two differ only by case or punctuation; or have
+  the Observer prefer the incumbent spelling when `normalize_value` collapses old and new to the
+  same string. The second changes what the transcript-of-record says, so it is not a free choice.
 * **F-e** — `_push_recorded` now has exactly one call site (§2.4), which runs only after
   `record_answer` AND the bus emit both succeed. A Redis/bus failure mid-extraction-pass leaves
   that field "owed" for the rest of the call AND drops the remaining answers in that same
