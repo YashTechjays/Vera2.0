@@ -24,15 +24,29 @@ just seed                    # baseline schemas + prompts + sample tenant
 Three terminals, and **the env var must be on both backend processes**:
 
 ```bash
-# terminal 1
-VERA_BROWSER_CALLEE_TRANSPORT=true just api
+# terminal 1 — API. VERA_GCP_PROJECT is what turns the post-call JUDGE on.
+VERA_BROWSER_CALLEE_TRANSPORT=true VERA_GCP_PROJECT=<your-gcp-project> just api
 
-# terminal 2
+# terminal 2 — worker
 VERA_BROWSER_CALLEE_TRANSPORT=true just worker
 
 # terminal 3 (frontend)
 cd vera-frontend && VITE_BROWSER_CALLEE_TRANSPORT=true npm run dev
 ```
+
+**`VERA_GCP_PROJECT` is not optional if you want `verified_pct` to move.** `main.py:237` decides
+`post_call_eval_ready = settings.gcp_project is not None`. Unset, the call closes through the
+FALLBACK path (`resolve_ai_processing`, audit `trigger=call.ended`), no judge runs, every row keeps
+`ai_supported = NULL`, `is_call_confirmed` returns False regardless of authority — so `verified_pct`
+stays NULL and Scenario B3 has no `field_evaluation` rows to inspect. The row-ownership assertion
+and the Unverified pill still work without it; nothing else does.
+
+Confirm the judge actually ran afterwards: the audit trail should show `trigger=post_call_eval`,
+not `trigger=call.ended`.
+
+**Vertex trap:** `VERA_VERTEX_LOCATION` defaults to `us-central1`, which 404s for Gemini in this
+project. If the judge errors, set `VERA_VERTEX_LOCATION=global`. Needs working ADC
+(`gcloud auth application-default login`).
 
 Browser-callee places **no SIP call** — no real payer is ever dialled. You join the LiveKit room
 from Live Monitoring and play the payer's representative yourself.
