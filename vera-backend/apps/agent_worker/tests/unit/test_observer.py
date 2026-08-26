@@ -254,20 +254,34 @@ class TestRecording:
         assert bus.events == []
 
     @pytest.mark.asyncio
-    async def test_a_prefill_is_snapped_before_it_seeds_the_gate_baseline(self) -> None:
+    async def test_a_prefill_is_snapped_before_it_seeds_the_rule_engine(self) -> None:
         """`_on_file` is what the rule engine compares byte-exact, and it is seeded from
         `plan.prefilled` — a prefill written before the writers canonicalized carries whatever
-        spelling its source used, so the dedup below would also miss the rep confirming it."""
+        spelling its source used. Asserted through the rule engine, the consumer that actually
+        depends on the snapping: `conditions.evaluate`'s `eq` is a raw string compare, so a
+        terminate rule keyed on the authored literal fires ONLY if the seed was snapped.
+        Deliberately not asserted through the dedup — that stopped reading `_on_file`."""
         total = _field(
             "sections.a.total", type="currency", special_values=["$0", "Unlimited", "No Limit"]
         )
-        extractor = FakeExtractor([ExtractedAnswer("sections.a.total", "No Limit", 90)])
-        manager, run_state, bus, _ = _manager(
-            _plan(fields=[total], prefilled={"sections.a.total": " no limit "}), extractor
+        stop = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.total", op="eq", value="No Limit"),
+            action="terminate_call",
         )
-        await _feed(manager, _rep("There is no limit on that one."))
-        assert run_state.records == []  # snapped seed == snapped answer, so nothing to write
-        assert bus.events == []
+        # The trigger is a DIFFERENT field, so the rule fires off the seeded prefill rather
+        # than off anything this call recorded.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, controller = _manager(
+            _plan(
+                fields=[total, _field("sections.a.x")],
+                flow_rules=[stop],
+                prefilled={"sections.a.total": " no limit "},
+            ),
+            extractor,
+        )
+        await _feed(manager, _rep("Yes, and there is no limit on that one."))
+        assert controller.applied == [Terminate(rule_key="stop")]
 
     @pytest.mark.asyncio
     async def test_bot_turn_does_not_trigger_a_pass_but_counts_a_seq(self) -> None:
