@@ -46,8 +46,8 @@ COVERAGE_CONFIRMATION_RULE = (
     '"Valid", "billable", "active", "on file" and every other description of the CODE are not '
     "among them, and hearing one twice does not make it one. Until you have one of the three, "
     "do not accept it and do not move to any other question — not its copay, not its prior "
-    "authorization, not the next service. Say you still need to know whether the plan PAYS for "
-    "the service, and ask again, reworded each time."
+    "authorization, not the next service. Say you still need to know whether the service is "
+    "COVERED, and ask again, reworded each time."
 )
 
 
