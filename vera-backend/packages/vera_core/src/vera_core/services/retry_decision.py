@@ -1,21 +1,17 @@
-"""The park-vs-redial decision, in one place for both post-call resolvers.
+"""The park-vs-redial decision — park this form for human review, or redial the payer.
 
-Two consumers close a call and must answer the same question — park this form for human
-review, or redial the payer — and which one runs depends only on HOW the call closed, never
-on anything about the form:
+ONE caller: ``post_call_eval.evaluate_call``. It was extracted while there were two, and the
+extraction is what proved the second could not make this decision at all — the fallback
+resolver runs precisely when no judge ran, ``is_call_confirmed`` requires a judge verdict, so
+the verified fraction was structurally 0.0 there for every call however good, and 0.0 is below
+every threshold. With auto-retry on it redialed every form until ``max_retries``. It now makes
+no fill-based decision, leaving this module a single consumer.
 
-* ``post_call_eval.evaluate_call`` — the eval path, when the judge is configured;
-* ``control_plane.post_call.resolve_ai_processing`` — the fallback, when it is not, or when
-  the sweeper reclaims a stranded form.
-
-They previously shared the NUMBER but not the DECISION. The fallback compared the same
-verified fraction against the same threshold, but lacked two guards the eval path applies:
-"nothing is unsatisfied" and "nothing unsatisfied is even askable". So a form whose only
-remaining gaps were unaskable — defaulted or non-collectable leaves no call could ever fill —
-parked on the eval path and REDIALED on the fallback, dialing a real payer to ask questions
-the schema says cannot be asked. Copying the guards across is what produced the drift in the
-first place (the number was copied, the guards were left behind), so the whole decision lives
-here instead, as a pure function with no session and no ORM.
+Kept as a module rather than folded back inline because the drift it was extracted to fix came
+from copying the NUMBER between two sites and leaving the GUARDS behind (a form whose only gaps
+were unaskable parked on one path and REDIALED on the other, dialing a payer to ask questions
+the schema says cannot be asked). A pure function with no session and no ORM is testable
+against that whole decision table without a database, which is what pins the guards together.
 
 `token_fields` deliberately stays in `evaluate_call`: a tokenized value is an extraction
 artifact of that path, not a retry consideration.

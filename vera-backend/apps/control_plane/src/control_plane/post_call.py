@@ -3,22 +3,18 @@
 A completed call — and a user-canceled one, whose transcript may still carry
 extractable data for post-call validation — parks its form in AI_PROCESSING
 (`call_closeout.close_call`, in its own committed transaction). This module
-then decides the lifecycle's next system transition:
+then moves the form out of it — ALWAYS to ``EXCEPTION_REVIEW``, never to
+``IN_QUEUE`` and never to ``COMPLETED`` (only a reviewer's manual approve
+reaches that). It makes no retry decision: this module runs precisely when
+nothing evaluated the call, and a fill-based decision needs a judge verdict it
+never has. ``retry_decision.decide_retry``, reached from
+``post_call_eval.evaluate_call``, is the one place that decision is made — see
+``resolve_ai_processing`` for why gating on the verified fraction here redialed
+every form until ``max_retries``.
 
-- the verified fraction (``load_verified_fraction`` — required, applicable, collectable
-  leaves an AUTHORITATIVE call confirmed; ``completion_pct`` only as a legacy-schema
-  fallback) below the tenant's ``retry_fill_threshold`` and retries remaining →
-  auto-requeue (``AI_PROCESSING → IN_QUEUE``, consuming the retry budget) —
-  feature-gated behind the deployment kill-switch (``settings.form_auto_retry_enabled``,
-  default OFF) AND the tenant's own ``auto_retry_enabled``. NEVER taken for a
-  user-ended (CANCELED) call — the supervisor who ended it does not want the
-  payer redialed;
-- otherwise → ``EXCEPTION_REVIEW`` for human review. ``COMPLETED`` is never set
-  here — only a reviewer's manual approve reaches it.
-
-This is also the seam where post-call AI work (answer extraction from the
-transcript into ``form_answer`` rows, recomputing ``completion_pct``) will slot
-in; today the decision runs on the answers the form already carries.
+What this module guarantees is that the form LEAVES ``AI_PROCESSING`` carrying an
+honest ``review_reason``, so a crash between closeout and resolution cannot
+strand it and leak a concurrency slot.
 
 Idempotent: a form no longer in AI_PROCESSING is left untouched (redelivered
 ``call.ended`` events and sweeper/consumer races are harmless — the row lock

@@ -535,10 +535,10 @@ async def evaluate_call(
     retryable = retryable_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
-    # The SAME call the fallback resolver makes (`services/retry_decision`). Composed here
-    # rather than through `load_retry_inputs` only because this function already holds the
-    # parsed doc, the status map and an in-memory values map — routing it through the loader
-    # would re-query all three. The decision itself is not duplicated.
+    # The one park-vs-redial decision (`services/retry_decision`), and this is its only caller.
+    # Inputs are resolved here rather than through `services/verification.load_verified_fraction`
+    # because this function already holds the parsed doc, the status map and an in-memory values
+    # map — routing through that loader would re-query all three.
     decision = decide_retry(
         unsatisfied=bool(unsatisfied),
         retryable=bool(retryable),

@@ -1,19 +1,14 @@
 """Post-call AI-processing resolution — the system edge out of AI_PROCESSING.
 
 After a completed call parks the form in AI_PROCESSING, `resolve_ai_processing`
-decides the diagrammed system transition: low fill + retries remaining →
-auto-requeue (IN_QUEUE); otherwise → EXCEPTION_REVIEW for human review. COMPLETED
-is never reachable from here — only a reviewer's manual approve sets it.
-
-The auto-retry edge is feature-gated behind the deployment kill-switch
-(`auto_retry_enabled`, default OFF) AND the tenant's own `auto_retry_enabled`.
+always resolves it to EXCEPTION_REVIEW. It never auto-requeues (the retry decision
+lives in `post_call_eval.evaluate_call` via `retry_decision.decide_retry`) and
+never reaches COMPLETED — only a reviewer's manual approve sets that. What these
+tests pin is that the form leaves AI_PROCESSING with an honest `review_reason`,
+whatever ended the call.
 
 DB seam faked exactly like `test_worker_events.py`: `tenant_session` is
-monkeypatched to a `_FakeSession` routed by target entity. `load_verified_fraction`
-is a separate seam (it runs its own SchemaVersion query `_FakeSession` doesn't route)
-— the autouse fixture below defaults it to `None` so the existing fixtures, which
-build a bare form/tenant with no schema, keep exercising the `completion_pct`
-fallback undisturbed; the two verified-fraction tests override it.
+monkeypatched to a `_FakeSession` routed by target entity.
 """
 
 from typing import Any, cast
