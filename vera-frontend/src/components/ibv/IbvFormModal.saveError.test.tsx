@@ -50,6 +50,7 @@ const DETAIL = {
   insurance_provider: null,
   fields: [],
   ivr_navigation_enabled: false,
+  call_scoped_paths: [],
 }
 
 /** Drives IbvProvider.save() directly — lighter than mounting the full modal, and

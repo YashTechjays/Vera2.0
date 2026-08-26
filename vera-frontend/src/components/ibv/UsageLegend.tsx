@@ -3,6 +3,8 @@ import { USAGE_META, USAGE_ORDER } from "./usageMeta"
 import type { FormSchema } from "@/lib/ibv/types"
 import { cn } from "@/lib/utils"
 
+import { useIbv } from "./IbvProvider"
+
 function Swatch({ className }: { className: string }) {
   return (
     <span
@@ -43,9 +45,14 @@ function LegendItem({
  * layout.
  */
 export function UsageLegend({ schema }: { schema: FormSchema }) {
+  // Read from the provider, NOT passed down: the legend hides any zero-count usage, so a set
+  // the caller forgets to thread renders a tint FieldRow paints with no row explaining it —
+  // exactly how the per-call marking first shipped. Sharing FieldRow's source makes that
+  // particular drift unrepresentable rather than merely tested for.
+  const { callScopedPaths } = useIbv()
   const counts = new Map<FieldUsage, number>()
   for (const leaf of allLeaves(schema)) {
-    const usage = fieldUsageOf(schema, leaf.path, leaf.field)
+    const usage = fieldUsageOf(schema, leaf.path, leaf.field, callScopedPaths)
     counts.set(usage, (counts.get(usage) ?? 0) + 1)
   }
   const contextSections = sectionEntriesOf(schema).filter(
