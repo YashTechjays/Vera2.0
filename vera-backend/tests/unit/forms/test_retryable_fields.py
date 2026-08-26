@@ -74,6 +74,12 @@ def test_is_field_satisfied_rules() -> None:
     assert is_field_satisfied(_ai(60), floor=FLOOR) is False  # ai <70
     assert is_field_satisfied(_ai(90, sup=False), floor=FLOOR) is False  # unsupported
     assert is_field_satisfied(None, floor=FLOOR) is False  # unfilled (no status)
+    # Unjudged: load_field_status yields ai_supported=None for an answer with no evaluation.
+    # This is the accepted cost of the Observer recording confirmations — an intake value the
+    # rep confirms becomes ai_call and so judge-conditional. Invisible on the normal path
+    # (evaluate_call judges before computing `unsatisfied`, one transaction), but PERMANENT on
+    # the fallback path, where no judge ever runs.
+    assert is_field_satisfied(FieldStatus("ai_call", None, 95), floor=FLOOR) is False
 
 
 def test_retryable_only_unsatisfied_askable_required() -> None:
