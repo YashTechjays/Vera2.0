@@ -28,7 +28,6 @@ slot (the dispatcher counts AI_PROCESSING as active); the pipeline sweeper
 closes that hole via `sweep_stuck_ai_processing`.
 """
 
-import contextlib
 import logging
 from uuid import UUID
 
@@ -43,8 +42,7 @@ from vera_core.models.audit_log import ActorType, AuditEvent
 from vera_core.models.enums import CallStatus, FormStatus, ReviewReason
 from vera_core.observability.correlation import RoomRef
 from vera_core.services.call_lifecycle import no_retry_reason
-from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
-from vera_core.services.verification import load_verified_fraction
+from vera_core.services.form_state_machine import FormStateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -56,76 +54,52 @@ async def resolve_ai_processing(
     *,
     trigger: str,
     actor_label: str = "agent-worker",
-    auto_retry_enabled: bool = False,
-    review_floor: int = REVIEW_CONFIDENCE_FLOOR,
-) -> bool:
-    """Resolve *ref*'s form out of AI_PROCESSING. Returns True when the form was
-    auto-requeued for a retry call (a dispatch pass should follow either way —
-    leaving AI_PROCESSING frees a concurrency slot). The low-fill
-    auto-retry edge only runs when feature-gated behind the deployment
-    kill-switch (*auto_retry_enabled*, settings ``form_auto_retry_enabled``,
-    default off) AND the tenant's own ``auto_retry_enabled`` — otherwise every
-    form goes to EXCEPTION_REVIEW."""
+) -> None:
+    """Resolve *ref*'s form out of AI_PROCESSING, always into EXCEPTION_REVIEW.
+
+    This resolver does not auto-retry. It runs only when nothing evaluated the call — the
+    eval consumer is unwired, or the sweeper is reclaiming a form `evaluate_call` never
+    resolved — and a fill-based retry decision needs a judge verdict this path never has.
+    `retry_decision.decide_retry`, reached from `post_call_eval.evaluate_call`, is the one
+    place that decision is made.
+
+    A dispatch pass should still follow: leaving AI_PROCESSING frees a concurrency slot."""
     async with tenant_session(sessionmaker, ref.tenant_id) as session:
         call = (
             await session.execute(select(Call).where(Call.id == ref.call_id))
         ).scalar_one_or_none()
         if call is None:
-            return False  # voice-lab room — no pipeline form to resolve
+            return  # voice-lab room — no pipeline form to resolve
         form = (
             await session.execute(
                 select(PatientForm).where(PatientForm.id == call.form_id).with_for_update()
             )
         ).scalar_one_or_none()
         if form is None or form.status != FormStatus.AI_PROCESSING.value:
-            return False  # form deleted, or already resolved (idempotent redelivery)
+            return  # form deleted, or already resolved (idempotent redelivery)
         tenant = (
             await session.execute(select(Tenant).where(Tenant.id == ref.tenant_id))
         ).scalar_one()
 
         sm = FormStateMachine()
-        requeued = False
-        # A supervisor-ended or rule-terminated call never auto-retries, whatever the
-        # fill — the shared never-redial policy (call_lifecycle.no_retry_reason).
-        no_retry = no_retry_reason(call)
-        # The fill gate costs four queries, so it is computed only once the free checks have
-        # already agreed a retry is possible at all — with the deployment kill-switch off (the
-        # default) or a never-redial cause on the call, its answer is never read.
-        low_fill = False
-        if tenant.allows_auto_retry(auto_retry_enabled) and no_retry is None:
-            # ONE gate, ONE number: the eval path compares the verified fraction against this
-            # same threshold (post_call_eval), so reading completion_pct here made the decision
-            # depend on which consumer closed the call. Computed fresh — the stored
-            # verified_pct column is a display value `recompute_form_projection` does not
-            # maintain. A `None` fraction means the schema is legacy v1, which declares no
-            # reference-number field, so "authoritative" is undefined and completion stands in.
-            threshold = float(tenant.retry_fill_threshold)
-            fraction = await load_verified_fraction(session, form, floor=review_floor)
-            low_fill = (
-                fraction < threshold
-                if fraction is not None
-                # Legacy v1 only: completion_pct is already current — Observer answers land
-                # stream-ordered before call.ended, so no recompute is needed on this path.
-                else float(form.completion_pct) < threshold * 100
-            )
-        if low_fill:
-            # Auto-retry while retries remain; fall through to human review when exhausted.
-            with contextlib.suppress(InvalidTransitionError):
-                sm.transition(form, FormStatus.IN_QUEUE, tenant_max_retries=tenant.max_retries)
-                form.enqueued_at = func.now()
-                requeued = True
-        if not requeued:
-            # Stamp WHY so the reviewer isn't left with a blank reason: anything
-            # reaching this fallback with no never-redial cause (eval consumer
-            # unconfigured, or the sweeper reclaiming a stranded form) was never
-            # AI-evaluated.
-            reason = no_retry if no_retry is not None else ReviewReason.NOT_EVALUATED
-            sm.transition(
-                form,
-                FormStatus.EXCEPTION_REVIEW,
-                tenant_max_retries=tenant.max_retries,
-                reason=reason,
-            )
+        # This resolver NEVER auto-retries, and that is deliberate. `is_call_confirmed`
+        # requires a judge verdict (`ai_supported`), and this path runs precisely when no
+        # judge ran — the eval consumer is unwired, or the sweeper is reclaiming a form the
+        # eval never resolved. So the verified fraction it used to gate on was structurally
+        # 0.0 here for EVERY call however good, and 0.0 is below every threshold: with
+        # auto-retry on, this redialled every form until max_retries, against real payers.
+        # A retry decision needs evidence about fill; without a judge there is none. The one
+        # decision lives in `retry_decision.decide_retry`, called only from the eval path.
+        #
+        # What remains is this module's real job: guarantee the form leaves AI_PROCESSING with
+        # an honest reason, so a crash between closeout and resolution cannot strand it.
+        reason = no_retry_reason(call) or ReviewReason.NOT_EVALUATED
+        sm.transition(
+            form,
+            FormStatus.EXCEPTION_REVIEW,
+            tenant_max_retries=tenant.max_retries,
+            reason=reason,
+        )
 
         await audit.emit(
             AuditRecord(
@@ -144,7 +118,6 @@ async def resolve_ai_processing(
                 },
             )
         )
-    return requeued
 
 
 async def sweep_stuck_ai_processing(
@@ -190,8 +163,6 @@ async def sweep_stuck_ai_processing(
             ref,
             trigger="sweeper_ai_processing",
             actor_label="pipeline-sweeper",
-            auto_retry_enabled=auto_retry_enabled,
-            review_floor=review_floor,
         )
         resolved += 1
         logger.info("post-call sweep: resolved stuck AI_PROCESSING form for call %s", call_id)

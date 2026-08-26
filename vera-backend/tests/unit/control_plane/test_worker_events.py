@@ -267,7 +267,6 @@ class _Wired:
     audit: _SpyAudit
     call_stream: _FakeCallStream
     dispatch_calls: list[_DispatchCall] = field(default_factory=list)
-    verified_fraction_floors: list[int] = field(default_factory=list)
 
 
 def _consumer(
@@ -291,7 +290,6 @@ def _consumer(
     fake_audit = _SpyAudit()
     fake_call_stream = call_stream if call_stream is not None else _FakeCallStream()
     dispatch_calls: list[_DispatchCall] = []
-    verified_fraction_floors: list[int] = []
 
     def _fake_tenant_session(sm: Any, tid: Any) -> _FakeSessionCtx:
         return _FakeSessionCtx(fake_session)
@@ -300,18 +298,6 @@ def _consumer(
     monkeypatch.setattr(worker_events, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(transcript_finalizer, "tenant_session", _fake_tenant_session)
     monkeypatch.setattr(post_call, "tenant_session", _fake_tenant_session)
-
-    async def _fake_load_verified_fraction(*_a: object, floor: int, **_kw: object) -> None:
-        # `resolve_ai_processing` now calls this unconditionally; it runs its own
-        # SchemaVersion query that `_FakeSession` doesn't route (no test here seeds a
-        # schema). Default to the legacy fallback (None) so every existing test keeps
-        # exercising completion_pct, exactly as before this seam existed. `floor` is
-        # captured (not just swallowed) so a test can prove the consumer's own
-        # `review_floor` reaches this call rather than a hard-coded default.
-        verified_fraction_floors.append(floor)
-        return None
-
-    monkeypatch.setattr(post_call, "load_verified_fraction", _fake_load_verified_fraction)
 
     async def _fake_run_dispatch_pass(
         sessionmaker: Any,
@@ -346,7 +332,6 @@ def _consumer(
         audit=fake_audit,
         call_stream=fake_call_stream,
         dispatch_calls=dispatch_calls,
-        verified_fraction_floors=verified_fraction_floors,
     )
 
 
@@ -668,11 +653,13 @@ async def test_call_ended_routes_form_through_ai_processing_to_review(
 async def test_call_ended_refill_forwards_the_injected_review_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The consumer's injected `review_floor` must reach the refill's `run_dispatch_pass`
-    as `retry_floor`, and `resolve_ai_processing`'s own `load_verified_fraction` call, as
-    `floor` — 85, not the module default 70, so a passing assertion can only mean this
-    consumer's own value travelled. `form_auto_retry_enabled=True` is load-bearing: the
-    verified-fraction gate is computed only once the free checks agree a retry is possible."""
+    """The consumer's injected `review_floor` must reach the refill's `run_dispatch_pass` as
+    `retry_floor` — 85, not the module default 70, so a passing assertion can only mean this
+    consumer's own value travelled.
+
+    It no longer also travels to `resolve_ai_processing`: that resolver stopped computing a
+    verified fraction, because `is_call_confirmed` needs a judge verdict and the resolver runs
+    exactly when no judge ran. It takes no floor at all now."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
@@ -694,7 +681,6 @@ async def test_call_ended_refill_forwards_the_injected_review_floor(
 
     assert len(wired.dispatch_calls) == 1
     assert wired.dispatch_calls[0].retry_floor == 85
-    assert wired.verified_fraction_floors == [85]
 
 
 @pytest.mark.asyncio
@@ -830,12 +816,20 @@ async def test_call_ended_with_eval_bus_snapshots_and_enqueues_instead_of_resolv
 
 
 @pytest.mark.asyncio
-async def test_call_ended_low_completion_auto_requeues_form(
+async def test_call_ended_without_the_eval_consumer_parks_and_never_auto_requeues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The diagram's "system auto-retry: low completion" edge (feature-gated,
-    enabled here): a completed call whose form fill is below the tenant
-    threshold goes back to IN_QUEUE."""
+    """This consumer resolves synchronously ONLY when the post-call eval bus is unwired, and
+    that resolver no longer auto-retries — so the low-fill edge does not exist on this path.
+
+    It used to: with `form_auto_retry_enabled=True` this form went to IN_QUEUE. But
+    `is_call_confirmed` requires a judge verdict, no judge runs on this path, so the verified
+    fraction was structurally 0.0 for every call and every one of them redialled until
+    max_retries. A retry needs evidence about fill; the decision now lives solely in
+    `post_call_eval.evaluate_call` via `retry_decision.decide_retry`.
+
+    The setup below is deliberately the old redial case — 40% fill, threshold 0.95, retries
+    remaining, the deployment switch ON — and it must park."""
     tenant_id, call_id, form_id = uuid4(), uuid4(), uuid4()
     room = room_name_for_call(tenant_id, call_id)
     call = _call_row(tenant_id, call_id, form_id, current_status=CallStatus.ACTIVE.value)
@@ -849,10 +843,12 @@ async def test_call_ended_low_completion_auto_requeues_form(
     await wired.consumer._process("1-0", {"event": event.model_dump_json()})
 
     assert call.current_status == CallStatus.COMPLETED.value
-    assert form.status == FormStatus.IN_QUEUE.value
-    assert form.retry_count == 1
-    assert form.enqueued_at is not None
-    assert len(wired.dispatch_calls) == 1  # the requeued form gets a dispatch pass
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.retry_count == 0, "the retry budget must be untouched"
+    assert form.review_reason == ReviewReason.NOT_EVALUATED.value
+    # The slotwise refill still runs: leaving AI_PROCESSING frees a concurrency slot whether
+    # or not this form was requeued.
+    assert len(wired.dispatch_calls) == 1
     assert redis.acked == ["1-0"]
 
 

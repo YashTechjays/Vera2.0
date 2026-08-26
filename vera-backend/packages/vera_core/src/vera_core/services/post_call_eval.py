@@ -52,6 +52,7 @@ from vera_core.models.tenant import Tenant
 from vera_core.services.call_lifecycle import no_retry_reason
 from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine
+from vera_core.services.retry_decision import Redial, decide_retry
 
 logger = logging.getLogger("vera_core.services.post_call_eval")
 
@@ -531,53 +532,27 @@ async def evaluate_call(
     unsatisfied = unsatisfied_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
-    if not unsatisfied:
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW,
-            written=len(kept),
-            reviewed=[],
-            reason=ReviewReason.READY_FOR_REVIEW,
-        )
-    # Good-enough gate: the call verified the tenant's threshold of the applicable-
-    # required fields, so park for review instead of redialing for the tail. Only
-    # suppresses a retry — the guards below decide the sub-threshold case.
-    if verified_fraction >= float(tenant.retry_fill_threshold):
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW,
-            written=len(kept),
-            reviewed=unsatisfied,
-            reason=ReviewReason.FILL_THRESHOLD_MET,
-        )
     retryable = retryable_required_paths(
         status_by_path, version.schema_json, floor=deps.floor, values=current_values
     )
-    if retryable and sm.can_retry(form, tenant_max_retries=tenant.max_retries):
-        # Never auto-redial a call a supervisor or a flow rule deliberately ended:
-        # route to human review instead of re-queueing (call_lifecycle.no_retry_reason).
-        if no_retry is not None:
-            return await _finish(
-                FormStatus.EXCEPTION_REVIEW,
-                written=len(kept),
-                reviewed=unsatisfied,
-                reason=no_retry,
-            )
-        if tenant.allows_auto_retry(deps.auto_retry_enabled):
-            return await _finish(
-                FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry"
-            )
-        # Covers either gate being off: the deployment kill-switch, the tenant's
-        # own auto_retry_enabled, or both.
-        return await _finish(
-            FormStatus.EXCEPTION_REVIEW,
-            written=len(kept),
-            reviewed=unsatisfied,
-            reason=ReviewReason.AUTO_RETRY_DISABLED,
-        )
+    # The SAME call the fallback resolver makes (`services/retry_decision`). Composed here
+    # rather than through `load_retry_inputs` only because this function already holds the
+    # parsed doc, the status map and an in-memory values map — routing it through the loader
+    # would re-query all three. The decision itself is not duplicated.
+    decision = decide_retry(
+        unsatisfied=bool(unsatisfied),
+        retryable=bool(retryable),
+        fraction_below_threshold=verified_fraction < float(tenant.retry_fill_threshold),
+        no_retry=no_retry,
+        can_retry=sm.can_retry(form, tenant_max_retries=tenant.max_retries),
+        auto_retry_allowed=tenant.allows_auto_retry(deps.auto_retry_enabled),
+    )
+    if isinstance(decision, Redial):
+        return await _finish(FormStatus.IN_QUEUE, written=len(kept), reviewed=[], reason="retry")
+    # `reviewed` is the reviewer-facing gap list; READY_FOR_REVIEW has none by construction.
     return await _finish(
         FormStatus.EXCEPTION_REVIEW,
         written=len(kept),
-        reviewed=unsatisfied,
-        reason=(
-            ReviewReason.RETRIES_EXHAUSTED if retryable else ReviewReason.UNSATISFIED_UNASKABLE
-        ),
+        reviewed=[] if decision.reason == ReviewReason.READY_FOR_REVIEW else unsatisfied,
+        reason=decision.reason,
     )

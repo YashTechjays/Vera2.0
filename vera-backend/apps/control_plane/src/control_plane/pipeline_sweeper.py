@@ -243,8 +243,6 @@ class PipelineSweeper:
                             ref,
                             trigger="sweeper_reconcile",
                             actor_label="pipeline-sweeper",
-                            auto_retry_enabled=self._form_auto_retry_enabled,
-                            review_floor=self._review_floor,
                         )
                     closed += 1
                     logger.info(
@@ -270,8 +268,6 @@ class PipelineSweeper:
             self._audit,
             tenant_id,
             grace_s=self._stuck_grace_s,
-            auto_retry_enabled=self._form_auto_retry_enabled,
-            review_floor=self._review_floor,
         )
 
         # Phase 4: time-based dispatch wake-up — freed slots and/or queued forms.

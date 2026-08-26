@@ -1,15 +1,16 @@
 """The one place the verified fraction is computed from a live session.
 
 `verified_pct` is the fraction of required, applicable, collectable leaves an AUTHORITATIVE
-call confirmed. The fallback gate (`control_plane.post_call.resolve_ai_processing`) reads it
-through here instead of `completion_pct`, which is what stopped the park-vs-redial decision
-depending on which consumer closed the call (spec E3). Values are PHI — passed to the pure
-helper, never logged.
+call confirmed. Values are PHI — passed to the pure helper, never logged.
 
-NOT yet the single source: `post_call_eval.evaluate_call` still hand-composes the same
-sequence inline, because it already holds the parsed doc and an in-memory values map and
-routing it here would re-query both. Until it does, the two gates agree only because both
-call the same primitives with the same arguments — see the spec's deferred list.
+Read by `post_call_eval.evaluate_call` (the retry decision) and by the dispute-resolve
+endpoint (refreshing the stored column). NOT by `control_plane.post_call.resolve_ai_processing`
+any more, and that removal is the point: `is_call_confirmed` requires a judge verdict
+(`ai_supported`), and the fallback resolver runs precisely when no judge ran — so this
+fraction was structurally 0.0 there for every call however good, and 0.0 is below every
+threshold. The fallback is a safety net that guarantees a form leaves AI_PROCESSING; it makes
+no fill-based retry decision, because it has no evidence to make one from. One decision, one
+site: `services/retry_decision.decide_retry`, called only from the eval path.
 
 Deliberately not part of `field_status.py`: that module scopes itself to PHI-free reads (no
 value columns). Confirming a leaf requires the real answer values (`current_values_by_path`),

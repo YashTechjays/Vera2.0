@@ -853,7 +853,6 @@ async def end_call(
                 ref,
                 trigger="user_end_call",
                 actor_label=actor_label,
-                review_floor=settings.post_call_review_floor,
             )
             await run_dispatch_pass(
                 sessionmaker,
