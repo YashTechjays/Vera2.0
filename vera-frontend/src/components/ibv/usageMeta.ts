@@ -31,15 +31,18 @@ export const USAGE_META: Record<
     labelCellClass: "",
     swatchClass: "border-ibv-input-border bg-ibv-input-bg",
   },
-  // Amber, distinct from the violet system tint and the green context tint. Deliberately not
-  // red: red means low-confidence dispute here, and a per-call field is the opposite of a
-  // problem — it is working as designed.
+  // Pink is the only hue in this form that no SEVERITY claims, which is the point: every warm
+  // tone here already encodes confidence — yellow #FEFCE8 medium, amber #FFFBEB low, red
+  // #FEF2F2 very-low (`confidenceHighlightClass`) — and amber again on the Unverified pill.
+  // A per-call field is a CATEGORY, not a severity, so it must not borrow a severity's colour.
+  // Green (context + high confidence), violet (system), teal (#d0e0e3 value cells), blue
+  // (default highlight) and gray (UI-only) are likewise spoken for.
   perCall: {
     label: "Per-call field",
     description:
       "Asked on every call. Its value describes THAT call — the representative's name, the call reference number — so it has no form-level baseline to diverge from and never raises a dispute.",
-    labelCellClass: "bg-amber-100",
-    swatchClass: "border-amber-300 bg-amber-100",
+    labelCellClass: "bg-pink-100",
+    swatchClass: "border-pink-300 bg-pink-100",
   },
   // Diagonal gray hatching ("not in use"), not another hue — flat gray was
   // indistinguishable from the default label cells.
