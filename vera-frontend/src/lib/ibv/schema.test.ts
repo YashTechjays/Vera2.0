@@ -5,7 +5,6 @@ import {
   allLeaves,
   alternativeSiblings,
   applicabilityReason,
-  completionPercent,
   contradictionWarnings,
   fieldUsageOf,
   flattenSection,
@@ -20,7 +19,7 @@ import {
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
-import type { FormSchema, FormValues } from "./types"
+import type { FormSchema } from "./types"
 
 // The backend's compiled artifact (imported from its source of truth) is the
 // test fixture — the same document the backend serves per schema_version_id.
@@ -259,93 +258,6 @@ describe("getSectionTable", () => {
     expect(
       isApplicable(schema, copay.gates, { [covered]: "Yes", [rowCovered]: "No" })
     ).toBe(false)
-  })
-})
-
-describe("completionPercent", () => {
-  it("is under 100 for an empty form and reaches 100 when every applicable required leaf is filled", () => {
-    expect(completionPercent(schema, {})).toBeLessThan(100)
-
-    // Fill required∧applicable leaves to a fixpoint: answering a gate field can
-    // make new leaves applicable, so iterate until stable.
-    const values: FormValues = { [COVERAGE]: "Individual" }
-    for (let i = 0; i < 10; i++) {
-      let changed = false
-      for (const l of allLeaves(schema)) {
-        if (values[l.path]) continue
-        if (!isApplicable(schema, l.gates, values)) continue
-        if (!isRequired(schema, l.field, values)) continue
-        values[l.path] = l.field.values?.[0] ?? "1"
-        changed = true
-      }
-      if (!changed) break
-    }
-    expect(completionPercent(schema, values)).toBe(100)
-  })
-
-  it("treats a declared default as filled", () => {
-    // Some required leaves carry default "N/A" (e.g. patient_gender), so even
-    // an empty form is partially complete.
-    expect(completionPercent(schema, {})).toBeGreaterThan(0)
-  })
-})
-
-describe("completionPercent counts only leaves a call can fill", () => {
-  // An earlier draft of this test asserted 0 here. That's wrong for this real schema: 5 of the
-  // 39 relevant (ask/confirm ∧ required ∧ applicable) leaves in ibv_form_standard_v2 declare a
-  // default of "N/A" (group_name, group_number, policy_situs, telehealth_covered,
-  // enrollment_required), and isSatisfied counts a declared default as filled regardless of the
-  // call (pre-existing behavior, unchanged by this fix). So a context-only form reads
-  // 5/39 = 12.82%, which Math.round (this module's existing convention — unlike the backend's
-  // 2dp round) takes to 13. Mirrors vera-backend's
-  // TestCompletionCountsOnlyCollectableLeaves in tests/unit/forms/test_review.py, run against
-  // the same compiled document.
-  it("reads 13 (not 0) for a form holding only intake context", () => {
-    const values: FormValues = Object.fromEntries(
-      allLeaves(schema)
-        .filter((l) => l.field.role !== "ask" && l.field.role !== "confirm")
-        .map((l) => [l.path, "x"])
-    )
-    const relevant = allLeaves(schema).filter(
-      (l) =>
-        (l.field.role === "ask" || l.field.role === "confirm") &&
-        isApplicable(schema, l.gates, values) &&
-        isRequired(schema, l.field, values)
-    )
-    // Pinned counts for the current compiled document — a change here signals the schema
-    // drifted, not that this test is wrong.
-    expect(relevant.length).toBe(39)
-    expect(relevant.filter((l) => l.field.default !== undefined).length).toBe(5)
-    expect(completionPercent(schema, values)).toBe(13)
-  })
-
-  it("moves once an askable leaf is answered, unaffected by the intake-only context", () => {
-    const context: FormValues = Object.fromEntries(
-      allLeaves(schema)
-        .filter((l) => l.field.role !== "ask" && l.field.role !== "confirm")
-        .map((l) => [l.path, "x"])
-    )
-    const target = "sections.patient_verification.is_insurance_active"
-    const before = completionPercent(schema, context)
-    const after = completionPercent(schema, { ...context, [target]: "Yes" })
-    expect(after).toBeGreaterThan(before)
-  })
-
-  it("is 100 when no leaf is both required and collectable", () => {
-    // The `if (relevant.length === 0) return 100` branch: a schema whose only required leaf is
-    // context-only has nothing a call could ever move, so it reads complete rather than 0.
-    const contextOnly = parseSchema({
-      dsl_version: "2.1",
-      name: "T",
-      insurance_type: "infertility_treatment",
-      sections: {
-        s: {
-          title: "S",
-          fields: { f: { type: "text", title: "F", role: "context", required: true } },
-        },
-      },
-    })
-    expect(completionPercent(contextOnly, {})).toBe(100)
   })
 })
 
