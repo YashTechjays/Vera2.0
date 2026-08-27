@@ -33,6 +33,38 @@ This is not optional for Vera 2.0 — treat it as part of "done."
 > Note: this is a model-followed workflow rule (a hook can't launch an agent), so it
 > lives here in `CLAUDE.md` rather than as a `settings.json` hook.
 
+## MANDATORY: a new vocabulary word goes in the scoped `CLAUDE.md`, same commit
+
+Adding, renaming, re-scoping or retiring a **vocabulary item** — a form-schema DSL key, an
+inheritance or defaulting rule, a validator rule, an enum member a schema author hand-writes —
+is not done until the scoped `CLAUDE.md` that authors actually read says so, in the SAME commit
+as the code. Not the next PR, not "when it settles".
+
+For the form-schema DSL that file is
+`vera-backend/packages/vera_core/src/vera_core/forms/CLAUDE.md`, and a new key normally lands in
+three of its sections:
+
+- **the new-schema checklist** — if an author must now DO something, and above all if it is
+  something **no validator enforces**;
+- **validator rules** — what gets rejected, plus what deliberately does NOT and why;
+- **semantics worth remembering** — what the word means, how it defaults and inherits, and what
+  breaks downstream when it is wrong.
+
+Then re-read the sections you did NOT edit and fix whatever the change just falsified. A new key
+usually makes some neighbouring claim untrue.
+
+**A dated doc under `docs/superpowers/` does not satisfy this.** Specs, plans and review records
+are point-in-time evidence, are not amended in place, and load for nobody by default. The scoped
+`CLAUDE.md` is the living contract. Writing an excellent design doc and stopping there is exactly
+how the gap forms.
+
+Precedent, and the reason this rule exists: `collected_per` shipped with a design doc, an
+implementation plan, six review artifacts and a live-call verification record — and **zero lines
+in any `CLAUDE.md`**. The authoring checklist never mentioned the one requirement no validator
+enforces (the reference-number leaf must carry the marker), and two neighbouring bullets had
+quietly become false, including one still describing a gate that had been deleted. Nothing in
+`just check` can catch this; it surfaced only because someone asked.
+
 ## Git remote: Bitbucket, not GitHub
 
 `origin` is a Bitbucket remote (`git remote -v`), so `gh` cannot create PRs here — push the branch
