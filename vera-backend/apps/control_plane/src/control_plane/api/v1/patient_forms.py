@@ -16,7 +16,7 @@ Every PHI response audits field **names** only (never values).
 
 import asyncio
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, NoReturn
@@ -113,9 +113,10 @@ from vera_core.services.field_answers import (
     BASELINE_SOURCES,
     current_values_by_path,
 )
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.recordings import recording_config_from
+from vera_core.services.verification import load_verified_fraction
 
 router = APIRouter(tags=["patient-forms"])
 
@@ -536,6 +537,9 @@ class ProvenanceView(BaseModel):
     attempt: int
     mode: str
     judge: JudgeView | None
+    # False when the call that produced this value never captured a rep call reference
+    # number — the value is kept and stays current, but carries no proof (spec D8).
+    authoritative: bool
 
 
 class FieldView(BaseModel):
@@ -563,7 +567,9 @@ def _provenance_view(p: FieldProvenance | None) -> ProvenanceView | None:
         if p.judge is not None
         else None
     )
-    return ProvenanceView(attempt=p.attempt, mode=p.mode, judge=judge)
+    return ProvenanceView(
+        attempt=p.attempt, mode=p.mode, judge=judge, authoritative=p.authoritative
+    )
 
 
 def _field_evidence(view: dict[str, Any], p: FieldProvenance | None) -> str | None:
@@ -600,6 +606,24 @@ class PatientFormDetail(BaseModel):
     insurance_type: str
     schema_version_id: UUID
     completion_pct: float
+    # The retry gate's own number: the fraction of required, applicable, collectable leaves an
+    # AUTHORITATIVE call confirmed. Diverges sharply from completion_pct — a call that answered
+    # everything but captured no reference number reads 100% complete and 0% verified. None
+    # preserves "not yet evaluated" (mirrors CallSummary.verified_pct) — a real 0.0 would
+    # misread as "0% verified" for a pre-eval form.
+    verified_pct: float | None
+    # Repeated from the worklist row so the review modal can show it where the reviewer
+    # actually decides.
+    review_reason: str | None
+    retry_count: int
+    # The confidence floor `is_call_confirmed` applies (settings.post_call_review_floor). The UI
+    # renders confidence scores, and their meaning is defined entirely by this boundary.
+    review_floor: int
+    # The four above are staged ahead of their consumer, per the F0-F5 plan in
+    # specs/2026-08-25-per-call-answers-review-ux-design.md §272 — each rides on `form` or
+    # `settings`, so they cost nothing. `max_retries` is deliberately NOT here: it lives on
+    # Tenant, so serving it means a per-request query, and "retries used of N" should bring
+    # that query back together with the UI that renders it.
     created_at: datetime
     updated_at: datetime
     patient_name: str | None
@@ -612,6 +636,13 @@ class PatientFormDetail(BaseModel):
     # toggle pre-loads from here so an operator's earlier choice round-trips.
     ivr_navigation_enabled: bool
     fields: list[FieldView]
+    # The schema's `collected_per="call"` leaves — the SAME set that suppresses their disputes in
+    # `build_field_views`, so the marking the UI shows and the exemption it explains cannot drift.
+    # Sent RESOLVED rather than re-derived client-side: `collected_per` inherits leaf → enclosing
+    # groups nearest-first → section → document default, and a client reading only the leaf marker
+    # silently misses `is_insurance_active`, which declares none of its own
+    # (test_the_shipped_ibv_schema_relies_on_section_inheritance pins that).
+    call_scoped_paths: list[str]
 
 
 class CallAttemptView(BaseModel):
@@ -626,6 +657,12 @@ class CallAttemptView(BaseModel):
     # `recording_playable`, the single source of this flag) — the DTO must
     # never advertise a recording the playback endpoint would refuse.
     recording_available: bool
+    # False when this call captured no rep call reference number — nothing ties it to a
+    # payer-side record, so its answers are never treated as collected by the retry ask set.
+    authoritative: bool
+    # False when the post-call eval never ran (after_state == {}): `changed_paths` is then
+    # unknown, not "empty" — the UI must say the outcome is unknown, never "changed nothing".
+    finalized: bool
 
 
 def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -> CallAttemptView:
@@ -645,6 +682,8 @@ def _call_attempt_view(a: CallAttempt, caller_id: UUID | None, can_play: bool) -
             can_play=can_play,
             status=a.status,
         ),
+        authoritative=a.authoritative,
+        finalized=a.finalized,
     )
 
 
@@ -670,11 +709,63 @@ def _baseline_query(form_id: UUID) -> Any:
     )
 
 
-async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, Any]]:
+async def _v2_doc_for(session: TenantSession, form: PatientForm) -> FormSchemaDoc | None:
+    """The form's pinned schema document, fetched and parsed once. Only for callers that need
+    the whole document — `_call_scoped_paths` walks every leaf. A caller that needs just the
+    reference-number field wants `_reference_field_for` instead."""
+    version = (
+        await session.execute(
+            select(SchemaVersion).where(SchemaVersion.id == form.schema_version_id)
+        )
+    ).scalar_one()
+    return _v2_doc(version.schema_json)
+
+
+async def _reference_field_for(session: TenantSession, form: PatientForm) -> str | None:
+    """The pinned schema's `rep_call_reference_number_field`, read straight off the JSON —
+    `None` for a document predating it. Parsing the whole ~5k-line document to reach one
+    top-level string cost hundreds of pydantic models per request."""
+    # `.as_string()` (`->>`) rather than a bare index: `schema_json` is generic JSON, and `->`
+    # hands back the value still JSON-encoded, so the path would arrive wrapped in quotes.
+    reference_field: str | None = (
+        await session.execute(
+            select(SchemaVersion.schema_json["rep_call_reference_number_field"].as_string()).where(
+                SchemaVersion.id == form.schema_version_id
+            )
+        )
+    ).scalar_one()
+    return reference_field
+
+
+def _reference_field(doc: FormSchemaDoc | None) -> str | None:
+    """The reference-number field of an already-parsed doc, or None for a legacy v1 schema."""
+    return doc.rep_call_reference_number_field if doc is not None else None
+
+
+def _call_scoped_paths(doc: FormSchemaDoc | None) -> frozenset[str]:
+    """The form's pinned schema's `collected_per="call"` leaves. Empty for a document predating
+    the marker, which simply means nothing is exempt — today's behaviour."""
+    return doc.collected_per_call_paths() if doc is not None else frozenset()
+
+
+async def _authoritative_call_ids(
+    session: TenantSession, form_id: UUID, reference_field: str | None
+) -> frozenset[UUID] | None:
+    """The form's authoritative call ids, or `None` when the schema declares no
+    reference-number field — see `_authoritative`."""
+    if reference_field is None:
+        return None
+    return await load_authoritative_call_ids(session, form_id, reference_field=reference_field)
+
+
+async def _field_views(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str]
+) -> list[dict[str, Any]]:
     """The dispute-annotated field views for one form — the single source of truth for
     "is this a dispute". Both the detail view and the dispute gate go through here, so the
     count and the detail can never disagree. The dispute decision (incl. value
-    normalization and null handling) lives once, in `build_field_views`/`is_disputed`."""
+    normalization, null handling, and the call-scoped exemption) lives once, in
+    `build_field_views`/`is_disputed`."""
     current = (
         (
             await session.execute(
@@ -702,40 +793,57 @@ async def _field_views(session: TenantSession, form_id: UUID) -> list[dict[str, 
             for a in current
         ],
         baseline_by_path,
+        call_scoped_paths=call_scoped_paths,
     )
 
 
-async def _open_dispute_paths(session: TenantSession, form_id: UUID) -> set[str]:
+async def _open_dispute_paths(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str] = ()
+) -> set[str]:
     """The set of field paths with an open dispute on this form — used to gate which
     resolutions emit a `dispute_action` (audit record)."""
-    return {
-        v["field_path"] for v in await _field_views(session, form_id) if v["dispute"] is not None
-    }
+    views = await _field_views(session, form_id, call_scoped_paths=call_scoped_paths)
+    return {v["field_path"] for v in views if v["dispute"] is not None}
 
 
-async def _unresolved_dispute_count(session: TenantSession, form_id: UUID) -> int:
+async def _unresolved_dispute_count(
+    session: TenantSession, form_id: UUID, *, call_scoped_paths: Collection[str] = ()
+) -> int:
     """The number of fields on this form with an open dispute (derived from the same
     Python rule the detail view uses)."""
-    return len(await _open_dispute_paths(session, form_id))
+    return len(await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths))
 
 
-async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFormDetail:
+async def _build_detail(
+    session: TenantSession, form: PatientForm, settings: AppSettings
+) -> PatientFormDetail:
     """Assemble the full review detail for one form (current answers + disputes)."""
-    views = await _field_views(session, form.id)
-
-    form_schema = (
+    # One round trip for both the schema row (insurance_type) and its document (doc) — the
+    # v2-or-None parse happens once here, shared by the call-scoped and authoritative lookups
+    # below instead of each re-fetching and re-parsing the same SchemaVersion.
+    form_schema, version = (
         await session.execute(
-            select(FormSchema)
+            select(FormSchema, SchemaVersion)
             .join(SchemaVersion, SchemaVersion.schema_id == FormSchema.id)
             .where(SchemaVersion.id == form.schema_version_id)
         )
-    ).scalar_one()
+    ).one()
+    doc = _v2_doc(version.schema_json)
 
-    attempts = await load_call_attempts(session, form.id)
+    call_scoped_paths = _call_scoped_paths(doc)
+    views = await _field_views(session, form.id, call_scoped_paths=call_scoped_paths)
+
+    authoritative_calls = await _authoritative_call_ids(session, form.id, _reference_field(doc))
+    attempts = await load_call_attempts(session, form.id, authoritative_calls=authoritative_calls)
     # No calls → no ai_call answers → nothing to join; skip the provenance query
     # (this runs on every form-detail GET, incl. intake-only forms).
     prov = (
-        await load_field_provenance(session, form.id, {a.id: (a.attempt, a.mode) for a in attempts})
+        await load_field_provenance(
+            session,
+            form.id,
+            {a.id: (a.attempt, a.mode) for a in attempts},
+            authoritative_calls=authoritative_calls,
+        )
         if attempts
         else {}
     )
@@ -746,6 +854,10 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         insurance_type=form_schema.insurance_type,
         schema_version_id=form.schema_version_id,
         completion_pct=float(form.completion_pct),
+        verified_pct=float(form.verified_pct) if form.verified_pct is not None else None,
+        review_reason=form.review_reason,
+        retry_count=form.retry_count,
+        review_floor=settings.post_call_review_floor,
         created_at=form.created_at,
         updated_at=form.updated_at,
         patient_name=form.patient_name,
@@ -755,6 +867,8 @@ async def _build_detail(session: TenantSession, form: PatientForm) -> PatientFor
         insurance_provider=form.insurance_provider,
         ivr_navigation_enabled=form.ivr_navigation_enabled,
         fields=[_field_view(view, prov.get(view["field_path"])) for view in views],
+        # Sorted for a stable response body; the set itself is unordered.
+        call_scoped_paths=sorted(call_scoped_paths),
     )
 
 
@@ -965,6 +1079,7 @@ async def get_patient_form(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:read"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
@@ -973,7 +1088,7 @@ async def get_patient_form(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    detail = await _build_detail(session, form)
+    detail = await _build_detail(session, form, settings)
     await emit_phi_read_audit(
         get_audit(request),
         request,
@@ -1012,7 +1127,9 @@ async def list_form_calls(
     ).scalar_one_or_none()
     if form is None:
         raise NotFoundError(message="patient form not found")
-    attempts = await load_call_attempts(session, form_id)
+    reference_field = await _reference_field_for(session, form)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, reference_field)
+    attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     await emit_phi_read_audit(
         get_audit(request),
         request,
@@ -1046,6 +1163,7 @@ async def resolve_disputes(
     response: Response,
     session: TenantSession,
     tenant_id: TenantId,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("forms:write"),
 ) -> ResponseModel[PatientFormDetail]:
     response.headers["Cache-Control"] = "no-store"
@@ -1072,10 +1190,11 @@ async def resolve_disputes(
     phone_paths = phone_promoted_paths(doc) if doc is not None else set()
     date_paths = date_leaf_paths(doc) if doc is not None else {}
     literals = leaf_literals(doc) if doc is not None else {}
+    call_scoped_paths = doc.collected_per_call_paths() if doc is not None else frozenset()
 
     # Open disputes BEFORE any writes: only an actually-disputed path may emit a
     # `dispute_action` (a pre-call/baseline edit advances the baseline without one).
-    open_paths = await _open_dispute_paths(session, form_id)
+    open_paths = await _open_dispute_paths(session, form_id, call_scoped_paths=call_scoped_paths)
 
     current_by_path = {
         a.field_path: a
@@ -1193,6 +1312,20 @@ async def resolve_disputes(
         if doc is not None
         else completion_pct(set(current_values), version.schema_json)
     )
+    # A resolve demotes the current answer and inserts a human one, so a previously-confirmed
+    # leaf can stop being confirmed — verified_pct must be refreshed alongside completion_pct or
+    # the displayed number goes stale exactly when it moves. None (legacy v1) leaves the column
+    # untouched: it means "authoritative is undefined here", never "recompute to zero".
+    verified_fraction = await load_verified_fraction(
+        session,
+        form_id,
+        floor=settings.post_call_review_floor,
+        doc=doc,
+        schema_json=version.schema_json,
+        values=current_values,
+    )
+    if verified_fraction is not None:
+        form.verified_pct = round(verified_fraction * 100, 2)
     # Flush BEFORE refresh: refresh() reloads from the DB and DISCARDS pending
     # attribute changes — without this flush the completion update was silently
     # lost. The refresh then reloads server-updated columns (updated_at onupdate)
@@ -1200,7 +1333,7 @@ async def resolve_disputes(
     await session.flush()
     await session.refresh(form)
 
-    detail = await _build_detail(session, form)
+    detail = await _build_detail(session, form, settings)
     audit = get_audit(request)
     # The response discloses every field value (PHI) — audit the disclosure, then the action.
     await emit_phi_read_audit(
@@ -1276,9 +1409,14 @@ async def export_patient_form(
     ).scalar_one()
     values = await current_values_by_path(session, form_id)
     sources = {p: s.source or "" for p, s in (await load_field_status(session, form_id)).items()}
-    attempts = await load_call_attempts(session, form_id)
+    doc = _v2_doc(version.schema_json)
+    authoritative_calls = await _authoritative_call_ids(session, form_id, _reference_field(doc))
+    attempts = await load_call_attempts(session, form_id, authoritative_calls=authoritative_calls)
     prov = await load_field_provenance(
-        session, form_id, {a.id: (a.attempt, a.mode) for a in attempts}
+        session,
+        form_id,
+        {a.id: (a.attempt, a.mode) for a in attempts},
+        authoritative_calls=authoritative_calls,
     )
     data = build_workbook(version.schema_json, values, sources, prov, attempts)
 
@@ -1500,7 +1638,10 @@ async def update_patient_form_status(
 
     # A form may only complete once every judge-flagged dispute is adjudicated.
     if target == FormStatus.COMPLETED:
-        remaining = await _unresolved_dispute_count(session, form_id)
+        call_scoped_paths = _call_scoped_paths(await _v2_doc_for(session, form))
+        remaining = await _unresolved_dispute_count(
+            session, form_id, call_scoped_paths=call_scoped_paths
+        )
         if remaining:
             raise CustomAPIException(
                 DefaultExceptionCode.CONFLICT,
@@ -1572,6 +1713,7 @@ async def update_patient_form_status(
             wait_for_form_id=form_id,
             recording=recording_config_from(settings),
             plan_service=call_plans,
+            retry_floor=settings.post_call_review_floor,
         )
 
     return ok(

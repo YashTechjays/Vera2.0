@@ -62,6 +62,7 @@ const DETAIL = {
     },
   ],
   ivr_navigation_enabled: false,
+  call_scoped_paths: [],
 }
 
 function Harness() {

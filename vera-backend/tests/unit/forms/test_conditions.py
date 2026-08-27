@@ -124,7 +124,9 @@ class TestCompletionPctV2:
                 break
         assert completion_pct_v2(values, V2_JSON) == 100.0
 
-    # Small literal doc so the arithmetic is exact: `a` gates `b`; `c` is
+    # Small literal doc so the arithmetic is exact. `a`, `b`, `c` are role="ask"
+    # (genuinely collectable, each with its own prompt.ask) so this exercises the same
+    # askable-only denominator completion_pct_v2 uses post-fix: `a` gates `b`; `c` is
     # required but filled by its declared default.
     SMALL: ClassVar[dict[str, Any]] = {
         "dsl_version": "2.1",
@@ -136,45 +138,50 @@ class TestCompletionPctV2:
         "sections": {
             "s": {
                 "title": "S",
-                "role": "ui_only",
                 "fields": {
                     "a": {
                         "type": "enum",
                         "title": "A",
-                        "role": "input",
+                        "role": "ask",
                         "required": True,
                         "values": ["Yes", "No"],
+                        "prompt": {"ask": "Is A yes or no?"},
                     },
                     "b": {
                         "type": "text",
                         "title": "B",
-                        "role": "input",
+                        "role": "ask",
                         "required": True,
                         "applicable_when": {
                             "field": "sections.s.a",
                             "op": "eq",
                             "value": "Yes",
                         },
+                        "prompt": {"ask": "What is B?"},
                     },
                     "c": {
                         "type": "text",
                         "title": "C",
-                        "role": "input",
+                        "role": "ask",
                         "required": True,
                         "default": "N/A",
+                        "prompt": {"ask": "What is C?"},
                     },
                 },
             }
         },
-        "tasks": [],
+        "tasks": [{"task_key": "main", "title": "Main", "sections": ["s"]}],
     }
 
     def test_applicability_gates_the_denominator(self) -> None:
-        # {} → relevant {a, c}; only c (default) filled.
+        # {} -> relevant {a, c} (b's applicable_when references a, unanswered -> not
+        # applicable); only c is filled, via its declared default.
         assert completion_pct_v2({}, self.SMALL) == 50.0
-        # a=No → b stays inapplicable; a and c filled.
+        # a=No -> b stays inapplicable (its gate wants "Yes"); a and c are both filled
+        # (a has a value on file, c via its default).
         assert completion_pct_v2({"sections.s.a": "No"}, self.SMALL) == 100.0
-        # a=Yes → b becomes relevant and is unfilled.
+        # a=Yes -> b becomes relevant too and is unfilled; a (value) and c (default) are
+        # filled, b is not: 2 of 3.
         assert completion_pct_v2({"sections.s.a": "Yes"}, self.SMALL) == 66.67
 
 

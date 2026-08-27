@@ -966,6 +966,9 @@ def _admin_sections() -> dict[str, Section]:
         ),
         "insurance_representative": Section(
             title="Insurance Representative",
+            # Both leaves describe THIS call, not the form: a retry must capture its own rep
+            # name and reference number, and the review UI must not diff them against the form.
+            collected_per="call",
             fields={
                 "rep_name": text_ask(
                     "Representative Name",
@@ -998,6 +1001,12 @@ def _patient_verification() -> Section:
             "introduction task; a denial terminates the call via the "
             "insurance_not_active flow rule."
         ),
+        # Whether the policy is active TODAY is a per-call fact, re-verified on every call — which
+        # also re-arms the insurance_not_active flow rule on a retry, so a policy that lapsed since
+        # the last attempt terminates properly instead of proceeding on a stale "Yes". Retaining
+        # the introduction task (and with it the greeting and recording disclosure) falls out of
+        # this; `test_a_task_carrying_the_calls_opening_is_always_retained` pins that dependency.
+        collected_per="call",
         fields={
             "is_insurance_active": enum_ask(
                 "Is Insurance Active",

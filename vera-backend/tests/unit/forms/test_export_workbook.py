@@ -48,7 +48,7 @@ V2 = {
 }
 
 
-def _attempt(n: int, mode: str) -> CallAttempt:
+def _attempt(n: int, mode: str, *, authoritative: bool = True) -> CallAttempt:
     return CallAttempt(
         id=uuid4(),
         attempt=n,
@@ -57,6 +57,7 @@ def _attempt(n: int, mode: str) -> CallAttempt:
         created_at=datetime(2026, 7, 10, tzinfo=UTC),
         retry_of=None,
         changed_paths=[],
+        authoritative=authoritative,
     )
 
 
@@ -210,7 +211,7 @@ def test_judged_export_labels_every_provenance_row_and_bolds_both_headers() -> N
         "Supported",
     ]
     # Every heading cell bold, not just "Field path"; the header row stays on screen.
-    assert all(prov.cell(row=1, column=c).font.bold for c in range(1, 8))
+    assert all(prov.cell(row=1, column=c).font.bold for c in range(1, 9))
     assert prov.freeze_panes == "A2"
 
     labels = {r[0]: r[1] for r in prov.iter_rows(values_only=True) if r[0]}
@@ -270,3 +271,30 @@ def test_formula_shaped_values_export_as_inert_text() -> None:
     assert cell.data_type != "f"
     rows = [tuple(r) for r in wb["Form"].iter_rows(values_only=True)]
     assert ("cov.a", payload) in rows  # text preserved verbatim
+
+
+def test_a_non_authoritative_call_is_reported_as_such_on_both_sheets() -> None:
+    """The flag must be RENDERED, not defaulted: a workbook that silently claims every answer
+    is payer-proven is worse than one that omits the column (spec E7)."""
+    schema_json = json.loads((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text("utf-8"))
+    path = f"{IVF}.cpt_58970.covered"
+    data = build_workbook(
+        schema_json,
+        values={path: "Yes"},
+        sources={path: "ai_call"},
+        provenance={path: FieldProvenance(attempt=1, mode="full", judge=None, authoritative=False)},
+        attempts=[_attempt(1, "full", authoritative=False)],
+    )
+    prov = load_workbook(BytesIO(data))["Provenance"]
+
+    header = [c.value for c in prov[1]]
+    assert header[7] == "Authoritative"
+
+    rows = {r[0]: r for r in prov.iter_rows(values_only=True) if r[0]}
+    assert rows[path][7] is False
+
+    # The Call-history block repeats a heading row further down the same sheet.
+    history_header = next(r for r in prov.iter_rows(values_only=True) if r and r[0] == "Attempt")
+    assert history_header[5] == "Authoritative"
+    history_row = next(r for r in prov.iter_rows(values_only=True) if r and r[0] == 1)
+    assert history_row[5] is False

@@ -39,6 +39,12 @@ export function modeBadgeClass(mode: string): string {
     : "bg-slate-100 text-slate-600"
 }
 
+/** Amber "watch this" pill chrome — an unverified/not-finalized marker, not a
+ *  mode or status. Sizing (padding/font-size) is the caller's via `cn()`, since
+ *  the attempt-level and field-level pills sit in differently sized contexts. */
+export const warningPillClass =
+  "rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+
 // Manual status transitions a reviewer/operator may trigger from the form UI —
 // mirrors the backend state machine in patient_forms.py. The call pipeline owns
 // every other edge, so only these targets are offered.

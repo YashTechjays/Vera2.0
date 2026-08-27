@@ -5,7 +5,6 @@ import {
   allLeaves,
   alternativeSiblings,
   applicabilityReason,
-  completionPercent,
   contradictionWarnings,
   fieldUsageOf,
   flattenSection,
@@ -20,7 +19,7 @@ import {
   suggestionsOf,
   systemFieldPaths,
 } from "./schema"
-import type { FormSchema, FormValues } from "./types"
+import type { FormSchema } from "./types"
 
 // The backend's compiled artifact (imported from its source of truth) is the
 // test fixture — the same document the backend serves per schema_version_id.
@@ -262,34 +261,6 @@ describe("getSectionTable", () => {
   })
 })
 
-describe("completionPercent", () => {
-  it("is under 100 for an empty form and reaches 100 when every applicable required leaf is filled", () => {
-    expect(completionPercent(schema, {})).toBeLessThan(100)
-
-    // Fill required∧applicable leaves to a fixpoint: answering a gate field can
-    // make new leaves applicable, so iterate until stable.
-    const values: FormValues = { [COVERAGE]: "Individual" }
-    for (let i = 0; i < 10; i++) {
-      let changed = false
-      for (const l of allLeaves(schema)) {
-        if (values[l.path]) continue
-        if (!isApplicable(schema, l.gates, values)) continue
-        if (!isRequired(schema, l.field, values)) continue
-        values[l.path] = l.field.values?.[0] ?? "1"
-        changed = true
-      }
-      if (!changed) break
-    }
-    expect(completionPercent(schema, values)).toBe(100)
-  })
-
-  it("treats a declared default as filled", () => {
-    // Some required leaves carry default "N/A" (e.g. patient_gender), so even
-    // an empty form is partially complete.
-    expect(completionPercent(schema, {})).toBeGreaterThan(0)
-  })
-})
-
 describe("fieldUsageOf", () => {
   const usage = (path: string) => fieldUsageOf(schema, path, leaf(path).field)
 
@@ -304,6 +275,21 @@ describe("fieldUsageOf", () => {
     // chart_number is role input AND a system field → system
     expect(usage("sections.patient_information.chart_number")).toBe("system")
     expect(usage("sections.patient_information.patient_name")).toBe("system")
+  })
+
+  it("marks a path in the server-resolved call-scoped set as perCall", () => {
+    const path = "sections.insurance_information.plan_type"
+    expect(usage(path)).toBe("asked")
+    expect(fieldUsageOf(schema, path, leaf(path).field, new Set([path]))).toBe("perCall")
+  })
+
+  it("narrows only the asked bucket — a system or UI-only field stays what it is", () => {
+    // perCall is a narrowing of "asked", not a competing category: if it were checked first
+    // it would mask the system binding, which decides how the field is treated everywhere else.
+    const sys = "sections.patient_information.chart_number"
+    const uiOnly = "sections.form_information.practice"
+    expect(fieldUsageOf(schema, sys, leaf(sys).field, new Set([sys]))).toBe("system")
+    expect(fieldUsageOf(schema, uiOnly, leaf(uiOnly).field, new Set([uiOnly]))).toBe("noop")
   })
 
   it("classifies bot context, UI-only and asked fields", () => {

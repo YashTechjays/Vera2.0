@@ -239,35 +239,91 @@ class TestRecording:
         assert len(bus.events) == 1
 
     @pytest.mark.asyncio
-    async def test_confirming_an_ask_role_prefill_still_reaches_the_controller(self) -> None:
-        # sections.a.x is `ask`-role (see `_field`), which `gating_seed` drops from the
-        # controller's baseline — the dedup branch below is the only place left that can
-        # still tell the controller the call stated it.
+    async def test_confirming_an_ask_role_prefill_reaches_the_controller_and_the_row(self) -> None:
+        """`sections.a.x` is `ask`-role (see `_field`), and `gating_seed` drops those from the
+        controller's baseline — so `_push_recorded` on the write path is the only thing left
+        that tells it this call stated the value; the row is what supersedes the prefill."""
         extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
         manager, run_state, bus, controller = _manager(
             _plan(prefilled={"sections.a.x": "Family"}), extractor
         )
         await _feed(manager, _rep("It's family coverage."))
         assert controller.answers["sections.a.x"] == "Family"
-        # No new ai_call row and no emit — a mere confirmation leaves the INTAKE row current.
-        assert run_state.records == []
-        assert bus.events == []
+        assert run_state.records == [(ROOM, "sections.a.x", "Family", 0)]
+        assert len(bus.events) == 1
 
     @pytest.mark.asyncio
-    async def test_a_prefill_is_snapped_before_it_seeds_the_gate_baseline(self) -> None:
+    async def test_repeating_a_prior_calls_value_is_recorded_under_this_call(self) -> None:
+        """The filed defect: `plan.prefilled` carries PRIOR-CALL values on a retry (built from
+        `current_values_by_path`, every source), so a rep confirming one must write a row under
+        THIS call rather than leave the previous, possibly non-authoritative, call owning it."""
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Individual", 90)])
+        manager, run_state, bus, controller = _manager(
+            _plan(prefilled={"sections.a.x": "Individual"}), extractor
+        )
+        await _feed(manager, _rep("Individual coverage, yes."))
+        assert run_state.records == [(ROOM, "sections.a.x", "Individual", 0)]
+        assert len(bus.events) == 1 and bus.events[0].field_path == "sections.a.x"
+        assert controller.answers["sections.a.x"] == "Individual"
+
+    @pytest.mark.asyncio
+    async def test_confirming_a_confirm_role_prefill_is_recorded(self) -> None:
+        """An intake value never satisfies a `confirm` leaf (proven by
+        tests/unit/forms/test_retryable_fields.py::test_intake_does_not_satisfy_a_confirm_leaf),
+        so a rep confirming the read-back value must write a row or the field whose whole
+        purpose is payer confirmation stays unsatisfied forever."""
+        member_id = _field("sections.a.member_id", role="confirm")
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.member_id", "XYZ123", 90)])
+        manager, run_state, bus, _ = _manager(
+            _plan(fields=[member_id], prefilled={"sections.a.member_id": "XYZ123"}), extractor
+        )
+        await _feed(manager, _rep("Yes, XYZ123 is correct."))
+        assert run_state.records == [(ROOM, "sections.a.member_id", "XYZ123", 0)]
+        assert len(bus.events) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_prefill_still_writes_only_one_row_per_call(self) -> None:
+        """The one-row-per-call bound has to hold for a prefilled path too, or every
+        re-extraction of the same confirmation writes another row."""
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Family", 90)])
+        manager, run_state, bus, _ = _manager(
+            _plan(prefilled={"sections.a.x": "Family"}), extractor
+        )
+        await _feed(manager, _rep("Family."))
+        await _feed(manager, _rep("Still family."))
+        await _feed(manager, _rep("Yes, family."))
+        assert len(run_state.records) == 1
+        assert len(bus.events) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_prefill_is_snapped_before_it_seeds_the_rule_engine(self) -> None:
         """`_on_file` is what the rule engine compares byte-exact, and it is seeded from
         `plan.prefilled` — a prefill written before the writers canonicalized carries whatever
-        spelling its source used, so the dedup below would also miss the rep confirming it."""
+        spelling its source used. Asserted through the rule engine, the consumer that actually
+        depends on the snapping: `conditions.evaluate`'s `eq` is a raw string compare, so a
+        terminate rule keyed on the authored literal fires ONLY if the seed was snapped.
+        Deliberately not asserted through the dedup — that stopped reading `_on_file`."""
         total = _field(
             "sections.a.total", type="currency", special_values=["$0", "Unlimited", "No Limit"]
         )
-        extractor = FakeExtractor([ExtractedAnswer("sections.a.total", "No Limit", 90)])
-        manager, run_state, bus, _ = _manager(
-            _plan(fields=[total], prefilled={"sections.a.total": " no limit "}), extractor
+        stop = FlowRule(
+            rule_key="stop",
+            when=Comparison(field="sections.a.total", op="eq", value="No Limit"),
+            action="terminate_call",
         )
-        await _feed(manager, _rep("There is no limit on that one."))
-        assert run_state.records == []  # snapped seed == snapped answer, so nothing to write
-        assert bus.events == []
+        # The trigger is a DIFFERENT field, so the rule fires off the seeded prefill rather
+        # than off anything this call recorded.
+        extractor = FakeExtractor([ExtractedAnswer("sections.a.x", "Yes", 90)])
+        manager, _, _, controller = _manager(
+            _plan(
+                fields=[total, _field("sections.a.x")],
+                flow_rules=[stop],
+                prefilled={"sections.a.total": " no limit "},
+            ),
+            extractor,
+        )
+        await _feed(manager, _rep("Yes, and there is no limit on that one."))
+        assert controller.applied == [Terminate(rule_key="stop")]
 
     @pytest.mark.asyncio
     async def test_bot_turn_does_not_trigger_a_pass_but_counts_a_seq(self) -> None:
@@ -870,6 +926,25 @@ class TestDerivedRemaining:
         await _feed(manager, _rep("Same again.", ts=2))
         derived = [r for r in run_state.records if r[1] == REMAINING]
         assert len(derived) == 1
+
+    @pytest.mark.asyncio
+    async def test_confirming_a_prefilled_total_still_derives_remaining(self) -> None:
+        """Behaviour change from the dedup swap in `_record_locked` (now keyed on `_recorded`,
+        not `_on_file`): pre-fix, the rep merely confirming the prefilled total short-circuited
+        on the unchanged-value skip before `_derive_remaining_locked` ever ran, so a blank
+        remaining stayed unfilled even with total and met already on file. Now a confirmation
+        reaches derivation like any other write."""
+        extractor = FakeExtractor([ExtractedAnswer(TOTAL, "$25,000", 90)])
+        manager, run_state, _, controller = _manager(
+            _plan(
+                numeric_consistencies=[TRIPLET_RULE],
+                prefilled={TOTAL: "$25,000", MET: "$5,000"},
+            ),
+            extractor,
+        )
+        await _feed(manager, _rep("Yes, the total is $25,000, that's correct."))
+        assert controller.answers[REMAINING] == "$20,000.00"
+        assert any(path == REMAINING for _, path, _, _ in run_state.records)
 
 
 def test_extraction_instructions_carry_the_routing_note() -> None:

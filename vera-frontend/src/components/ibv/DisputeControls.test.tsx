@@ -189,7 +189,7 @@ describe("attempt attribution in the tooltip", () => {
       <DisputeTooltipBody
         dispute={dispute()}
         confidence={resolveConfidence(90, null)}
-        provenance={{ attempt: 2, mode: "retry", judge: null }}
+        provenance={{ attempt: 2, mode: "retry", judge: null, authoritative: true }}
       />
     )
     expect(screen.getByText("Attempt 2")).toBeInTheDocument()

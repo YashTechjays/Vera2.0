@@ -13,7 +13,6 @@ from vera_core.forms.call_plan import (
     PlanFieldDescriptor,
     PlanTask,
     _render_value,
-    bookend_paths,
     compile_call_plan,
     focus_call_plan,
     focus_questions,
@@ -57,6 +56,11 @@ PLAN: CallPlan = compile_call_plan(
     schema_version_id=SCHEMA_VERSION_ID,
     prompt_version_id=None,
 )
+
+
+def spoken_paths(task: PlanTask) -> set[str]:
+    """Every path the task's rendered question tree actually asks for."""
+    return {p for q in iter_questions(task.panels) for p in q.target_paths}
 
 
 def plan_task(plan: CallPlan, key: str) -> PlanTask:
@@ -342,58 +346,107 @@ class TestRulesAndRoundTrip:
 
 
 class TestFocusCallPlan:
-    """focus_call_plan narrows a fused plan to a FOCUSED retry (only the given
-    fields) — the mechanism that replaced the retry-announcing prompt overlay."""
+    """focus_call_plan narrows a fused plan to a FOCUSED retry: only what `paths` still
+    needs, in both the tracked fields AND the spoken question tree — the mechanism that
+    replaced the retry-announcing prompt overlay."""
 
     def _all_paths(self, plan: CallPlan) -> list[str]:
         return [f.path for t in plan.tasks for f in t.fields]
 
     def test_keeps_only_requested_fields(self) -> None:
         target = self._all_paths(PLAN)[0]
-        focused = focus_call_plan(PLAN, {target})
+        focused = focus_call_plan(PLAN, {target}, answers={})
         assert self._all_paths(focused) == [target]
 
     def test_drops_tasks_left_empty(self) -> None:
         target = self._all_paths(PLAN)[0]
-        focused = focus_call_plan(PLAN, {target})
+        focused = focus_call_plan(PLAN, {target}, answers={})
         assert all(t.fields for t in focused.tasks)
         assert len(focused.tasks) == 1
 
-    def test_clears_on_file_values_but_keeps_persona(self) -> None:
-        target = self._all_paths(PLAN)[0]
-        focused = focus_call_plan(PLAN, {target})
+    def test_empty_focus_yields_no_tasks(self) -> None:
+        assert focus_call_plan(PLAN, set(), answers={}).tasks == []
+
+    def test_narrows_the_question_tree_not_just_the_fields(self) -> None:
+        """P7: `focus_call_plan` copied `fields` and left `panels` and `prompt` untouched, so a
+        focused retry spoke every question of every surviving task."""
+        target = "sections.deductibles.individual.total"
+        focused = focus_call_plan(PLAN, {target}, answers={})
+        task = plan_task(focused, "financial")
+        spoken = spoken_paths(task)
+        assert target in spoken
+        assert "sections.out_of_pocket.individual.total" not in spoken
+
+    def test_re_renders_the_prompt_from_the_narrowed_tree(self) -> None:
+        target = "sections.deductibles.individual.total"
+        full = plan_task(PLAN, "financial")
+        focused = plan_task(focus_call_plan(PLAN, {target}, answers={}), "financial")
+        assert focused.prompt != full.prompt
+        assert len(focused.prompt) < len(full.prompt)
+
+    def test_the_reassembly_invariant_survives_narrowing(self) -> None:
+        """`PlanTaskAgent._assembled_block` rebuilds the block from these three pieces; if they
+        stop agreeing, a narrowed task says something the plan does not carry."""
+        focused = focus_call_plan(PLAN, {"sections.deductibles.individual.total"}, answers={})
+        for task in focused.tasks:
+            if not task.panels:
+                continue
+            parts = (task.lead_in, render_panels(task.panels), task.trailing)
+            assert "\n\n".join(p for p in parts if p) == task.prompt, task.task_key
+
+    def test_fields_and_panels_narrow_to_the_same_set(self) -> None:
+        """`owed_now` joins questions against `task.fields`; a question whose fields are missing is
+        invisible to the refusal and the gap pass — so the two sets must be EQUAL, not just
+        `tracked <= spoken` (that direction holds trivially and misses a spoken-but-untracked
+        question, the actual defect)."""
+        focused = focus_call_plan(PLAN, {"sections.deductibles.individual.total"}, answers={})
+        for task in focused.tasks:
+            if not task.panels:
+                continue
+            spoken = spoken_paths(task)
+            tracked = {f.path for f in task.fields}
+            assert spoken == tracked, task.task_key
+
+    def test_explode_pulls_in_the_follow_ups_of_an_unanswered_gate_parent(self) -> None:
+        """The failure `focus_questions(explode=True)` exists to prevent: the agent asks whether
+        infertility treatment is covered, the rep says yes, and — because the Observer extracts in
+        a detached pass — nothing is owed yet, so an agent with no sanctioned next question
+        invents one."""
+        parent = "sections.infertility_treatment.infertility_tx_covered"
+        focused = focus_call_plan(PLAN, {parent}, answers={})
+        task = plan_task(focused, "infertility_coverage")
+        spoken = spoken_paths(task)
+        assert parent in spoken
+        assert len(spoken) > 1, "the parent's dependents were not pre-loaded"
+
+    def test_an_already_answered_follow_up_is_not_pre_loaded(self) -> None:
+        """`_exploded` adds only targets with nothing on file — adding answered ones would make a
+        partly-answered fan-out look wholly owed."""
+        parent = "sections.infertility_treatment.infertility_tx_covered"
+        answered = {
+            p: "Yes"
+            for p, _leaf in IBV.leaf_items()
+            if p.startswith("sections.infertility_treatment.") and p != parent
+        }
+        focused = focus_call_plan(PLAN, {parent}, answers=answered)
+        task = plan_task(focused, "infertility_coverage")
+        spoken = spoken_paths(task)
+        assert spoken == {parent}
+
+    def test_still_clears_on_file_values_and_keeps_the_session(self) -> None:
+        focused = focus_call_plan(PLAN, {"sections.deductibles.individual.total"}, answers={})
         assert focused.on_file_values is None
         assert focused.session == PLAN.session
         assert focused.stt_key_terms == PLAN.stt_key_terms
 
-    def test_empty_focus_yields_no_tasks(self) -> None:
-        assert focus_call_plan(PLAN, set()).tasks == []
-
     def test_original_plan_not_mutated(self) -> None:
-        before = len(self._all_paths(PLAN))
-        focus_call_plan(PLAN, {self._all_paths(PLAN)[0]})
-        assert len(self._all_paths(PLAN)) == before
-
-
-class TestBookendPaths:
-    """bookend_paths names the fields a FOCUSED retry must always keep so every call
-    still greets (opening task) and captures its own rep name + call reference number
-    (wrap-up task) — dropping those tasks was QA issues 3 and 4."""
-
-    def test_includes_opening_and_wrapup_fields(self) -> None:
-        paths = set(bookend_paths(PLAN, IBV.rep_call_reference_number_field))
-        assert "sections.patient_verification.is_insurance_active" in paths  # greeting task
-        assert "sections.insurance_representative.rep_name" in paths  # wrap-up task
-        assert IBV.rep_call_reference_number_field in paths  # every call logs its own ref
-
-    def test_focused_retry_retains_greeting_and_wrapup_when_those_fields_satisfied(self) -> None:
-        """Even when the intro/wrap-up fields are already satisfied (excluded from the
-        retryable set), unioning bookends keeps both tasks in the focused plan."""
-        mid_field = next(f.path for t in PLAN.tasks[1:-1] for f in t.fields)
-        focus = [mid_field, *bookend_paths(PLAN, IBV.rep_call_reference_number_field)]
-        keys = {t.task_key for t in focus_call_plan(PLAN, focus).tasks}
-        assert "introduction" in keys
-        assert "wrap_up" in keys
+        """A path count alone would miss a mutation of `panels` or `prompt` — the two things
+        this function now writes — so compare the whole plan's serialized bytes, on the FUSED
+        plan (`panels`/`prompt` carry hydrated token text only after fusing)."""
+        fused = fuse_prefill(IBV, PLAN, {}, current_year=2026)
+        before = fused.model_dump_json()
+        focus_call_plan(fused, {self._all_paths(fused)[0]}, answers={})
+        assert fused.model_dump_json() == before
 
 
 SPOUSE_NAME = "sections.patient_information.spouse_partner_name"
@@ -474,7 +527,7 @@ class TestConfirmSlot:
     def test_focused_retry_still_reads_back_the_value(self) -> None:
         """focus_call_plan clears on_file_values; the value must survive inline."""
         plan = fuse_prefill(IBV, PLAN, {SPOUSE_NAME: "Jane Doe"}, current_year=2026)
-        focused = focus_call_plan(plan, [SPOUSE_NAME])
+        focused = focus_call_plan(plan, [SPOUSE_NAME], answers={SPOUSE_NAME: "Jane Doe"})
         assert focused.on_file_values is None
         assert "Jane Doe" in plan_task(focused, "insurance_basics").prompt
 
@@ -845,20 +898,17 @@ class TestRealSchemaDigest:
         assert "(still needed for: CPT 58340, CPT 82670)" in digest
 
     def test_a_focused_plan_names_only_members_it_kept_a_descriptor_for(self) -> None:
-        # focus_call_plan narrows descriptors but NOT panels (a known bug, fixed on a later
-        # branch), so a kept fan-out question can span targets the plan cannot collect. The
-        # clause must never name one of those: it is built from the OWED targets, which are the
-        # focused descriptors, so a focused retry says which code it needs instead of re-asking
-        # all eight blind.
+        # A partly-owed fan-out question survives `keep_questions` WHOLE — it is one spoken
+        # sentence over all eight codes, so `focus_call_plan` tracks every one of them as a
+        # field even though only one is `wanted`. The still_needed clause must never name a
+        # member the plan lacks a descriptor for.
         wanted = "sections.diagnostic_testing.labs_xray_ultrasound.cpt_58340.covered"
-        focused = focus_call_plan(PLAN, [wanted])
+        focused = focus_call_plan(PLAN, [wanted], answers={})
         stamped: list[str] = []
         for task in focused.tasks:
-            owed = [field.path for field in task.fields]
             collectable = {f.owner_title for f in task.fields if f.owner_title}
-            panels = focus_questions(task, owed, {}, PLAN.shared_conditions, explode=True)
-            render_digest(panels)
-            for question in iter_questions(panels):
+            render_digest(task.panels)
+            for question in iter_questions(task.panels):
                 assert set(question.still_needed) <= collectable
                 stamped.extend(question.still_needed)
         assert stamped == ["CPT 58340"]

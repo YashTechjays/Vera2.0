@@ -111,6 +111,7 @@ class PipelineSweeper:
         interval_s: float,
         stuck_grace_s: int,
         max_call_duration_s: int,
+        review_floor: int,
         form_auto_retry_enabled: bool = False,
         recording: "RecordingConfig | None" = None,
         call_plans: CallPlanService | None = None,
@@ -123,6 +124,7 @@ class PipelineSweeper:
         self._interval_s = interval_s
         self._stuck_grace_s = stuck_grace_s
         self._max_call_duration_s = max_call_duration_s
+        self._review_floor = review_floor
         self._form_auto_retry_enabled = form_auto_retry_enabled
         self._recording = recording
         self._call_plans = call_plans
@@ -241,7 +243,6 @@ class PipelineSweeper:
                             ref,
                             trigger="sweeper_reconcile",
                             actor_label="pipeline-sweeper",
-                            auto_retry_enabled=self._form_auto_retry_enabled,
                         )
                     closed += 1
                     logger.info(
@@ -267,7 +268,6 @@ class PipelineSweeper:
             self._audit,
             tenant_id,
             grace_s=self._stuck_grace_s,
-            auto_retry_enabled=self._form_auto_retry_enabled,
         )
 
         # Phase 4: time-based dispatch wake-up — freed slots and/or queued forms.
@@ -280,4 +280,5 @@ class PipelineSweeper:
                 self._audit,
                 recording=self._recording,
                 plan_service=self._call_plans,
+                retry_floor=self._review_floor,
             )

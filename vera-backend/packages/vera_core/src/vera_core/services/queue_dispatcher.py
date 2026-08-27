@@ -41,19 +41,13 @@ from vera_core.db.rls import tenant_session
 from vera_core.forms.call_plan import (
     CallPlan,
     PrefillFuser,
-    bookend_paths,
     compile_call_plan,
     focus_call_plan,
 )
 from vera_core.forms.conditions import is_v2
 from vera_core.forms.dsl import FormSchemaDoc
 from vera_core.forms.prompting import PromptDocument
-from vera_core.forms.review import (
-    REVIEW_CONFIDENCE_FLOOR,
-    expand_to_groups,
-    has_call_reference,
-    retryable_required_paths,
-)
+from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR, focus_paths
 from vera_core.integrations.credentials import get_integration_credentials
 from vera_core.models import (
     Call,
@@ -85,7 +79,7 @@ from vera_core.observability.correlation import (
 from vera_core.schemas import PersonaTweak
 from vera_core.services.call_lifecycle import apply_terminal_call_status
 from vera_core.services.field_answers import current_values_by_path
-from vera_core.services.field_status import load_field_status
+from vera_core.services.field_status import load_authoritative_call_ids, load_field_status
 from vera_core.services.form_state_machine import FormStateMachine, InvalidTransitionError
 from vera_core.services.ivr_selection import (
     add_active_playbook_metadata,
@@ -232,9 +226,12 @@ async def stage_dispatch(
         for HIPAA evidence (``QUEUE_DISPATCH`` is emitted by ``place_dials``, once
         the call is actually dialed).
     retry_floor:
-        Confidence floor for which field labels to embed in RETRY room
-        metadata. Best-effort prompt guidance only — the authoritative
-        retry-vs-review decision happened earlier in ``evaluate_call``.
+        Confidence floor for `is_call_confirmed`. Selects the FOCUSED retry ask
+        set (`focus_paths`, below) and the field labels embedded in RETRY room
+        metadata. Must be the same value the post-call eval uses
+        (`settings.post_call_review_floor`) or the two gates measure different
+        populations: a field between the two floors triggers a retry that then
+        never asks it.
     plan_service:
         Optional ``CallPlanService``. When provided and the form's pinned
         schema is DSL v2, the compiled CallPlan is staged in Redis for the
@@ -432,7 +429,10 @@ async def stage_dispatch(
             sm.transition(form, FormStatus.CALL_FAILED, tenant_max_retries=tenant.max_retries)
             continue
 
-        call_mode = CallMode.RETRY if form.retry_count > 0 else CallMode.FULL
+        # `mode` describes THIS call: "retry" means the question tree was narrowed (set below),
+        # never derived from retry_count — a manual requeue resets that budget, so it cannot
+        # tell us the call's shape. A budgeted retry that runs FRESH is honestly a full call.
+        call_mode = CallMode.FULL
         # Real-call dispatch metadata: the worker must wait for the SIP callee to
         # answer and publish envelope events for live monitoring. IVR navigation is
         # the operator's per-form queue-time choice (voice-lab-style toggle) — when
@@ -454,11 +454,14 @@ async def stage_dispatch(
         # snapshot below both need the form's current values.
         values = await current_values_by_path(session, form.id)
 
-        # Retry scope: with a call reference number captured, the retry is FOCUSED —
-        # stage a plan narrowed to the still-missing (group-expanded) fields so the
-        # agent asks ONLY those, never announcing a prior call. Without a reference
-        # number it retries FRESH (the full plan, a call from the top).
-        if call_mode == CallMode.RETRY and staged_plan is not None:
+        # Retry scope: when a CALL captured a reference number, this is a FOCUSED retry — stage a
+        # plan narrowed to what no authoritative call has confirmed, so the agent asks ONLY those
+        # and never announces a prior call. Otherwise it runs FRESH.
+        #
+        # Gated on the captured reference number, NOT on `call_mode`: the operator surface passes
+        # `manual=True`, which resets `retry_count`, so a form with 152 confirmed answers and a
+        # reference on file dispatched as FULL and re-asked everything (spec D4).
+        if staged_plan is not None:
             version = schema_versions.get(form.schema_version_id)
             if version is None:
                 version = (
@@ -467,25 +470,36 @@ async def stage_dispatch(
                     )
                 ).scalar_one()
                 schema_versions[form.schema_version_id] = version
-            doc = FormSchemaDoc.model_validate(version.schema_json)
-            status_by_path = await load_field_status(session, form.id)
-            if has_call_reference(status_by_path, doc):
+            # The authoritative-call set IS the scope gate — never the current answer at the
+            # reference path. A reviewer editing that field writes `source=human, call_id=None`,
+            # which supersedes the call's row, and gating on the current row demoted a fully
+            # confirmed form back to a FULL call. A human-typed reference carries no `call_id`,
+            # so it still cannot open the focused set on what is really a first call (spec D8).
+            # Read off the raw dict: a first call has no reference and must not pay for the
+            # document parse or the field-status join to discover that.
+            reference_field = version.schema_json.get("rep_call_reference_number_field")
+            authoritative = (
+                await load_authoritative_call_ids(session, form.id, reference_field=reference_field)
+                if reference_field
+                else frozenset()
+            )
+            if authoritative:
                 plan, plan_prompt_version_id = staged_plan
-                # Pass the form's real values so eq/in gates evaluate exactly — without
-                # them a sentinel reads every value-gate as unmatched and silently drops
-                # its still-missing dependents from the retry (issue 6).
-                retryable = retryable_required_paths(
-                    status_by_path, version.schema_json, floor=retry_floor, values=values
+                doc = FormSchemaDoc.model_validate(version.schema_json)
+                focus = focus_paths(
+                    doc,
+                    await load_field_status(session, form.id),
+                    version.schema_json,
+                    floor=retry_floor,
+                    values=values,
+                    authoritative_calls=authoritative,
                 )
-                focus = expand_to_groups(doc, retryable)
-                # Always keep the greeting + wrap-up tasks: a focused retry must still
-                # open with a greeting and capture its OWN rep name + call reference
-                # number (dropping those tasks was QA issues 3 and 4, and a retry that
-                # never logs a reference breaks the next retry's focus gate).
-                bookends = bookend_paths(plan, doc.rep_call_reference_number_field)
-                focus = [*focus, *bookends]  # focus_call_plan matches a path set — dupes are inert
                 if focus:
-                    staged_plan = (focus_call_plan(plan, focus), plan_prompt_version_id)
+                    staged_plan = (
+                        focus_call_plan(plan, focus, answers=values),
+                        plan_prompt_version_id,
+                    )
+                    call_mode = CallMode.RETRY
 
         # 4c. Create the call + room — wrap in try/except so one failure does not
         # roll back successfully-staged calls earlier in the same pass.
@@ -525,21 +539,19 @@ async def stage_dispatch(
                         after_state={},
                     )
                 )
-                # For RETRY calls: find the most-recent prior call so we can write a
-                # CallLineage row. The retry is SCOPED by the plan itself (a focused
-                # retry stages a narrowed plan via focus_call_plan above), never by a
-                # prompt overlay — the agent is never told this is a retry, so nothing
-                # leaks to the payer rep.
-                parent_call_id = None
-                if call_mode == CallMode.RETRY:
-                    parent_call_id = (
-                        await session.execute(
-                            select(Call.id)
-                            .where(Call.form_id == form.id, Call.id != call.id)
-                            .order_by(Call.created_at.desc())
-                            .limit(1)
-                        )
-                    ).scalar_one_or_none()
+                # Any prior call on this form makes this one its retry, whatever the plan's
+                # shape — the timeline's "retry of attempt N" must not depend on the label.
+                # The retry is SCOPED by the plan itself (a focused retry stages a narrowed
+                # plan via focus_call_plan above), never by a prompt overlay — the agent is
+                # never told this is a retry, so nothing leaks to the payer rep.
+                parent_call_id = (
+                    await session.execute(
+                        select(Call.id)
+                        .where(Call.form_id == form.id, Call.id != call.id)
+                        .order_by(Call.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
 
                 room_name = room_name_for_call(tenant_id, call.id)
                 span_attrs: dict[str, Any] = {

@@ -11,7 +11,7 @@ never be logged, traced, or attached to a span.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -41,6 +41,12 @@ class FieldProvenance:
     attempt: int
     mode: str
     judge: JudgeInfo | None
+    # False when the call that produced this value captured no rep call reference number:
+    # nothing ties the conversation to a payer-side record, so the answer is never treated as
+    # collected by the retry ask set (spec D8) and contributes nothing to verified_pct (Plan D).
+    # Shown so a reviewer can tell an unproven value from a confirmed one — it is NOT hidden or
+    # demoted.
+    authoritative: bool = True
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,20 @@ class CallAttempt:
     initiated_by_id: UUID | None = None
     published: bool = False
     recording_available: bool = False
+    # Same meaning as `FieldProvenance.authoritative`, at the call level.
+    authoritative: bool = True
+    # False until the post-call eval fills `after_state` (the same sentinel
+    # `snapshot_changed_paths` checks). `changed_paths == []` is ambiguous on its own —
+    # it means either "changed nothing" (finalized=True) or "outcome unknown"
+    # (finalized=False) — so callers must check this before reading an empty list as
+    # "nothing changed".
+    finalized: bool = True
+
+
+def _eval_finalized(after: Mapping[str, Any] | None) -> bool:
+    """Whether the post-call eval has filled `after_state` — `{}`/`None` means it never ran,
+    which is NOT the same as "changed nothing" (see `CallAttempt.finalized`)."""
+    return bool(after)
 
 
 def snapshot_changed_paths(
@@ -65,15 +85,29 @@ def snapshot_changed_paths(
     """Field paths whose value differs between a call's before/after snapshots.
     Paths only — values never leave. Tolerates None/partial snapshots."""
     # after_state stays {} until the post-call eval fills it — no diff until then.
-    if not after:
+    if not _eval_finalized(after):
         return []
     b = before or {}
-    return sorted(p for p in set(b) | set(after) if b.get(p, _MISSING) != after.get(p, _MISSING))
+    a = after or {}
+    return sorted(p for p in set(b) | set(a) if b.get(p, _MISSING) != a.get(p, _MISSING))
 
 
-async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallAttempt]:
+def _authoritative(call_id: UUID, authoritative_calls: Collection[UUID] | None) -> bool:
+    """`None` means "the caller never computed the set" — a legacy v1 schema, which declares no
+    reference-number field, so "authoritative" is undefined: the dataclass default (`True`)
+    stands rather than reading as "confirmed non-authoritative". A concrete set means every call
+    not in it is known, not merely unproven-by-omission, so it IS `False`."""
+    return authoritative_calls is None or call_id in authoritative_calls
+
+
+async def load_call_attempts(
+    session: AsyncSession, form_id: UUID, *, authoritative_calls: Collection[UUID] | None = None
+) -> list[CallAttempt]:
     """The form's calls as a 1-based attempt timeline, oldest first
-    (created_at, then id — UUIDv7 — as the deterministic tie-break)."""
+    (created_at, then id — UUIDv7 — as the deterministic tie-break). *authoritative_calls*
+    (from `load_authoritative_call_ids`) is the one definition of "authoritative" shared by
+    the ask set, the verified percentages, and this view. `None` (the default) leaves every
+    attempt at the dataclass's own default (`authoritative=True`) — see `_authoritative`."""
     calls = (
         await session.execute(
             select(
@@ -139,17 +173,25 @@ async def load_call_attempts(session: AsyncSession, form_id: UUID) -> list[CallA
                 initiated_by_id=c.initiated_by_id,
                 published=c.published,
                 recording_available=c.id in playable,
+                authoritative=_authoritative(c.id, authoritative_calls),
+                finalized=_eval_finalized(after),
             )
         )
     return out
 
 
 async def load_field_provenance(
-    session: AsyncSession, form_id: UUID, attempt_by_call: Mapping[UUID, tuple[int, str]]
+    session: AsyncSession,
+    form_id: UUID,
+    attempt_by_call: Mapping[UUID, tuple[int, str]],
+    *,
+    authoritative_calls: Collection[UUID] | None = None,
 ) -> dict[str, FieldProvenance]:
     """Per-path provenance for the form's current ai_call answers: which attempt
     wrote it (via *attempt_by_call*, from load_call_attempts) + the latest judge
-    verdict (latest_eval_subquery, shared with load_field_status)."""
+    verdict (latest_eval_subquery, shared with load_field_status). *authoritative_calls*
+    is the same set `load_call_attempts` takes, including the `None` default — see
+    `_authoritative` / `FieldProvenance.authoritative`."""
     latest_eval = latest_eval_subquery()
     rows = (
         await session.execute(
@@ -184,5 +226,10 @@ async def load_field_provenance(
             if supported is not None
             else None
         )
-        out[path] = FieldProvenance(attempt=am[0], mode=am[1], judge=judge)
+        out[path] = FieldProvenance(
+            attempt=am[0],
+            mode=am[1],
+            judge=judge,
+            authoritative=_authoritative(call_id, authoritative_calls),
+        )
     return out

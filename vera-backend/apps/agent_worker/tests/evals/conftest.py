@@ -355,16 +355,19 @@ async def load_published_plan(
         schema_version_id=schema_version.id,
         prompt_version_id=prompt_version_id,
     )
+    intake_values = _intake_values(doc)
     if focus_fields:
         # A rule scenario narrows to exactly the fields its rule reads, plus the closer so the
         # chain can still reach wrap-up.
         paths = [*focus_fields, *(f.path for f in plan.tasks[-1].fields)]
-        plan = focus_call_plan(plan, paths)
+        plan = focus_call_plan(plan, paths, answers=intake_values)
     elif not full_walk_enabled():
         # Narrow to the opening tasks plus the closer, so the chain still reaches wrap-up.
         keep = [*plan.tasks[:2], plan.tasks[-1]]
-        plan = focus_call_plan(plan, [f.path for task in keep for f in task.fields])
-    return fuse_prefill(doc, plan, _intake_values(doc), current_year=2026)
+        plan = focus_call_plan(
+            plan, [f.path for task in keep for f in task.fields], answers=intake_values
+        )
+    return fuse_prefill(doc, plan, intake_values, current_year=2026)
 
 
 def build_llm(model: str = VERA_MODEL) -> google.LLM:

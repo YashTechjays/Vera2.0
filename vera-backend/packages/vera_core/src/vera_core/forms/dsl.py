@@ -60,6 +60,11 @@ SectionRole = Literal["collect", "context", "ui_only"]
 LeafRole = Literal["ask", "confirm", "context", "readonly", "input"]
 LeafType = Literal["text", "enum", "date", "currency", "percent", "integer", "phone"]
 ComparisonOp = Literal["eq", "ne", "in", "not_in"]
+# Whether an answer describes the FORM (a benefit fact — collect it once) or the CALL that
+# produced it (a rep's name, a call reference number — collect it on every call). `None` on a
+# node means "inherit"; the document-level default is "form". A leaf that defaulted to "form"
+# instead of None would silently override its section's declaration.
+CollectedPer = Literal["form", "call"]
 RANGE_TYPES: frozenset[str] = frozenset({"currency", "percent", "integer"})
 COLLECTED_ROLES: frozenset[str] = frozenset({"ask", "confirm"})
 
@@ -305,6 +310,7 @@ class Leaf(_Model):
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
     description: str | None = None
+    collected_per: CollectedPer | None = None
 
     @model_validator(mode="after")
     def _coherent(self) -> Leaf:
@@ -335,6 +341,8 @@ class Leaf(_Model):
             raise ValueError("confirm_in_task only valid on role=confirm")
         if self.tags is not None and not all(KEY_RE.match(t) for t in self.tags):
             raise ValueError("tags must be snake_case strings")
+        if self.collected_per == "call" and self.role != "ask":
+            raise ValueError('collected_per="call" requires role="ask"')
         return self
 
 
@@ -347,6 +355,7 @@ class Group(_Model):
     prompt: FieldPrompt | None = None
     ui: Ui | None = None
     description: str | None = None
+    collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
     @model_validator(mode="after")
@@ -394,6 +403,9 @@ class Section(_Model):
     ask_groups: list[AskGroup] | None = None
     alternatives: list[Alternatives] | None = None
     ui: Ui | None = None
+    # Before `fields` so the compiled artifact reads with the marker beside `title`, not
+    # stranded after a 73-leaf block — declaration order is the artifact's key order.
+    collected_per: CollectedPer | None = None
     fields: dict[str, FormField]
 
 
@@ -550,6 +562,36 @@ class FormSchemaDoc(_Model):
             if leaf.role in COLLECTED_ROLES:
                 out.append(path)
         return out
+
+    def collected_per_call_paths(self) -> frozenset[str]:
+        """Root-anchored paths of every `ask`-role leaf whose effective `collected_per` is
+        "call" — asked on every call, whatever is on file.
+
+        Most specific declaration wins: the leaf, then its enclosing groups nearest-first, then
+        its section, then the document default of "form". Restricted to `ask` because a
+        `confirm` leaf is on file precisely to be read back (`gating_seed` keeps confirm
+        prefills) and every other role is never spoken, so a section marker on a mixed section
+        reaches its ask leaves and leaves the rest alone.
+        """
+
+        def walk(
+            prefix: str, fields: dict[str, FormField], inherited: CollectedPer
+        ) -> Iterator[str]:
+            for key, field in fields.items():
+                path = f"{prefix}.{key}"
+                effective = field.collected_per or inherited
+                if isinstance(field, Group):
+                    yield from walk(path, field.fields, effective)
+                elif field.role == "ask" and effective == "call":
+                    yield path
+
+        return frozenset(
+            path
+            for section_key, section in self.sections.items()
+            for path in walk(
+                f"{PATH_PREFIX}{section_key}", section.fields, section.collected_per or "form"
+            )
+        )
 
     # -- cross-document validation -------------------------------------------------
 

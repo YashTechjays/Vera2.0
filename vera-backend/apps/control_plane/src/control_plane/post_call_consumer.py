@@ -32,6 +32,7 @@ from vera_core.events import (
     PostCallJobBus,
     parse_post_call_job,
 )
+from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR
 from vera_core.integrations.llm import LLMClient, TranscriptTurn
 from vera_core.observability import TraceLinkStore, call_scoped_span, room_name_for_call
 from vera_core.services.post_call_eval import EvalDeps, evaluate_call
@@ -77,7 +78,7 @@ class PostCallConsumer:
         plan_service: Any = None,
         block_ms: int = 5_000,
         reclaim_idle_ms: int = 60_000,
-        review_floor: int = 60,
+        review_floor: int = REVIEW_CONFIDENCE_FLOOR,
         auto_retry_enabled: bool = False,
         consumer_name: str | None = None,
         trace_links: TraceLinkStore | None = None,

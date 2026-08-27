@@ -194,6 +194,11 @@ def _coverage_summary() -> Section:
                 "Disease Coverage Active",
                 "Is disease-specific coverage active on this policy?",
                 YES_NO,
+                # Per-call, like the IBV form's is_insurance_active: whether coverage is live TODAY
+                # is re-verified every call. Marked on the LEAF, not the section — coverage_summary
+                # also holds benefit_year_type, renewal_date and annual_benefit_maximum, which are
+                # form facts and must not become per-call.
+                collected_per="call",
             ),
             "benefit_year_type": enum_ask(
                 "Benefit Year Type",
@@ -342,6 +347,8 @@ def _wrap_up_sections() -> dict[str, Section]:
     return {
         "representative_details": Section(
             title="Insurance Representative",
+            # See the IBV standard's insurance_representative section.
+            collected_per="call",
             fields={
                 "rep_name": text_ask(
                     "Representative Name",

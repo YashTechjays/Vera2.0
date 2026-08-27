@@ -62,7 +62,18 @@ def build_workbook(
     prov_ws = cast(Worksheet, wb.create_sheet("Provenance"))
     _column_headings(
         prov_ws,
-        ["Field path", "Label", "Source", "Attempt", "Mode", "Judge confidence", "Supported"],
+        [
+            "Field path",
+            "Label",
+            "Source",
+            "Attempt",
+            "Mode",
+            "Judge confidence",
+            "Supported",
+            # False = the call that produced this value captured no rep reference number,
+            # so nothing ties it to a payer-side record. The value is still current.
+            "Authoritative",
+        ],
     )
     prov_ws.freeze_panes = "A2"
     for path in sorted_paths:
@@ -76,12 +87,15 @@ def build_workbook(
                 p.mode if p else None,
                 p.judge.confidence if p and p.judge else None,
                 p.judge.supported if p and p.judge else None,
+                p.authoritative if p else None,
             ]
         )
 
     attempt_by_id = {a.id: a.attempt for a in attempts}
     _bold_header(prov_ws, "Call history")
-    _column_headings(prov_ws, ["Attempt", "Mode", "Status", "Created at", "Retry of attempt"])
+    _column_headings(
+        prov_ws, ["Attempt", "Mode", "Status", "Created at", "Retry of attempt", "Authoritative"]
+    )
     for a in attempts:
         prov_ws.append(
             [
@@ -90,6 +104,7 @@ def build_workbook(
                 a.status,
                 a.created_at.isoformat(),
                 attempt_by_id.get(a.retry_of) if a.retry_of else None,
+                a.authoritative,
             ]
         )
 

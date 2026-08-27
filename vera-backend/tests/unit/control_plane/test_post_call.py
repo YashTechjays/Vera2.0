@@ -1,15 +1,11 @@
 """Post-call AI-processing resolution — the system edge out of AI_PROCESSING.
 
 After a completed call parks the form in AI_PROCESSING, `resolve_ai_processing`
-decides the diagrammed system transition: low completion + retries remaining →
-auto-requeue (IN_QUEUE); otherwise → EXCEPTION_REVIEW for human review. COMPLETED
-is never reachable from here — only a reviewer's manual approve sets it.
-
-The auto-retry edge is feature-gated behind the deployment kill-switch
-(`auto_retry_enabled`, default OFF) AND the tenant's own `auto_retry_enabled`:
-until a post-call form-filling mechanism exists, completion never improves
-between calls, so a retry would redial to no benefit — everything goes to
-EXCEPTION_REVIEW.
+always resolves it to EXCEPTION_REVIEW. It never auto-requeues (the retry decision
+lives in `post_call_eval.evaluate_call` via `retry_decision.decide_retry`) and
+never reaches COMPLETED — only a reviewer's manual approve sets that. What these
+tests pin is that the form leaves AI_PROCESSING with an honest `review_reason`,
+whatever ended the call.
 
 DB seam faked exactly like `test_worker_events.py`: `tenant_session` is
 monkeypatched to a `_FakeSession` routed by target entity.
@@ -158,9 +154,7 @@ async def test_high_completion_moves_form_to_exception_review(
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 0
     # This synchronous fallback never ran the AI eval — the reviewer must see WHY.
@@ -171,30 +165,6 @@ async def test_high_completion_moves_form_to_exception_review(
     assert record.detail["from"] == FormStatus.AI_PROCESSING.value
     assert record.detail["to"] == FormStatus.EXCEPTION_REVIEW.value
     assert record.detail["call_id"] == str(call_id)
-
-
-@pytest.mark.asyncio
-async def test_low_completion_auto_requeues_while_retries_remain(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant_id, call_id, form_id, ref = _ids()
-    form = _form_row(tenant_id, form_id, completion_pct=40.0, retry_count=0)
-    session = _FakeSession(
-        call=_call_row(tenant_id, call_id, form_id),
-        form=form,
-        tenant=_tenant(tenant_id, max_retries=3, retry_fill_threshold=0.95),
-    )
-    audit = _wire(monkeypatch, session)
-
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
-    )
-
-    assert requeued is True
-    assert form.status == FormStatus.IN_QUEUE.value
-    assert form.retry_count == 1
-    assert form.enqueued_at is not None  # DB-clock stamp set by the resolver
-    assert audit.records[0].detail["to"] == FormStatus.IN_QUEUE.value
 
 
 @pytest.mark.asyncio
@@ -213,9 +183,7 @@ async def test_low_completion_with_auto_retry_disabled_goes_to_review(
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 0
     assert audit.records[0].detail["to"] == FormStatus.EXCEPTION_REVIEW.value
@@ -236,11 +204,7 @@ async def test_low_completion_with_tenant_flag_off_goes_to_review(
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
-    )
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 0
 
@@ -258,11 +222,7 @@ async def test_low_completion_with_retries_exhausted_goes_to_review(
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
-    )
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.retry_count == 3  # budget untouched — the requeue was refused
 
@@ -280,11 +240,7 @@ async def test_rule_terminated_call_never_auto_requeues(monkeypatch: pytest.Monk
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
-    )
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value
     assert form.retry_count == 0  # budget untouched — the redial was refused
@@ -304,11 +260,7 @@ async def test_canceled_call_never_auto_requeues(monkeypatch: pytest.MonkeyPatch
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="user_end_call", auto_retry_enabled=True
-    )
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="user_end_call")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert form.review_reason == ReviewReason.USER_ENDED.value  # supervisor ended it
     assert form.retry_count == 0  # budget untouched — cancels are operator decisions
@@ -330,11 +282,7 @@ async def test_end_intent_stamp_alone_blocks_auto_requeue(
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(
-        _SM, audit, ref, trigger="call.ended", auto_retry_enabled=True
-    )
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
 
 
@@ -351,9 +299,7 @@ async def test_form_not_in_ai_processing_is_untouched(monkeypatch: pytest.Monkey
     )
     audit = _wire(monkeypatch, session)
 
-    requeued = await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
-
-    assert requeued is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert form.status == FormStatus.EXCEPTION_REVIEW.value
     assert audit.records == []
 
@@ -364,7 +310,7 @@ async def test_missing_call_or_form_is_a_noop(monkeypatch: pytest.MonkeyPatch) -
     session = _FakeSession(call=None, form=None, tenant=_tenant(tenant_id))
     audit = _wire(monkeypatch, session)
 
-    assert await resolve_ai_processing(_SM, audit, ref, trigger="call.ended") is False
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
     assert audit.records == []
 
 
@@ -397,3 +343,54 @@ async def test_sweep_with_no_stuck_forms_resolves_nothing(
 
     assert await sweep_stuck_ai_processing(_SM, audit, uuid4(), grace_s=300) == 0
     assert audit.records == []
+
+
+@pytest.mark.asyncio
+async def test_this_resolver_never_requeues_however_low_the_fill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The invariant that replaced the fallback's retry gate, and the reason it was removed.
+
+    `is_call_confirmed` requires a judge verdict (`ai_supported`), and this resolver runs
+    precisely when no judge ran. So the verified fraction it used to gate on was structurally
+    0.0 here for EVERY call however good — and 0.0 is below every threshold, so with
+    auto-retry on it redialled every form until max_retries, against real payers. Retrying
+    needs evidence about fill; this path has none.
+
+    Everything below is set up to redial under the old rule — 0% fill, retries remaining,
+    tenant auto-retry ON, threshold at its most aggressive. It must still park."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=0.0, retry_count=0)
+    session = _FakeSession(
+        call=_call_row(tenant_id, call_id, form_id),
+        form=form,
+        tenant=_tenant(
+            tenant_id, retry_fill_threshold=0.99, auto_retry_enabled=True, max_retries=5
+        ),
+    )
+    audit = _wire(monkeypatch, session)
+
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
+
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.retry_count == 0, "the retry budget must be untouched"
+    assert form.review_reason == ReviewReason.NOT_EVALUATED.value
+
+
+@pytest.mark.asyncio
+async def test_the_never_redial_reason_still_wins_over_not_evaluated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor-ended or rule-terminated call carries its own reason, and the reviewer
+    needs THAT, not the generic "nothing evaluated this"."""
+    tenant_id, call_id, form_id, ref = _ids()
+    form = _form_row(tenant_id, form_id, completion_pct=0.0, retry_count=0)
+    call = _call_row(tenant_id, call_id, form_id)
+    call.terminated_by_flow_rule = True
+    session = _FakeSession(call=call, form=form, tenant=_tenant(tenant_id))
+    audit = _wire(monkeypatch, session)
+
+    await resolve_ai_processing(_SM, audit, ref, trigger="call.ended")
+
+    assert form.status == FormStatus.EXCEPTION_REVIEW.value
+    assert form.review_reason == ReviewReason.TERMINATED_BY_RULE.value

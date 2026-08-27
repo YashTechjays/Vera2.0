@@ -1658,18 +1658,23 @@ async def test_a_representative_who_answers_nothing_still_hears_every_question(
 
 
 def test_a_focused_retry_narrowing_never_raises_or_names_a_ghost(schema: Schema) -> None:
-    """`focus_call_plan` narrows descriptors but not panels (a known, deferred seam), so the
-    only promises here are that nothing explodes and `still_needed` never names a member the
-    narrowed plan has no descriptor for."""
+    """`focus_call_plan` narrows panels and descriptors TOGETHER (the fix for the seam this
+    test used to document as deferred), so `still_needed` must never name a member the focused
+    plan lacks a descriptor for — checked directly against its own output, under every
+    guard-state answer set, since `_exploded`'s open-path logic reads `answers`."""
     s = schema
+    checked = 0
     for keep_every in (2, 3):
-        focused = focus_call_plan(s.plan, sorted(s.descriptors)[::keep_every])
-        for task in focused.tasks:
-            titles = {f.owner_title for f in task.fields if f.owner_title is not None}
-            for case in _guard_states(s):
-                owed = _pure_owed(s, task, case.answers)
-                for question in iter_questions(
-                    focus_questions(task, owed, case.answers, s.shared, explode=True)
-                ):
+        wanted = sorted(s.descriptors)[::keep_every]
+        for case in _guard_states(s):
+            focused = focus_call_plan(s.plan, wanted, answers=case.answers)
+            for task in focused.tasks:
+                titles = {f.owner_title for f in task.fields if f.owner_title is not None}
+                for question in iter_questions(task.panels):
+                    checked += len(question.still_needed)
                     ghosts = [name for name in question.still_needed if name not in titles]
                     assert not ghosts, f"{s}: {case.label}: still_needed names {ghosts}"
+    # disease_only has no partly-owed fan-out with an owner_title, so it legitimately stamps
+    # nothing; every other schema must exercise a real still_needed name or this check is vacuous.
+    if s.insurance_type != "disease_only":
+        assert checked, f"{s}: no still_needed name was ever checked"

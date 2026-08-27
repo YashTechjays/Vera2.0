@@ -737,6 +737,7 @@ async def end_call(
     call_stream: Annotated[CallStreamService, Depends(get_call_stream_service)],
     kms: Annotated[KeyManagementService, Depends(get_kms)],
     call_plans: CallPlans,
+    settings: AppSettings,
     caller: VerifiedIdentity = require("calls:read"),
 ) -> ResponseModel[None]:
     """End a call from Live Monitoring.
@@ -847,10 +848,20 @@ async def end_call(
             # the normal post-call pipeline); resolve it to EXCEPTION_REVIEW
             # now — the resolver's canceled gate never auto-requeues.
             await resolve_ai_processing(
-                sessionmaker, audit, ref, trigger="user_end_call", actor_label=actor_label
+                sessionmaker,
+                audit,
+                ref,
+                trigger="user_end_call",
+                actor_label=actor_label,
             )
             await run_dispatch_pass(
-                sessionmaker, tenant_id, livekit, kms, audit, plan_service=call_plans
+                sessionmaker,
+                tenant_id,
+                livekit,
+                kms,
+                audit,
+                plan_service=call_plans,
+                retry_floor=settings.post_call_review_floor,
             )
         return ok(None, message="Call canceled.")
     async with tenant_session(sessionmaker, tenant_id) as stamp_session:

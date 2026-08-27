@@ -2,6 +2,9 @@ import { useEffect, useState } from "react"
 
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api/client"
+import { isTerminalCallStatus } from "@/lib/api/callEvents"
+import { titleOf } from "@/lib/ibv/schema"
+import type { FormSchema } from "@/lib/ibv/types"
 import { getPatientFormCalls } from "@/lib/patient-forms/api"
 import type { CallAttempt } from "@/lib/patient-forms/types"
 import {
@@ -9,10 +12,19 @@ import {
   formatDate,
   modeBadgeClass,
   statusLabel,
+  warningPillClass,
 } from "@/lib/patient-forms/display"
 import { usePermission } from "@/lib/auth/permissions"
 import { useIbv } from "./IbvProvider"
 import { RecordingPlayer } from "./RecordingPlayer"
+
+/** The leaf's schema-authored title for `path`, falling back to a humanized path
+ *  segment (never a raw dotted path) when the schema hasn't loaded or lacks the leaf. */
+function fieldTitle(schema: FormSchema | null, path: string): string {
+  if (!schema) return fieldLabel(path)
+  const title = titleOf(schema, path)
+  return title === path ? fieldLabel(path) : title
+}
 
 /** One attempt row. Props-driven (no hooks) so the play-control gating is unit-
  *  testable: the control renders only when the DTO advertises a playable
@@ -25,6 +37,7 @@ export function AttemptCard({
   canPlay,
   playerOpen,
   onTogglePlayer,
+  schema,
 }: {
   attempt: CallAttempt
   retriedAttempt: number | undefined
@@ -33,7 +46,13 @@ export function AttemptCard({
   canPlay: boolean
   playerOpen: boolean
   onTogglePlayer: () => void
+  schema: FormSchema | null
 }) {
+  // finalized=false also covers a call still in flight (or one that simply failed to
+  // connect) — after_state is {} for its whole life, not just once it's over. Only a
+  // TERMINAL call with finalized=false is a genuine "no outcome recorded"; a live call
+  // already says so via its status badge, so the marker is gated on both.
+  const notFinalized = a.finalized === false && isTerminalCallStatus(a.status)
   return (
     <div className="rounded-md border border-border bg-white p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -52,21 +71,45 @@ export function AttemptCard({
         {retriedAttempt !== undefined && (
           <span className="text-xs text-muted-foreground">retry of attempt {retriedAttempt}</span>
         )}
+        {a.authoritative === false && (
+          <span
+            className={warningPillClass}
+            title="Nothing ties this call to a payer-side record — the answers are unverified, but a reviewer may still accept them."
+          >
+            No call reference — unverified
+          </span>
+        )}
+        {notFinalized && (
+          <span
+            className={warningPillClass}
+            title="This call ended without a post-call review recording an outcome — that is not the same as it having collected nothing."
+          >
+            Not finalized
+          </span>
+        )}
       </div>
-      <button
-        type="button"
-        className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
-        disabled={a.changed_paths.length === 0}
-        onClick={onToggleFields}
-      >
-        {a.changed_paths.length} field{a.changed_paths.length === 1 ? "" : "s"} updated
-      </button>
-      {expanded && (
-        <ul className="mt-1 list-inside list-disc text-xs text-muted-foreground">
-          {a.changed_paths.map((p) => (
-            <li key={p}>{fieldLabel(p)}</li>
-          ))}
-        </ul>
+      {notFinalized ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          No outcome recorded for this attempt
+        </p>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="mt-1 text-xs text-muted-foreground underline-offset-2 hover:underline disabled:no-underline"
+            disabled={a.changed_paths.length === 0}
+            onClick={onToggleFields}
+          >
+            {a.changed_paths.length} field{a.changed_paths.length === 1 ? "" : "s"} updated
+          </button>
+          {expanded && (
+            <ul className="mt-1 list-inside list-disc text-xs text-muted-foreground">
+              {a.changed_paths.map((p) => (
+                <li key={p}>{fieldTitle(schema, p)}</li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
       {canPlay && a.recording_available && (
         <button
@@ -84,7 +127,7 @@ export function AttemptCard({
 
 /** The form's call-attempt timeline — fetched once per modal open. */
 export function CallHistoryTab() {
-  const { formId } = useIbv()
+  const { formId, schema } = useIbv()
   const canPlayRecordings = usePermission("recordings:read")
   const [attempts, setAttempts] = useState<CallAttempt[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -135,6 +178,7 @@ export function CallHistoryTab() {
           canPlay={canPlayRecordings}
           playerOpen={openPlayerId === a.id}
           onTogglePlayer={() => setOpenPlayerId((id) => (id === a.id ? null : a.id))}
+          schema={schema}
         />
       ))}
     </div>

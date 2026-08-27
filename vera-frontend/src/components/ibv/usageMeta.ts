@@ -31,6 +31,19 @@ export const USAGE_META: Record<
     labelCellClass: "",
     swatchClass: "border-ibv-input-border bg-ibv-input-bg",
   },
+  // Pink is the only hue in this form that no SEVERITY claims, which is the point: every warm
+  // tone here already encodes confidence — yellow #FEFCE8 medium, amber #FFFBEB low, red
+  // #FEF2F2 very-low (`confidenceHighlightClass`) — and amber again on the Unverified pill.
+  // A per-call field is a CATEGORY, not a severity, so it must not borrow a severity's colour.
+  // Green (context + high confidence), violet (system), teal (#d0e0e3 value cells), blue
+  // (default highlight) and gray (UI-only) are likewise spoken for.
+  perCall: {
+    label: "Per-call field",
+    description:
+      "Asked on every call. Its value describes THAT call — the representative's name, the call reference number — so it has no form-level baseline to diverge from and never raises a dispute.",
+    labelCellClass: "bg-pink-100",
+    swatchClass: "border-pink-300 bg-pink-100",
+  },
   // Diagonal gray hatching ("not in use"), not another hue — flat gray was
   // indistinguishable from the default label cells.
   noop: {
@@ -45,4 +58,4 @@ export const USAGE_META: Record<
 }
 
 /** Legend display order. */
-export const USAGE_ORDER: FieldUsage[] = ["system", "context", "asked", "noop"]
+export const USAGE_ORDER: FieldUsage[] = ["system", "context", "asked", "perCall", "noop"]

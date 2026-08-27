@@ -11,6 +11,7 @@ import { VALUE_CAP_CLASS } from "@/lib/ibv/layout"
 import { applicabilityReason, fieldUsageOf, isApplicable } from "@/lib/ibv/schema"
 import { invalidSeverity } from "@/lib/ibv/validation"
 import { phonePaths } from "@/lib/ibv/phone"
+import { warningPillClass } from "@/lib/patient-forms/display"
 import { USAGE_META } from "./usageMeta"
 import type { Condition, LeafField } from "@/lib/ibv/types"
 
@@ -44,6 +45,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
     swapDispute,
     confidenceFor,
     provenanceFor,
+    callScopedPaths,
     isPathRequired,
   } = useIbv()
 
@@ -61,7 +63,7 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
   // the red ring + hover tooltip alone read as a generic error.
   const inlineError = mode === "create" ? invalidReason : undefined
   // Voice-call participation tint on the label cell (see UsageLegend).
-  const usage = schema ? fieldUsageOf(schema, path, field) : "asked"
+  const usage = schema ? fieldUsageOf(schema, path, field, callScopedPaths) : "asked"
 
   const openDispute = unresolvedDispute(dispute, flags)
   const highlightClass = openDispute
@@ -78,12 +80,23 @@ export function FieldRow({ field, path, depth, gates, capValue }: Props) {
         )}
         style={depth > 0 ? { paddingLeft: 6 + depth * 10 } : undefined}
       >
-        <span className="min-w-0 flex-1 leading-tight break-words">
+        <span
+          className="min-w-0 flex-1 leading-tight break-words"
+          title={usage === "perCall" ? USAGE_META.perCall.description : undefined}
+        >
           {field.title}
         </span>
         {required && (
           <span className="flex shrink-0 items-center gap-1">
             <span className="text-[#b91c1c]">*</span>
+          </span>
+        )}
+        {provenance?.authoritative === false && (
+          <span
+            className={cn(warningPillClass, "shrink-0 px-1.5 py-0.5 text-[9px]")}
+            title="No call reference — nothing ties this answer to a payer-side record. A reviewer may still accept it."
+          >
+            Unverified
           </span>
         )}
       </div>

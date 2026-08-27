@@ -1,5 +1,7 @@
 """Form-schema DSL: compiler freshness, round-trip, and document validation."""
 
+import json
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -8,10 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from vera_core.forms.catalog import SCHEMAS
-from vera_core.forms.catalog.disease_only import build_disease_only
-from vera_core.forms.catalog.ibv_standard import build_ibv_standard
 from vera_core.forms.conditions import leaf_gates
 from vera_core.forms.dsl import (
+    COLLECTED_ROLES,
     FieldPrompt,
     FormSchemaDoc,
     Leaf,
@@ -39,6 +40,13 @@ PROMOTED_COLUMNS: tuple[str, ...] = (
     "insurance_provider",
     "insurance_provider_phone_number",
 )
+
+
+def _catalog_builders() -> list[Callable[[], FormSchemaDoc]]:
+    """Every REGISTERED catalog builder, never a hardcoded pair. `SCHEMAS` is the registry a
+    new insurance type is added to, so driving the whole-catalog invariants off it is what
+    makes a new type inherit them instead of silently escaping every one."""
+    return [build for _filename, build in SCHEMAS.values()]
 
 
 def minimal_doc(**overrides: Any) -> dict[str, Any]:
@@ -748,7 +756,7 @@ class TestNumericConsistencyValidation:
 def test_every_collectable_path_is_reachable_from_exactly_one_question() -> None:
     """The completion guard walks questions; a path no question targets can never be
     asked for, and a path two questions target would be double-counted (spec §8)."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         doc = build()
         assert validate_question_coverage(doc) == []
 
@@ -792,7 +800,7 @@ def test_a_routing_questions_target_does_not_count_as_coverage(
 def test_no_catalog_uses_an_end_of_task_confirm() -> None:
     """`validate_question_coverage` exempts them (spoken by the end_confirms block, not the
     tree), so an authored one would be invisible to any tree-walking owed set — see Task 3."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         assert [
             path
             for path, leaf, _ in leaf_gates(build())
@@ -804,7 +812,7 @@ def test_no_catalog_gates_on_a_defaulted_confirm_leaf() -> None:
     """`gating_seed` keeps confirm-role prefills authoritative (the member-ID read-back), so a
     `default` on one would still settle its gate and delete the questions behind it — the
     exact failure removed for ask-role leaves."""
-    for build in (build_ibv_standard, build_disease_only):
+    for build in _catalog_builders():
         assert validate_confirm_defaults(build()) == []
 
 
@@ -845,3 +853,186 @@ def test_a_defaulted_confirm_leaf_that_gates_nothing_is_fine() -> None:
         },
     }
     assert validate_confirm_defaults(FormSchemaDoc.model_validate(doc)) == []
+
+
+def _sections(
+    *,
+    section_mark: str | None = None,
+    group_mark: str | None = None,
+    leaf_mark: str | None = None,
+    grouped: bool = False,
+    with_confirm: bool = False,
+) -> dict[str, Any]:
+    """`minimal_doc`'s `basics` section, reshaped for marker resolution.
+
+    `plan_type` always sits directly under the section (so it reads the SECTION marker);
+    `rep_name` moves under a group when `grouped`, so the group marker has something to govern.
+    """
+    rep_name: dict[str, Any] = {
+        "type": "text",
+        "title": "Representative Name",
+        "role": "ask",
+        "required": True,
+        "prompt": {"ask": "May I have your name?"},
+    }
+    if leaf_mark is not None:
+        rep_name["collected_per"] = leaf_mark
+    inner: dict[str, Any] = {"rep_name": rep_name}
+    if with_confirm:
+        inner["policy_number"] = {
+            "type": "text",
+            "title": "Policy Number",
+            "role": "confirm",
+            "prompt": {"ask": "What is the policy number?", "confirm": "I have {{value}}."},
+        }
+    plan_type: dict[str, Any] = {
+        "type": "text",
+        "title": "Plan Type",
+        "role": "ask",
+        "required": True,
+        "prompt": {"ask": "What type of plan is this?"},
+    }
+    if grouped:
+        group: dict[str, Any] = {"type": "group", "title": "Rep Block", "fields": inner}
+        if group_mark is not None:
+            group["collected_per"] = group_mark
+        fields: dict[str, Any] = {"plan_type": plan_type, "block": group}
+    else:
+        fields = {"plan_type": plan_type, **inner}
+    section: dict[str, Any] = {"title": "Basics", "fields": fields}
+    if section_mark is not None:
+        section["collected_per"] = section_mark
+    return {"basics": section}
+
+
+def _doc(**kwargs: Any) -> FormSchemaDoc:
+    return FormSchemaDoc.model_validate(minimal_doc(sections=_sections(**kwargs)))
+
+
+class TestCollectedPer:
+    """`collected_per` resolution: most specific wins, ask-role only."""
+
+    def test_defaults_to_form_so_nothing_is_call_scoped(self) -> None:
+        assert _doc().collected_per_call_paths() == frozenset()
+
+    def test_section_marker_reaches_its_ask_leaves(self) -> None:
+        assert _doc(section_mark="call").collected_per_call_paths() == frozenset(
+            {"sections.basics.plan_type", "sections.basics.rep_name"}
+        )
+
+    def test_the_shipped_ibv_schema_relies_on_section_inheritance(self) -> None:
+        """The reason the API sends `call_scoped_paths` RESOLVED instead of letting the client
+        derive it. `is_insurance_active` is call-scoped only through its section — its own leaf
+        declares no `collected_per` — so a consumer reading the leaf marker alone would mark the
+        rep name and the reference number and silently miss it. If this ever stops being true,
+        the client-side shortcut becomes safe and this test should say so."""
+        doc = FormSchemaDoc.model_validate(
+            json.loads((FORM_SCHEMA_DIR / "ibv_form_standard_v2.json").read_text(encoding="utf-8"))
+        )
+        active = "sections.patient_verification.is_insurance_active"
+        assert active in doc.collected_per_call_paths()
+        leaf = dict(doc.leaf_items())[active]
+        assert leaf.collected_per is None, "leaf now declares it — the inheritance case is gone"
+
+    def test_section_marker_skips_a_confirm_leaf(self) -> None:
+        """A confirm leaf is on file precisely to be read back — `gating_seed` keeps confirm
+        prefills, so marking one call-scoped would recite last call's value, not collect one."""
+        paths = _doc(section_mark="call", with_confirm=True).collected_per_call_paths()
+        assert "sections.basics.policy_number" not in paths
+
+    def test_leaf_declaration_overrides_its_section(self) -> None:
+        assert _doc(section_mark="call", leaf_mark="form").collected_per_call_paths() == frozenset(
+            {"sections.basics.plan_type"}
+        )
+
+    def test_nearest_group_wins_over_the_section(self) -> None:
+        doc = _doc(section_mark="call", group_mark="form", grouped=True)
+        assert doc.collected_per_call_paths() == frozenset({"sections.basics.plan_type"})
+
+    def test_leaf_wins_over_its_group(self) -> None:
+        doc = _doc(group_mark="form", leaf_mark="call", grouped=True)
+        assert doc.collected_per_call_paths() == frozenset({"sections.basics.block.rep_name"})
+
+    def test_call_on_a_confirm_leaf_is_rejected(self) -> None:
+        sections = _sections(with_confirm=True)
+        sections["basics"]["fields"]["policy_number"]["collected_per"] = "call"
+        with pytest.raises(ValidationError, match='requires role="ask"'):
+            FormSchemaDoc.model_validate(minimal_doc(sections=sections))
+
+
+def test_every_catalog_marks_its_reference_number_leaf() -> None:
+    """A retry that never logs its OWN reference number breaks the next retry's focus gate
+    (`load_authoritative_call_ids`), and the wrap-up task survives a focused retry only
+    because it holds a call-scoped leaf. Nothing else in the system can infer that from the
+    document.
+
+    Enforced here rather than in a `FormSchemaDoc` validator: that runs on every dispatch
+    against the PINNED schema version, and rows published before this marker existed have no
+    declaration to find.
+    """
+    for build in _catalog_builders():
+        doc = build()
+        assert doc.rep_call_reference_number_field in doc.collected_per_call_paths(), (
+            f"{doc.insurance_type}: rep_call_reference_number_field is not collected_per=call"
+        )
+
+
+def test_every_catalog_marks_the_rep_name_beside_it() -> None:
+    """The rep's name is as per-call as the reference number: a retry that keeps the prior rep's
+    name attributes this call's answers to someone who was never on it."""
+    for build in _catalog_builders():
+        doc = build()
+        section = doc.rep_call_reference_number_field.rsplit(".", 1)[0]
+        call_scoped = doc.collected_per_call_paths()
+        rep_names = [
+            path
+            for path, _leaf in doc.leaf_items()
+            if path.startswith(f"{section}.") and path.endswith(".rep_name")
+        ]
+        assert rep_names, f"{doc.insurance_type}: no rep_name leaf beside the reference number"
+        for path in rep_names:
+            assert path in call_scoped, f"{path} is not collected_per=call"
+
+
+def _always_run_task_keys(doc: FormSchemaDoc) -> list[str]:
+    """Tasks a focused retry must keep, derived per spec D2: it has a `collected_per="call"`
+    descendant, or it collects nothing at all."""
+    call_scoped = doc.collected_per_call_paths()
+    keys: list[str] = []
+    for task in doc.tasks:
+        collects = [
+            path
+            for path, leaf in doc.leaf_items()
+            if path.split(".")[1] in task.sections and leaf.role in COLLECTED_ROLES
+        ]
+        if not collects or call_scoped.intersection(collects):
+            keys.append(task.task_key)
+    return keys
+
+
+def test_a_task_carrying_the_calls_opening_is_always_retained() -> None:
+    """`opening_line` speaks the FIRST-ENTERED task's `intro`, so a schema that puts its greeting
+    and recording/identity disclosure there loses both entirely if a focused retry drops that task.
+    The task survives only because it happens to hold a call-scoped leaf — nothing in the code
+    connects those two facts, so pin it here.
+
+    Vacuous for a schema whose opening task has no `intro` (`disease_only` starts straight into
+    questions): nothing rides on it, and dropping it when it owes nothing is correct.
+    """
+    for build in _catalog_builders():
+        doc = build()
+        if doc.tasks[0].intro is None:
+            continue
+        assert doc.tasks[0].task_key in _always_run_task_keys(doc), (
+            f"{doc.insurance_type}: the opening task carries an intro but is not retained by a "
+            "focused retry — its greeting and recording disclosure would be dropped"
+        )
+
+
+def test_the_closing_task_is_always_retained() -> None:
+    """`_closing_task_index` is `len(plan.tasks) - 1` and the gap pass stops before it, so the
+    closer is where the reference number and the goodbye happen. Dropping it would break the NEXT
+    retry's focus gate as well as this call's sign-off."""
+    for build in _catalog_builders():
+        doc = build()
+        assert doc.tasks[-1].task_key in _always_run_task_keys(doc), doc.insurance_type

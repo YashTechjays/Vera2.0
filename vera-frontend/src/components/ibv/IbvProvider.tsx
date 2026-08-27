@@ -133,6 +133,8 @@ type IbvContextValue = {
   formId: string | null
   /** Returns the provenance record for a field path, or null if absent. */
   provenanceFor: (path: string) => FieldProvenance | null
+  /** Paths with `collected_per="call"` — asked every call, so never disputed. Server-resolved. */
+  callScopedPaths: ReadonlySet<string>
   /** The one confidence a field displays — judge verdict when it has run, else the
    *  capture score. See `resolveConfidence`. */
   confidenceFor: (path: string) => FieldConfidence
@@ -283,6 +285,8 @@ export function IbvProvider({
   const [disputes, setDisputes] = useState<DisputeMap>({})
   const [flags, setFlagsState] = useState<DisputeFlagMap>({})
   const [provenance, setProvenance] = useState<Record<string, FieldProvenance>>({})
+  // Server-resolved; empty for a v1 schema, which simply means nothing is exempt.
+  const [callScoped, setCallScoped] = useState<ReadonlySet<string>>(() => new Set())
 
   // Field paths the supervisor edited this session — live AI answers skip these so
   // a push never clobbers a manual correction. A ref (not state): reading it must
@@ -404,6 +408,7 @@ export function IbvProvider({
       setStatusError(null)
       setInsuranceType(null)
       setProvenance({})
+      setCallScoped(new Set())
       setIvrNavigation(false)
       setProviders([])
       setProviderId("")
@@ -430,6 +435,7 @@ export function IbvProvider({
           setStatus(detail.status)
           setInsuranceType(detail.insurance_type)
           setProvenance(prov)
+          setCallScoped(new Set(detail.call_scoped_paths))
           setIvrNavigation(detail.ivr_navigation_enabled)
           setProviders(providerList)
           setProviderId(matchProvider(providerList, detail.insurance_provider))
@@ -457,7 +463,14 @@ export function IbvProvider({
 
   const closeForm = useCallback(() => {
     setModalOpen(false)
-    setProvenance({})
+    // Nothing derived from the loaded form is cleared here — not `callScoped`, not
+    // `provenance`. This keeps `formId`, `schema` and `values` loaded so `openLoadedForm` can
+    // reopen without a refetch, and Live Monitoring always takes that branch for a call still
+    // in progress (`LiveMonitoring.tsx:470`), so anything dropped here is gone for the rest of
+    // the session. Clearing `callScoped` made the per-call tint and its legend row vanish on
+    // the first reopen; clearing `provenance` did the same to the Unverified pill and to
+    // `confidenceFor`'s judge verdict, which silently fell back to the capture score. Both are
+    // reset where a DIFFERENT form is loaded instead: `loadFormById` and `openCreate`.
   }, [])
 
   // Create path: step 1 (picker) has no schema; beginCreate loads the published
@@ -473,6 +486,7 @@ export function IbvProvider({
     // Provenance is keyed by schema-relative path, so a previously-open form's map
     // would otherwise paint its badges onto the empty create form.
     setProvenance({})
+    setCallScoped(new Set())
     setIvrNavigation(false)
     setProviders([])
     setProviderId("")
@@ -763,6 +777,7 @@ export function IbvProvider({
         setStatus(refreshed.status)
         setStatusError(null) // resolving disputes clears any "resolve first" warning
         setProvenance(prov)
+        setCallScoped(new Set(refreshed.call_scoped_paths))
         setSaveState("saved")
         setSavedTick((t) => t + 1)
       } catch (err) {
@@ -834,6 +849,7 @@ export function IbvProvider({
     modalOpen,
     formId,
     provenanceFor,
+    callScopedPaths: callScoped,
     confidenceFor,
     openFormById,
     openLoadedForm,

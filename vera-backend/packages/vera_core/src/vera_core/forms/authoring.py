@@ -16,6 +16,7 @@ from vera_core.forms.dsl import (
     AnyCondition,
     AskGroup,
     Codes,
+    CollectedPer,
     Comparison,
     Condition,
     FieldPrompt,
@@ -374,6 +375,7 @@ def enum_ask(
     default: str | None = None,
     applicable_when: Condition | None = None,
     hints: list[str] | None = None,
+    collected_per: CollectedPer | None = None,
 ) -> Leaf:
     return Leaf(
         type="enum",
@@ -384,6 +386,7 @@ def enum_ask(
         default=default,
         applicable_when=applicable_when,
         prompt=ask(ask_text, hints),
+        collected_per=collected_per,
     )
 
 

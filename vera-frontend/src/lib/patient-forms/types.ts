@@ -27,7 +27,15 @@ export type FieldSource = "intake" | "ai_call" | "human"
 export type FieldJudge = { confidence: number | null; supported: boolean }
 
 /** Which call attempt produced a field's current value and the judge verdict. */
-export type FieldProvenance = { attempt: number; mode: "full" | "retry"; judge: FieldJudge | null }
+export type FieldProvenance = {
+  attempt: number
+  mode: "full" | "retry"
+  judge: FieldJudge | null
+  /** False when the call that produced this value captured no rep call reference
+   *  number — nothing ties it to a payer-side record. The value is kept and stays
+   *  current; a reviewer may still accept it by hand. Shown, never hidden. */
+  authoritative: boolean
+}
 
 /** One entry in the call-attempt timeline (GET /patient-forms/{id}/calls). */
 export type CallAttempt = {
@@ -42,6 +50,13 @@ export type CallAttempt = {
    *  the call is owner-or-published visible, and the caller holds
    *  recordings:read) — false means render no play control. */
   recording_available: boolean
+  /** Same meaning as `FieldProvenance.authoritative`, at the call level: false when
+   *  this call captured no rep call reference number. */
+  authoritative: boolean
+  /** False when the post-call eval never ran: `changed_paths` is then unknown, not
+   *  empty — never read an empty list as "this call collected nothing" when this is
+   *  false. Absent reads as finalized (older backend contract), same as `authoritative`. */
+  finalized: boolean
 }
 
 /** JSONB field value — the backend stores/returns `Any`. */
@@ -108,6 +123,12 @@ export type PatientFormDetail = {
   fields: PatientFormField[]
   /** Stored queue-time choice: run the IVR navigator on this form's calls. */
   ivr_navigation_enabled: boolean
+  /** Schema paths with `collected_per="call"` — asked on every call, so their value
+   *  describes ONE call and is never compared against a form baseline. This is the same
+   *  set the server uses to suppress their disputes, sent resolved rather than re-derived:
+   *  `collected_per` inherits leaf → groups → section → document default, and a client
+   *  reading only the leaf marker misses `is_insurance_active`, which declares none. */
+  call_scoped_paths: string[]
 }
 
 /** Active insurance-provider option for the send-to-queue picker

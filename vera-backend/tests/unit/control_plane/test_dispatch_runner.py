@@ -56,6 +56,40 @@ async def test_forwards_plan_service_to_the_pass(monkeypatch: Any) -> None:
     assert seen["plan_service"] is plans
 
 
+def _capture_pass_kwargs(monkeypatch: Any) -> dict[str, object]:
+    """Stub `stage_and_dial`, returning the dict of keyword arguments the pass actually
+    passed. `**kwargs` (not named parameters with defaults) is what makes an omitted
+    kwarg distinguishable from one explicitly passed as its default."""
+    seen: dict[str, object] = {}
+
+    async def fake_pass(
+        sessionmaker: Any, tenant_id: Any, livekit: Any, kms: Any, **kwargs: object
+    ) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(dispatch_mod, "stage_and_dial", fake_pass)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_forwards_retry_floor_to_the_pass(monkeypatch: Any) -> None:
+    """The kwarg-plumbing half only. That the ask set actually changes with the floor is
+    the paired test in test_queue_dispatcher.py::TestCallPlanStaging."""
+    seen = _capture_pass_kwargs(monkeypatch)
+    await run_dispatch_pass(object(), uuid4(), object(), object(), None, retry_floor=85)  # type: ignore
+    assert seen["retry_floor"] == 85
+
+
+@pytest.mark.asyncio
+async def test_omitted_retry_floor_does_not_reach_the_pass(monkeypatch: Any) -> None:
+    """`None` means "use `stage_and_dial`'s own default", so it must not be forwarded at
+    all — that is what keeps every caller predating this parameter behaving as before."""
+    seen = _capture_pass_kwargs(monkeypatch)
+    await run_dispatch_pass(object(), uuid4(), object(), object(), None)  # type: ignore
+    assert "retry_floor" not in seen
+
+
 @pytest.mark.asyncio
 async def test_swallows_and_logs_dispatch_errors(monkeypatch: Any, caplog: Any) -> None:
     async def boom(*args: Any, **kwargs: Any) -> None:

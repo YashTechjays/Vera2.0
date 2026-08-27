@@ -6,9 +6,11 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import control_plane.api.v1.calls as calls_mod
 from control_plane.api.v1.calls import (
     _INTERVENE_CONNECT_GRACE,
     _LIVE_TAIL_FIRST_ENTRY_DEADLINE_S,
@@ -1167,6 +1169,45 @@ async def test_end_call_pre_answer_cancels_synchronously(
     # stream, so a tailing supervisor learns it. Asserted via the delete-surviving log.
     room = room_name_for_call(rbac_world.tenant_id, call_id)
     assert (room, "canceled") in call_stream_store.status_log
+
+
+@pytest.mark.asyncio
+async def test_end_call_pre_answer_refill_forwards_the_review_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    seeded_form_id: UUID,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    authz_app: FastAPI,
+) -> None:
+    """This endpoint's own `run_dispatch_pass` call site (the pre-answer cancel path's
+    refill) must forward `settings.post_call_review_floor` as `retry_floor` — the call-site
+    half `test_dispatch_runner.py` cannot see."""
+    # Same setup as test_end_call_pre_answer_cancels_synchronously; only the dispatch pass
+    # is faked, so the real closeout still runs against Postgres.
+    call_id = await seed_call(
+        admin_sessionmaker,
+        rbac_world.tenant_id,
+        seeded_form_id,
+        initiated_by_id=rbac_world.admin_id,
+    )
+    async with tenant_session(admin_sessionmaker, rbac_world.tenant_id) as s:
+        form_row = (
+            await s.execute(select(PatientForm).where(PatientForm.id == seeded_form_id))
+        ).scalar_one()
+        form_row.status = "in_call"
+
+    seen: dict[str, object] = {}
+
+    async def _fake_run_dispatch_pass(*_args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(calls_mod, "run_dispatch_pass", _fake_run_dispatch_pass)
+
+    resp = await client.post(f"/api/v1/calls/{call_id}/end", headers=_auth(rbac_world.admin_token))
+    assert resp.status_code == 200, resp.text
+
+    assert seen["retry_floor"] == authz_app.state.settings.post_call_review_floor
 
 
 @pytest.mark.asyncio

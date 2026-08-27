@@ -29,6 +29,9 @@ from vera_core.models.enums import AnswerSource, FormStatus, InsuranceType, Vers
 from vera_core.services.queue_dispatcher import _resolve_provider
 
 HEALTH_PLAN = "insurance_information.health_plan"
+# A real `collected_per: "call"` leaf on the seeded IBV schema (schema_version_id below) —
+# see FormSchemaDoc.collected_per_call_paths() and data/form_schemas/ibv_form_standard_v2.json.
+CALL_SCOPED_REP_NAME = "sections.insurance_representative.rep_name"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -453,6 +456,35 @@ async def test_detail_returns_fields_and_dispute(
     assert "Blue Cross" not in rows[0][1]  # never the value
 
 
+async def test_detail_sends_the_resolved_call_scoped_paths(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    dispute_form: UUID,
+) -> None:
+    """The UI marks these fields to explain why they never dispute, and it must not re-derive
+    the set: `collected_per` inherits leaf -> groups -> section, so a client reading the leaf
+    marker alone misses `is_insurance_active`. Sending the SAME set that drives the exemption in
+    `build_field_views` is what keeps the marking and the behaviour from drifting apart."""
+    resp = await client.get(
+        f"/api/v1/patient-forms/{dispute_form}", headers=_auth(rbac_world.admin_token)
+    )
+    assert resp.status_code == 200, resp.text
+    paths = resp.json()["data"]["call_scoped_paths"]
+    assert paths == sorted(paths), "sorted for a stable body"
+    # The two leaves that declare `collected_per` themselves...
+    assert "sections.insurance_representative.rep_name" in paths
+    assert "sections.insurance_representative.call_reference_number" in paths
+    # ...and the one that only inherits it. This is the assertion that fails if the endpoint
+    # ever starts sending raw leaf markers instead of the resolved set.
+    assert "sections.patient_verification.is_insurance_active" in paths
+    # Every marked path must be exempt from disputes — the property the marking claims.
+    fields = {f["field_path"]: f for f in resp.json()["data"]["fields"]}
+    for p in paths:
+        present = fields.get(p) or fields.get(p.removeprefix("sections."))
+        if present is not None:
+            assert present["dispute"] is None, f"{p} is marked call-scoped but shows a dispute"
+
+
 async def test_detail_cross_tenant_is_404(
     client: httpx.AsyncClient,
     rbac_world: RBACWorld,
@@ -596,6 +628,62 @@ async def test_resolve_persists_recomputed_completion(
             ).scalar_one()
         )
     assert stored == returned  # persisted, not just echoed from the in-memory object
+
+
+async def _make_form_with_stale_verified_pct(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    schema_version_id: UUID,
+) -> UUID:
+    """A bare form (no field answers, no calls) whose stored `verified_pct` is a
+    deliberately implausible value — nothing about this form could recompute to it,
+    so a resolve that leaves it in place is easy to catch."""
+    async with sm() as s, s.begin():
+        form = PatientForm(
+            tenant_id=tenant_id,
+            schema_version_id=schema_version_id,
+            status=FormStatus.EXCEPTION_REVIEW.value,
+            intake_payload={"patient_information": {"patient_name": "Jane Doe"}},
+            patient_name="jane doe",
+            completion_pct=0,
+            retry_count=0,
+            verified_pct=42.0,
+        )
+        s.add(form)
+        await s.flush()
+        return form.id
+
+
+async def test_resolve_refreshes_stale_verified_pct(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """`verified_pct` must be recomputed on every resolve, not left as whatever the last
+    post-call eval wrote: a resolve demotes the current answer and inserts a human one, so
+    a previously-confirmed leaf can stop being confirmed while a stale number stays displayed
+    as current. The seeded 42.0 cannot be the real answer for a form with no calls at all, so
+    the assertion cannot pass by coincidence."""
+    form_id = await _make_form_with_stale_verified_pct(
+        admin_sessionmaker, tenant_id=rbac_world.tenant_id, schema_version_id=schema_version_id
+    )
+    resp = await client.post(
+        f"/api/v1/patient-forms/{form_id}/disputes:resolve",
+        headers=_auth(rbac_world.admin_token),
+        json={"form_data": {}, "dispute_fields": [], "reasked_fields": []},
+    )
+    assert resp.status_code == 200, resp.text
+    returned = resp.json()["data"]["verified_pct"]
+    assert returned != 42.0
+    async with admin_sessionmaker() as s:
+        stored = (
+            await s.execute(select(PatientForm.verified_pct).where(PatientForm.id == form_id))
+        ).scalar_one()
+    assert stored is not None
+    assert float(stored) == returned  # persisted, not just echoed from the in-memory object
 
 
 async def test_resolve_reask_does_not_change_status(
@@ -945,6 +1033,47 @@ async def test_no_baseline_ai_value_is_disputed(
         json={"status": "completed"},
     )
     assert block.status_code == 409, block.text
+
+
+async def test_call_scoped_path_never_disputed_at_the_detail_endpoint(
+    client: httpx.AsyncClient,
+    rbac_world: RBACWorld,
+    admin_sessionmaker: async_sessionmaker[AsyncSession],
+    schema_version_id: UUID,
+    cleanup_forms: None,
+) -> None:
+    """End-to-end proof that call-scoped suppression is actually wired through
+    `_build_detail` -> `_call_scoped_paths` -> `_field_views`, not just exercised by the
+    pure `build_field_views` unit tests. A neutered `_call_scoped_paths` (e.g. hardcoded to
+    `frozenset()`) would make CALL_SCOPED_REP_NAME disputed here — this is that regression's
+    only production-level tripwire. One test carries both halves deliberately: the
+    call-scoped path with no baseline shows no dispute, while a form-scoped `ai_call`
+    answer with no baseline IN THE SAME RESPONSE still does — proving the exemption is
+    selective, not a global "AI answers are never disputed" bug.
+    """
+    form_id = await _make_plain_form(
+        admin_sessionmaker,
+        tenant_id=rbac_world.tenant_id,
+        schema_version_id=schema_version_id,
+        status=FormStatus.EXCEPTION_REVIEW,
+    )
+    for path, value in ((CALL_SCOPED_REP_NAME, "Priya Raman"), (HEALTH_PLAN, "Blue Cross")):
+        await _add_answer(
+            admin_sessionmaker,
+            tenant_id=rbac_world.tenant_id,
+            form_id=form_id,
+            field_path=path,
+            value=value,
+            source=AnswerSource.AI_CALL.value,
+            confidence=90,
+        )
+    detail = await client.get(
+        f"/api/v1/patient-forms/{form_id}", headers=_auth(rbac_world.admin_token)
+    )
+    assert detail.status_code == 200, detail.text
+    fields = {f["field_path"]: f for f in detail.json()["data"]["fields"]}
+    assert fields[CALL_SCOPED_REP_NAME]["dispute"] is None
+    assert fields[HEALTH_PLAN]["dispute"] is not None
 
 
 async def test_resolve_baseline_edit_writes_no_dispute_action(

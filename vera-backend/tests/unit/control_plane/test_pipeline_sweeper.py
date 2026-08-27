@@ -7,9 +7,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import control_plane.pipeline_sweeper as sweeper_mod
+from control_plane import post_call as post_call_mod
 from control_plane.pipeline_sweeper import PipelineSweeper, rooms_to_close
 from vera_core.audit import AuditSink
 from vera_core.call_stream import CallStreamService
+from vera_core.models import PatientForm
 from vera_core.models.enums import CallStatus
 from vera_core.observability.correlation import room_name_for_call
 
@@ -143,6 +145,7 @@ async def test_sweep_once_continues_past_a_failing_tenant(
         interval_s=60,
         stuck_grace_s=300,
         max_call_duration_s=10_800,
+        review_floor=70,
     )
 
     async def fake_sweep_tenant(tenant_id: UUID) -> None:
@@ -153,3 +156,71 @@ async def test_sweep_once_continues_past_a_failing_tenant(
     monkeypatch.setattr(sweeper, "_sweep_tenant", fake_sweep_tenant)
     await sweeper.sweep_once()  # must not raise
     assert swept == tenants
+
+
+class _FakeSweepResult:
+    """Stand-in for a SQLAlchemy `Result`: no rows, plus one optional scalar."""
+
+    def __init__(self, scalar: Any = None) -> None:
+        self._scalar = scalar
+
+    def all(self) -> list[Any]:
+        return []
+
+    def scalars(self) -> "_FakeSweepResult":
+        return self
+
+    def scalar_one_or_none(self) -> Any:
+        return self._scalar
+
+
+class _FakeSweepSession:
+    """Both the `tenant_session` context manager and the session it yields, routing by
+    entity: the `PatientForm` probe answers truthy (Phase 1's `has_queued`) and every
+    `Call` query — the stuck-call scan, `sweep_stuck_ai_processing`'s join — answers
+    empty, so Phase 4 is reached through `has_queued` alone."""
+
+    async def execute(self, stmt: Any) -> _FakeSweepResult:
+        if stmt.column_descriptions[0].get("entity") is PatientForm:
+            return _FakeSweepResult(scalar=uuid4())
+        return _FakeSweepResult()
+
+    async def __aenter__(self) -> "_FakeSweepSession":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_sweep_tenant_forwards_the_injected_review_floor_to_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweeper's own Phase 4 dispatch wake-up must forward its injected `review_floor`
+    as `retry_floor` — 85, not the module default 70, so a passing assertion can only mean
+    this sweeper's own value travelled."""
+    monkeypatch.setattr(sweeper_mod, "tenant_session", lambda sm, tid: _FakeSweepSession())
+    monkeypatch.setattr(post_call_mod, "tenant_session", lambda sm, tid: _FakeSweepSession())
+
+    seen: dict[str, object] = {}
+
+    async def _fake_run_dispatch_pass(*_args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(sweeper_mod, "run_dispatch_pass", _fake_run_dispatch_pass)
+
+    sweeper = PipelineSweeper(
+        cast("async_sessionmaker[AsyncSession]", object()),
+        object(),
+        object(),
+        cast(AuditSink, object()),
+        cast(CallStreamService, object()),
+        interval_s=60,
+        stuck_grace_s=300,
+        max_call_duration_s=10_800,
+        review_floor=85,
+    )
+
+    await sweeper._sweep_tenant(uuid4())
+
+    assert seen["retry_floor"] == 85

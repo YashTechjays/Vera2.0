@@ -225,7 +225,8 @@
           ],
           "prompt": {
             "ask": "Is disease-specific coverage active on this policy?"
-          }
+          },
+          "collected_per": "call"
         },
         "benefit_year_type": {
           "type": "enum",
@@ -1017,6 +1018,7 @@
     },
     "representative_details": {
       "title": "Insurance Representative",
+      "collected_per": "call",
       "fields": {
         "rep_name": {
           "type": "text",

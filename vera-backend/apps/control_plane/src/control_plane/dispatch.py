@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 
 from vera_core.db.rls import tenant_session
-from vera_core.forms.review import REVIEW_CONFIDENCE_FLOOR
 from vera_core.models import PatientForm
 from vera_core.services.queue_dispatcher import stage_and_dial
 
@@ -44,7 +43,7 @@ def schedule_dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
-    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
+    retry_floor: int | None = None,
 ) -> None:
     """Fire-and-forget a dispatch pass on the running loop. See run_dispatch_pass
     for why this is a detached task and not fastapi.BackgroundTasks: background
@@ -95,7 +94,7 @@ async def run_dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
-    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
+    retry_floor: int | None = None,
 ) -> None:
     """Await one dispatch pass, shielded from the caller's cancellation.
 
@@ -132,7 +131,7 @@ async def _dispatch_pass(
     wait_for_form_id: "UUID | None" = None,
     recording: "RecordingConfig | None" = None,
     plan_service: "CallPlanService | None" = None,
-    retry_floor: int = REVIEW_CONFIDENCE_FLOOR,
+    retry_floor: int | None = None,
 ) -> None:
     """One dispatch pass (stage + commit, then dial) in fresh tenant-scoped sessions.
     Exception-safe: a failed pass logs and returns — queued forms are retried on
@@ -158,7 +157,7 @@ async def _dispatch_pass(
             audit=audit,
             recording=recording,
             plan_service=plan_service,
-            retry_floor=retry_floor,
+            **({} if retry_floor is None else {"retry_floor": retry_floor}),
         )
     except Exception as exc:
         # Type name only — SQLAlchemy statement errors embed the bound

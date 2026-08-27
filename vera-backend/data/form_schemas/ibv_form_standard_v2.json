@@ -487,6 +487,7 @@
     "patient_verification": {
       "title": "Patient Verification",
       "description": "Outcome of the call-opening membership check. Recorded during the introduction task; a denial terminates the call via the insurance_not_active flow rule.",
+      "collected_per": "call",
       "fields": {
         "is_insurance_active": {
           "type": "enum",
@@ -5071,6 +5072,7 @@
     },
     "insurance_representative": {
       "title": "Insurance Representative",
+      "collected_per": "call",
       "fields": {
         "rep_name": {
           "type": "text",

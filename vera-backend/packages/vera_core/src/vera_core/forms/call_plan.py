@@ -60,7 +60,11 @@ from vera_core.forms.dsl import (
     Validation,
     condition_field_paths,
 )
-from vera_core.forms.prompting import PromptDocument, render_task_prompts
+from vera_core.forms.prompting import (
+    PromptDocument,
+    assemble_task_prompt,
+    render_task_prompts,
+)
 from vera_core.forms.question_plan import (
     PromptPanel,
     PromptQuestion,
@@ -434,40 +438,48 @@ def compile_call_plan(
     )
 
 
-def focus_call_plan(plan: CallPlan, paths: Collection[str]) -> CallPlan:
-    """Narrow a fused plan to a FOCUSED retry: keep only fields whose path is in
-    *paths*, dropping any task left with no fields. The agent then asks ONLY the
-    still-missing data points — with no announcement that this is a retry (the
-    payer rep must never be told a prior call happened).
-
-    Persona/goal/base_instructions and the ``known_information`` background block
-    are preserved (context the agent needs), but ``on_file_values`` is cleared —
-    that block drives read-back confirmations of already-known values, exactly the
-    "re-verify everything" behavior a focused retry must avoid. A confirm-role
-    field kept in *paths* degrades to a plain ask, which is the intended re-collect.
+def focus_call_plan(
+    plan: CallPlan,
+    paths: Collection[str],
+    *,
+    answers: Mapping[str, Any],
+) -> CallPlan:
+    """Narrow a fused plan to a FOCUSED retry, in both the tracked fields and the spoken
+    question tree, with no announcement that this is a retry (the payer rep must never be told
+    a prior call happened).
     """
     keep = set(paths)
-    tasks = [
-        task.model_copy(update={"fields": kept})
-        for task in plan.tasks
-        if (kept := [f for f in task.fields if f.path in keep])
-    ]
+    shared = plan.shared_conditions
+    tasks: list[PlanTask] = []
+    for task in plan.tasks:
+        if not task.panels:
+            # Speech-only task (its collectables are end-of-task confirms, which live in
+            # `trailing`): nothing to narrow, and the general path below would drop it.
+            tasks.append(task)
+            continue
+        # `explode` pulls in a question whose gate reads a path being asked, carrying its own
+        # "Ask only if …" prose — an agent holding an answer with no sanctioned next question
+        # invents one.
+        panels = focus_questions(task, keep, answers, shared, explode=True)
+        spoken = {path for question in iter_questions(panels) for path in question.target_paths}
+        # From the KEPT QUESTIONS, not from `paths`: `explode` grows the set, and `owed_now`
+        # joins questions against `task.fields`, so a rendered question with no matching field
+        # is invisible to the `task_complete` refusal and the gap pass.
+        fields = [field for field in task.fields if field.path in spoken]
+        if not fields:
+            continue
+        tasks.append(
+            task.model_copy(
+                update={
+                    "panels": panels,
+                    "fields": fields,
+                    "prompt": assemble_task_prompt(task.lead_in, panels, task.trailing),
+                }
+            )
+        )
+    # `on_file_values` drives read-back confirmations of known values — exactly the
+    # "re-verify everything" a focused retry must avoid.
     return plan.model_copy(update={"tasks": tasks, "on_file_values": None})
-
-
-def bookend_paths(plan: CallPlan, reference_field: str) -> list[str]:
-    """Field paths a FOCUSED retry must always keep: the opening task's fields (so the
-    call still greets and gives the recording/identity disclosure) and the wrap-up
-    task's fields (rep name + call reference number). Every call must greet and log its
-    OWN reference — the schema's "always run last" contract, and the next retry's focus
-    gate reads that reference. The wrap-up task is the one holding *reference_field*."""
-    if not plan.tasks:
-        return []
-    keep = list(plan.tasks[0].fields)
-    wrapup = next((t for t in plan.tasks if any(f.path == reference_field for f in t.fields)), None)
-    if wrapup is not None:
-        keep.extend(wrapup.fields)
-    return [f.path for f in keep]
 
 
 # Two slot forms share one pattern: `{{confirm:<path>}}` keeps the confirm/ask verb label,

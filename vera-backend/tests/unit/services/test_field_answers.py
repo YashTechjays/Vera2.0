@@ -50,11 +50,12 @@ def _current(
     *,
     source: str = AnswerSource.AI_CALL.value,
     evidence_seq: int | None = None,
+    call_id: Any = CALL,
 ) -> FieldAnswer:
     return FieldAnswer(
         tenant_id=TENANT,
         form_id=FORM,
-        call_id=CALL,
+        call_id=call_id,
         field_path="sections.a.x",
         value={"value": value},
         source=source,
@@ -164,3 +165,33 @@ async def test_blank_ai_value_never_supersedes(blank: Any) -> None:  # VR2-93
     assert await _record(session, blank) is False
     assert session.events == []
     assert current.is_current is True
+
+
+@pytest.mark.asyncio
+async def test_same_value_from_a_different_call_supersedes() -> None:
+    """The Observer now records a value the rep repeats from a prior call. The replay guard
+    must NOT swallow it: it requires source AND call_id to match, and a new call's id differs,
+    so the row is rewritten under the call that actually heard it. Without this the Observer
+    fix would be invisible at the DB — the whole point is moving row ownership."""
+    other_call = uuid4()
+    current = _current("Individual", call_id=other_call)
+    session = _FakeSession(current=current)
+    assert await _record(session, "Individual") is True
+    assert session.events == ["flush", "add"]  # demoted, flushed, then inserted
+    assert current.is_current is False
+    assert session.added[0].call_id == CALL
+    assert session.added[0].source == AnswerSource.AI_CALL.value
+
+
+@pytest.mark.asyncio
+async def test_same_value_over_an_intake_row_supersedes() -> None:
+    """The first-call case: intake typed the value, the rep confirmed it unchanged. The guard
+    requires a matching source, and intake != ai_call, so the confirmation is written and the
+    intake row is demoted. `baseline_value` filters on source and NOT on is_current, so the
+    dispute baseline still resolves the demoted row (see test_review.py)."""
+    current = _current("Alpha", source=AnswerSource.INTAKE.value)
+    session = _FakeSession(current=current)
+    assert await _record(session, "Alpha") is True
+    assert session.events == ["flush", "add"]
+    assert current.is_current is False
+    assert session.added[0].source == AnswerSource.AI_CALL.value
