@@ -2,6 +2,10 @@
 
 **Date:** 2026-08-26 · **Branch head at writing:** `05087823` · 76 commits ahead of `origin/dev`
 
+**Review round:** 2026-08-27 · head `9da02279` · 87 commits ahead. Nine commits from a PR
+review, one of which replaced the retry SCOPE GATE — so §2's gate is no longer the shipping
+one. §8 carries that round's own live call, mutation evidence and gates.
+
 Why this file exists: the SDD ledger that carried the live-call evidence, the mutation proofs
 and the decisions taken during this branch lives under `.superpowers/`, which is **git-ignored**.
 None of it would survive the merge, and a PR reviewer would have no way to see that the live
@@ -23,6 +27,13 @@ Three pieces of work, in dependency order:
 ---
 
 ## 2. LIVE GATE — taken 2026-08-26, PASSED
+
+> The FOCUSED-vs-FRESH gate exercised here (`has_call_reference`) was deleted in the review
+> round; see §8. Nothing below is retracted — these four calls remain the evidence for the
+> unchanged-skip fix, and their outcomes hold under the new gate: the reference leaf on this
+> form carries three rows, all `source=ai_call` (calls 2, 3 and 4) and none hand-edited, so the
+> authoritative set is non-empty at every dispatch and calls 3 and 4 still run FOCUSED. But the
+> gate they ran through is not the one that ships.
 
 Form `01a03d0e-cd72-7032-8537-fafd95765110`, four real calls over browser-callee transport.
 
@@ -159,6 +170,8 @@ Two `just check` observations worth knowing: a run mid-session showed **654 skip
 integration run showed 4 failures, both of which vanished on re-run — the shared-dev-DB contention
 signature. Re-run before debugging that pattern.
 
+These are the numbers for head `05087823`. The review round's gates are in §8.
+
 ---
 
 ## 6. Decisions taken during the work
@@ -214,3 +227,173 @@ Highest value first:
 One observation for a reviewer's eye, not a defect: after call 4 the form reads
 `verified_pct 100.00, ready_for_review` with `is_insurance_active = 'No'`. Honest by the
 definition — everything asked *was* confirmed by an authoritative call — but it reads oddly.
+
+---
+
+## 8. Review round — 2026-08-27, head `9da02279`
+
+Nine code commits (`b2f52a1b`..`9da02279`) answering a PR review, plus this record.
+
+All six confirmed findings fixed — one of them (§8.5) answered differently from how it was
+asked, with the reasoning recorded. One reported finding rejected as already-decided (§8.5).
+Two further defects fixed that were not on the list: the `provenance` clear on modal close
+(`cb811266`, its own test and own commit) and the retry seeder the gate change broke (§8.6).
+
+### 8.1 The finding that mattered — the scope gate read the wrong row set
+
+`has_call_reference` read `load_field_status`, which filters `is_current`.
+`load_authoritative_call_ids` deliberately does not. `resolve_disputes`' human-write loop is
+`for path, new_value in body.form_data.items()` with no exclusion for call-scoped paths, so a
+reviewer editing **Call Reference Number** writes `source=human, call_id=None` and supersedes
+the call's row. The two gates then disagreed exactly there: the next dispatch skipped the focus
+block entirely and dialled a FULL call, re-asking ~150 fields that were all still
+call-confirmed, with `verified_pct` high throughout.
+
+Fixed by reading the gate off the same row set `focus_paths` already uses. `has_call_reference`
+is **deleted**, not repointed: its whole contract was "the CURRENT answer at the reference
+path", which is the defect, and once it reads the authoritative set it is `bool(set)`. The D8
+intent survives — a human-typed reference has no `call_id`, so a form that was never dialled
+still runs FRESH.
+
+The narrower of two directions. The other — excluding `collected_per="call"` paths from the
+human-write loop — may be independently correct, but it changes what a reviewer is allowed to
+edit and this bug does not require it. Left open.
+
+### 8.2 LIVE GATE — taken 2026-08-27, PASSED
+
+Form `01a040e4-1823-74f3-9a8a-73108dcbc458`, two real calls, with a hand edit between them.
+
+| | when | call | mode | outcome |
+| --- | --- | --- | --- | --- |
+| 1 | 01:44:45 | `01a040e4-1827-7932-9984-22b8f14dc168` | full | 152 answers over 16 sections, reference captured |
+| — | 01:46:55 | — | — | **reference number edited by hand** → `source=human, call_id=None, is_current` |
+| 2 | 01:47:06 | `01a040e6-40ab-7242-8608-46da64db0506` | **retry** | 44 answers over 6 sections |
+| — | 01:51:57 | — | — | call 2 captured its OWN reference (`ai_call`, `call_id=…e6`) |
+
+Every row at the reference-number leaf, which is the whole proof:
+
+```
+01:44:45  source=ai_call  call_id=01a040e4  is_current=False
+01:46:55  source=human    call_id=None      is_current=False   <- current at dispatch
+01:51:57  source=ai_call  call_id=01a040e6  is_current=True
+```
+
+**The counterfactual is exact.** At 01:47:06 the current row was the human edit.
+`has_call_reference` requires `source == ai_call` on that row, so pre-fix it returned False,
+the focus block was skipped and the call dispatched FULL. It came out `retry`.
+
+**The narrowing was real, not just a label** — 44 answers over 6 sections against 152 over 16:
+
+| section | call 1 (full) | call 2 (retry) |
+| --- | --- | --- |
+| infertility_treatment | 73 | 0 |
+| diagnostic_testing | 33 | 24 |
+| general_coverage | 12 | 0 |
+| benefit_coverage | 8 | 0 |
+| insurance_information | 8 | 0 |
+| enrollment | 4 | 0 |
+| pharmacy_benefit_manager / infertility_specialty_pharmacy | 3 / 3 | 0 / 0 |
+| authorization_department / third_party_administrator | 2 / 2 | 0 / 0 |
+| insurance_representative | 2 | **4** |
+| embryo_cryo_storage | 1 | 0 |
+| patient_verification | 1 | **1** |
+| deductibles / out_of_pocket / lifetime_maximum | 0 / 0 / 0 | **5 / 4 / 6** |
+
+~108 confirmed answers were not re-asked. The six sections it covered are exactly the six
+`just seed-retry-form` reports for an equivalently-gapped form on this schema (predicted 45
+leaves; 44 answers landed here). That was a separately seeded form, so the matching SECTION SET
+is the meaningful agreement — not the leaf count.
+
+**The bookends held.** `insurance_representative` (4) and `patient_verification` (1) are the
+`collected_per="call"` leaves, and call 2 captured its own reference at 01:51:57 — so the NEXT
+retry's gate is intact. That was the thing most at risk when `bookend_paths` was deleted in
+favour of the per-call marker.
+
+**A second behaviour, for free.** `retry_count` is 0 — this was a manual requeue, which resets
+the budget. Under the pre-branch rule that alone would have labelled the call `full`. Getting
+`retry` also exercises spec D4 (mode follows what was staged, never `retry_count`).
+
+Form landed `completion_pct 100.00 / verified_pct 100.00 / review_reason ready_for_review`.
+
+**What this call does NOT show:** anything about what the agent *said*. The database records
+what was collected, not whether the opening announced a prior call. One call, one schema.
+
+### 8.3 Mutation evidence
+
+| mutation | result |
+| --- | --- |
+| gate additionally requires the CURRENT row to be `ai_call` (the old bug) | the new dispatcher test fails `full != retry`, and is the only failure in the file |
+| `_reference_field_for` returns `None` | `test_an_attempt_with_no_reference_number_is_flagged_unauthoritative` fails — which also proves the new `->>` returns the path unquoted against the real DB |
+| register one catalog whose reference section drops the marker | 3 whole-catalog invariants fail; **before** the registry change, none did |
+| `load_verified_fraction` ignores the caller's `values` | the new value-gated contract test fails `1.0 != 0.5` |
+| `review.py` ai_call branch → `ai_supported is not False` | the new no-judge consequence test fails, alongside the existing predicate test |
+| `setProvenance({})` reinstated in `closeForm` | the new reopen test reports `absent` instead of `false` |
+
+### 8.4 Gates — head `9da02279`
+
+| gate | result |
+| --- | --- |
+| `just check` | **2726 passed**, 3 skipped, 21 deselected, 1 xfailed — **0 failed, 0 errors** |
+| `mypy --strict` | clean, 399 source files |
+| `ruff check` + `ruff format --check` | clean |
+| frontend `tsc -b` / `eslint .` / `npm test` / `npm run build` | clean / clean / **671 passed** (91 files) / clean |
+| live gate | **PASSED** — §8.2 |
+
+Test-count deltas, all accounted for: backend −3 (`TestHasCallReference`, whose three intents
+were already covered on `load_authoritative_call_ids`, including the superseded-reference case)
++3 new; frontend +1 (reopen) −5 (`completionPercent`).
+
+### 8.5 Rejected, and why
+
+The review reported that the Observer dedup change makes an intake-satisfied field unsatisfied
+when no judge runs. The mechanism is real but it is neither new nor unpinned — it is the
+accepted trade-off in spec §3.5 and is pinned at `test_retryable_fields.py`. Not relitigated.
+What *was* added is the weaker version: the existing test pins `is_field_satisfied` in
+isolation and never reached the consequence, that the field lands back in
+`unsatisfied_required_paths`, which is the auto-complete gate.
+
+The review also asked for a `FormSchemaDoc` validator requiring the reference-number leaf to be
+`role="ask"` under an effective `collected_per="call"`. **Not added, deliberately.**
+`model_validate` runs on every dispatch against the PINNED schema version, and every version
+published before this branch added the marker has no declaration to find — a hard validator
+there fails dispatch for existing forms, which is exactly why
+`test_every_catalog_marks_its_reference_number_leaf` documents itself as a catalog test. Its
+single assertion already covers both halves the validator was meant to check, since
+`collected_per_call_paths()` yields only `role="ask"` leaves with effective `collected_per`
+`"call"`. The real hole was next door and is fixed: seven whole-catalog invariants iterated a
+hardcoded builder pair while `SCHEMAS` is the registry a new insurance type is added to. If a
+parse-time check is still wanted, publish-time validation is the safe home.
+
+### 8.6 Two gate holes this round exposed
+
+- **`scripts/` is outside every gate.** Deleting `has_call_reference` broke
+  `scripts/seed_retry_form.py` — the one command needed to set up §8.2's live gate — and
+  nothing caught it: `scripts/` is not in `[tool.mypy] files`, and ruff cannot see an import of
+  a name that does not exist. Adding `scripts` to mypy costs **4 pre-existing errors in 3
+  files** (a missing `types-qrcode` stub and a `totp.now()` attribute in `mfa_qr.py`, a
+  `no-any-return` in `intake_scenarios.py`) and would have caught this. Not done — it changes
+  the gate config and touches unrelated scripts. Verified instead by executing all 12 modules
+  under `scripts/`.
+- **`ruff check` passing says nothing about `ruff format --check`.** The first `just check` of
+  this round failed on formatting alone, on a file that had passed `ruff check` — it came back
+  from a mutation backup taken before its format pass. Caught only because the gate was run
+  verbatim, exactly as this repo's `CLAUDE.md` warns.
+
+### 8.7 Still outstanding after this round
+
+- `sweep_stuck_ai_processing` still carries `auto_retry_enabled` and `review_floor`; neither is
+  passed by any caller and neither is read. `review_floor` was added by this branch and
+  orphaned by `05087823`, and the `REVIEW_CONFIDENCE_FLOOR` import at `post_call.py:39` exists
+  only to feed its default. `PipelineSweeper._form_auto_retry_enabled` and
+  `WorkerEventConsumer._form_auto_retry_enabled` are likewise assigned and never read, while
+  `main.py` still threads the setting into both constructors. §4's claim is accurate as far as
+  it goes — those parameters WERE removed from `resolve_ai_processing` — but it does not extend
+  to its sibling in the same module. Not on the confirmed fix list, so left alone.
+- `verified_pct` semantics changed earlier in this branch with no backfill. Rows written before
+  it carry the old definition and are now surfaced on `PatientFormDetail`; they self-heal on
+  the next eval or dispute-resolve.
+- A payer that never issues a call reference number reads 0% verified however complete, so with
+  auto-retry ON it would redial to `max_retries` and each retry would run FRESH. Latent while
+  the deployment switch is off; worth confirming the payer set before flipping it.
+- `load_authoritative_call_ids` applies no judge, confidence or format check to the reference
+  answer — any `ai_call` row at that path makes the call authoritative.
