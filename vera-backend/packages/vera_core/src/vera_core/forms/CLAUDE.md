@@ -2,9 +2,18 @@
 
 Inherits the repo root `vera-backend/CLAUDE.md`. This package owns the form-schema
 DSL: the single source of truth that drives UI rendering, voice-agent prompt
-generation, and transcript extraction. Full grammar + consumer contracts:
+generation, and transcript extraction. The grammar as originally designed:
 `docs/superpowers/specs/2026-07-02-form-schema-dsl-v2-design.md` (§4 grammar,
-§4.10 validation rules, §5 consumer contracts).
+§4.10 validation rules, §5 consumer contracts) — a dated design doc, never amended
+in place.
+
+**THIS file is the living record of the DSL's vocabulary.** Per the repo-root
+`CLAUDE.md` rule "a new vocabulary word goes in the scoped `CLAUDE.md`, same
+commit": any key, inheritance rule, defaulting rule or validator rule you add,
+rename, re-scope or retire is recorded here in the same commit as the code — and
+you re-read the sections you did not edit, because a new key usually falsifies a
+neighbouring claim. `collected_per` is the worked example of what happens
+otherwise.
 
 ## Layout
 
