@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.unit.services.stmt_fakes import bound_value as _bound_value
 from vera_core.forms.conditions import is_v2
-from vera_core.forms.dsl import FormSchemaDoc
+from vera_core.forms.dsl import FormSchemaDoc, PromotedFields
 from vera_core.forms.intake import required_intake_fields
 from vera_core.forms.review import retryable_required_paths
 from vera_core.models import SchemaVersion
@@ -115,12 +115,18 @@ def _session(schema_json: dict[str, Any], *, answers: Sequence[_Answer] = ()) ->
 
 
 async def _fraction(
-    schema_json: dict[str, Any], *, answers: Sequence[_Answer] = (), floor: int = FLOOR
+    schema_json: dict[str, Any],
+    *,
+    answers: Sequence[_Answer] = (),
+    floor: int = FLOOR,
+    values: dict[str, Any] | None = None,
 ) -> float | None:
     """Call the loader the way `resolve_disputes` does: the parsed doc (None for a legacy v1
-    schema), its raw json, and the post-write values it already holds."""
+    schema), its raw json, and the post-write values it already holds. *values* defaults to the
+    answers' own values; pass it to model a caller handing over the wrong map."""
     doc = FormSchemaDoc.model_validate(schema_json) if is_v2(schema_json) else None
-    values = {a.field_path: a.value for a in answers if a.is_current}
+    if values is None:
+        values = {a.field_path: a.value for a in answers if a.is_current}
     return await load_verified_fraction(
         _session(schema_json, answers=answers),
         uuid4(),
@@ -192,3 +198,74 @@ async def test_a_call_with_a_reference_number_verifies_everything() -> None:
     pass unless this exact assertion runs it."""
     fraction = await _fraction(IBV_STANDARD_V2, answers=_all_askable_answered(authoritative=True))
     assert fraction == 1.0
+
+
+# A required askable leaf gated on ANOTHER field's VALUE — the one shape that makes the
+# caller-supplied `values` map change the answer. Neither shipped catalog has one today
+# (both read the same population against `{}` and against seeded intake), which is why this
+# contract needs a schema of its own rather than a catalog.
+_GATED = "sections.cov.secondary_payer_name"
+_GATE = "sections.cov.cob_status"
+VALUE_GATED_V2: dict[str, Any] = {
+    "dsl_version": "2.1",
+    "name": "Value gated",
+    "insurance_type": "infertility_treatment",
+    "system_fields": {"network_status": _GATE},
+    "rep_call_reference_number_field": _GATE,
+    "promoted_fields": dict.fromkeys(PromotedFields.model_fields, _GATE),
+    "sections": {
+        "cov": {
+            "title": "Coverage",
+            "role": "collect",
+            "fields": {
+                "cob_status": {
+                    "type": "text",
+                    "title": "COB status",
+                    "role": "ask",
+                    "required": True,
+                    "prompt": {"ask": "Is there coordination of benefits?"},
+                },
+                "secondary_payer_name": {
+                    "type": "text",
+                    "title": "Secondary payer name",
+                    "role": "ask",
+                    "required": True,
+                    "applicable_when": {"field": _GATE, "op": "eq", "value": "Yes"},
+                    "prompt": {"ask": "Who is the secondary payer?"},
+                },
+            },
+        }
+    },
+    "tasks": [{"task_key": "t1", "title": "Task 1", "sections": ["cov"]}],
+}
+
+
+@pytest.mark.asyncio
+async def test_the_values_the_caller_passes_decide_which_leaves_count() -> None:
+    """The loader no longer reads values itself — it trusts the caller — so the map it is
+    handed has to be shown to change the answer, or a call site passing a stale or empty one
+    would be a silently wrong number rather than a failing test.
+
+    `values` IS the gate-evaluation map (`review._gate_values`): with the real answers the
+    gated leaf is applicable and unconfirmed, so the form is half verified; with an empty map
+    the gate reads as unmatched, the leaf leaves the denominator, and the same form reads
+    fully verified.
+    """
+    call_id = uuid4()
+    answers = [
+        _Answer(
+            _GATE,
+            "Yes",
+            source=AnswerSource.AI_CALL.value,
+            call_id=call_id,
+            confidence=95,
+            supported=True,
+            eval_confidence=95,
+        )
+    ]
+
+    honest = await _fraction(VALUE_GATED_V2, answers=answers)
+    assert honest == 0.5  # gate confirmed, gated leaf owed
+
+    stale = await _fraction(VALUE_GATED_V2, answers=answers, values={})
+    assert stale == 1.0  # gated leaf never counted
