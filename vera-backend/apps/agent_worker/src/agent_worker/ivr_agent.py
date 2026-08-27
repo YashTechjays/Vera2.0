@@ -56,11 +56,12 @@ _BRACKET_TOKEN_RE = re.compile(r"\[\[.*?\]\]|\{\{.*?\}\}|<[^>]*>|\[[^\]]*\]|\{[^
 # The bare control label the model emits without its brackets — word-boundaried so it strips only
 # the standalone label, never a word that merely contains it (e.g. "SILENCE_TOKENS").
 _CONTROL_LABEL_RE = re.compile(r"\bSILENCE_TOKEN\b\s*:?", re.IGNORECASE)
-# A programmer-style key:value annotation, with or without a space after the colon. The key must
-# be code-shaped — snake_case (underscore) or camelCase (a lower-then-upper hump) — which speech is
-# not, so "3:15", "80:20" and title-case "Provider:" stay untouched. Leading whitespace is consumed
-# so no double space is left behind; [ ]* stays within the line (never eats across a newline).
-_META_KV_RE = re.compile(r"\s*\b(?P<key>\w*(?:_\w|[a-z][A-Z])\w*):[ ]*\S+")
+# A programmer-style annotation, either key:value (with or without a space) or the key="value"
+# attribute form the <config> block uses. The key must be code-shaped — snake_case (underscore) or
+# camelCase (a lower-then-upper hump) — which speech is not, so "3:15", "80:20" and title-case
+# "Provider:" stay untouched. Leading whitespace is consumed so no double space is left behind;
+# [ ]* stays within the line (never eats across a newline).
+_META_KV_RE = re.compile(r'\s*\b(?P<key>\w*(?:_\w|[a-z][A-Z])\w*)(?::[ ]*\S+|="[^"]*")')
 
 
 def _strip_nonspeech_tokens(text: str) -> str:

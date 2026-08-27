@@ -17,6 +17,7 @@ from livekit.agents.utils import is_given
 
 from agent_worker.agent import VeraAgent, VoiceLabAgent, build_agent
 from agent_worker.cartesia_workaround import SPELL_LEAD_IN, guard_utterance_initial_spell
+from agent_worker.cascade import cascade_session_kwargs
 from agent_worker.handoff import carry_chat_ctx, carry_items, own_items
 from agent_worker.intervention import TakeoverState
 from agent_worker.ivr_agent import (
@@ -289,19 +290,37 @@ async def test_under_the_turn_cap_does_not_end_the_call() -> None:
     mock_session.shutdown.assert_not_called()
 
 
-def test_ivr_turn_handling_is_patient() -> None:
-    # The IVR phase uses vad end-of-turn + a moderately patient delay; barge-in stays on (so real
-    # IVR prompts still interrupt) but preemptive is off + min_words raised to stop the SIP
-    # self-echo from clipping the start of answers.
+def test_ivr_turn_handling_is_tuned_for_a_machine() -> None:
     th = ivr_turn_handling()
     assert th["turn_detection"] == "vad"  # not the human-trained EnglishModel
-    # patient, but not so long that answers land on the next prompt (key tunable)
-    assert 0.6 <= th["endpointing"]["min_delay"] <= 1.5
+    endpointing = th["endpointing"]
+    # Both ends are observed on live UHC calls, not invented: at 0.8 answers landed after the
+    # IVR's recognition window closed, at 0.2 the navigator answered into a mid-prompt pause.
+    assert 0.25 <= endpointing["min_delay"] < 0.8
+    assert endpointing["min_delay"] < endpointing["max_delay"]
     # preemptive OFF: keeps a tiny output buffer so a false-interruption pause can't discard the
     # start of the utterance (self-echo clip: "Medical" → "dical").
     assert th["preemptive_generation"]["enabled"] is False
     assert th["interruption"]["enabled"] is True  # real IVR prompts still supersede a stale answer
     assert th["interruption"]["min_words"] >= 2  # short self-echo transcripts don't trip the pause
+
+
+def test_ivr_endpointing_comes_from_settings_not_a_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sentinels no hardcoded literal would produce: retuning VERA_IVR_ENDPOINTING_* must land here.
+    stub = SimpleNamespace(ivr_endpointing_min_delay=0.37, ivr_endpointing_max_delay=0.94)
+    monkeypatch.setattr("agent_worker.ivr_agent.get_settings", lambda: stub)
+    assert ivr_turn_handling()["endpointing"] == {"min_delay": 0.37, "max_delay": 0.94}
+
+
+def test_ivr_endpointing_waits_longer_than_the_human_cascade_at_the_top_end() -> None:
+    # An IVR pauses mid-readout far longer than a person does, so max_delay must exceed the human
+    # session's. min_delay carries no such relationship: it is bounded by the observed live-call
+    # failures above, and an earlier version of this test pinned it under the human min, which
+    # rationalised the then-current 0.2 instead of encoding a rule.
+    human = cascade_session_kwargs(None)["turn_handling"]["endpointing"]
+    assert ivr_turn_handling()["endpointing"]["max_delay"] > human["max_delay"]
 
 
 def test_ivr_navigator_wires_patient_turn_config_and_plan_agent_does_not() -> None:
@@ -468,6 +487,12 @@ def test_strip_nonspeech_tokens_removes_key_value_annotations() -> None:
     # The conventional "key: value" rendering (space after the colon) is the same leak.
     assert _strip_nonspeech_tokens("No, thank you global_timing: 13.251s") == "No, thank you"
     assert _strip_nonspeech_tokens("Medical turnCount: 4 done") == "Medical done"
+    # The key="value" attribute form the <config> block uses. A whole <config …/> tag was already
+    # caught by the angle-tag branch, but a bare attribute echoed on its own reached TTS verbatim
+    # — it has no delimiters to strip down to speakable text the way <key>value</key> does.
+    assert _strip_nonspeech_tokens('Provider rep_keyword="Representative"') == "Provider"
+    assert _strip_nonspeech_tokens('survey_answer="No" Medical') == " Medical"
+    assert _strip_nonspeech_tokens('<config rep_keyword="Representative"/>') == ""
 
 
 def test_strip_nonspeech_tokens_removes_brackets_tags_and_labels() -> None:
@@ -482,7 +507,13 @@ def test_strip_nonspeech_tokens_removes_brackets_tags_and_labels() -> None:
 def test_strip_nonspeech_tokens_leaves_real_speech_untouched() -> None:
     # A spoken time, ratio, phonetic spelling, or plain menu answer is NOT code-shaped, so the
     # sanitizer never touches it — over-stripping a menu response is its own failure on a payer IVR.
-    for spoken in ("call back at 3:15", "the ratio is 80:20", "T as in Tango", "Plan details"):
+    for spoken in (
+        "call back at 3:15",
+        "the ratio is 80:20",
+        "T as in Tango",
+        "Plan details",
+        'the answer is "yes"',  # quoted speech with no code-shaped key
+    ):
         assert _strip_nonspeech_tokens(spoken) == spoken
 
 
@@ -656,7 +687,7 @@ def test_build_agent_playbook_specializes_but_never_selects() -> None:
         controller=controller,
     )
     assert isinstance(nav, IvrNavigatorAgent)
-    assert "<provider_subflows>Press 3</provider_subflows>" in nav.instructions
+    assert 'provider_subflows="Press 3"' in nav.instructions
     # The flag is the sole selector: a playbook without it — even with the flag explicitly
     # false — never overrides the opt-out into a silent-on-connect navigator.
     for meta in (
