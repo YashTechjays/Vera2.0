@@ -52,7 +52,6 @@ from vera_core.forms.intake import (
 from vera_core.forms.review import (
     FieldStatus,
     focus_paths,
-    has_call_reference,
     satisfied_required_fraction,
 )
 from vera_core.models import (
@@ -264,7 +263,10 @@ def _report(
         values=values,
         authoritative_calls=authoritative,
     )
-    print(f"  focus gate (reference captured) : {has_call_reference(status_by_path, doc)}")
+    # The dispatcher's gate is exactly "some call captured a reference", i.e. a non-empty
+    # authoritative set — never the CURRENT answer at the reference path, which a reviewer's
+    # edit supersedes with a human row.
+    print(f"  focus gate (a call captured one) : {bool(authoritative)}")
     print(f"  authoritative calls on file      : {len(authoritative)}")
     print(f"  focused ask set (focus_paths)    : {len(focus)}")
     sections = sorted({path.split(".")[1] for path in focus})
