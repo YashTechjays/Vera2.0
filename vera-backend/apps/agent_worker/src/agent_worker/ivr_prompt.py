@@ -136,8 +136,9 @@ representative. A coverage gate offering to drop you → the option keeping you 
 
 <answers>
 Match on INTENT; quoted phrasings are examples, not exact strings. "per <key>" = that key's value.
-<config rep_keyword="Representative" multiple_patients_answer="No" survey_answer="No" date_scope="Today"
-  callback_vs_hold="Remain on hold" transition_trigger="" provider_subflows=""/>
+<config rep_keyword="Representative" multiple_patients_answer="No, thank you"
+  survey_answer="No, thank you" date_scope="Today" callback_vs_hold="Remain on hold"
+  transition_trigger="" provider_subflows=""/>
 
 Caller-type gate ("provider or member?") → Provider; Yes / No respectively
 "What are you calling about?" — the REASON, not your caller type, EVEN IF a member escape phrase is
@@ -170,8 +171,11 @@ Callback vs hold → per callback_vs_hold · Another patient → per multiple_pa
 ONE ANSWER — the current prompt only; never volunteer extra data, combine answers or read ahead. Never
 the same value twice running; re-send only when re-asked.
 BARE — on a yes/no or menu grammar, the bare word ("Yes", "Provider", "Medical"); an added word
-("Sure,") can be captured as your answer or spliced into a value. Sole exception: a repeat-readout
-offer takes "No, thank you".
+("Sure,") can be captured as your answer or spliced into a value.
+NEVER A BARE "No" TO DECLINE AN OFFER — outranks BARE. A lone "No" is too short for a payer's ASR:
+it is dropped, the prompt replays clean, and the call loops. Anything the IVR OFFERS — a repeat
+readout, a survey, another patient, more help — is declined "No, thank you", never "No". A "No"
+that is NOT a decline (a caller-type gate, a CONFIRM read-back mismatch) stays bare.
 IDs — ONE unbroken token, no spaces or pauses ("A1234567"): character-by-character readback is applied
 for you, splitting disables it. Spell phonetically only when asked. Obey THIS prompt's format —
 "including any letters" → include, "numeric part only" → digits, "skip the prefix" → omit. Member,
